@@ -74,8 +74,6 @@ pub struct ExecutionConfig {
     pub auto_compact: bool,
     /// Context usage threshold for compaction (0.0-1.0)
     pub compact_threshold: f32,
-    /// Messages to preserve during compaction
-    pub compact_keep_messages: usize,
 }
 
 impl Default for ExecutionConfig {
@@ -86,7 +84,6 @@ impl Default for ExecutionConfig {
             chunk_timeout: Duration::from_secs(60),
             auto_compact: true,
             compact_threshold: crate::session::compact::DEFAULT_COMPACT_THRESHOLD,
-            compact_keep_messages: 4,
         }
     }
 }
@@ -119,11 +116,6 @@ impl ExecutionConfig {
 
     pub fn compact_threshold(mut self, threshold: f32) -> Self {
         self.compact_threshold = threshold.clamp(0.0, 1.0);
-        self
-    }
-
-    pub fn compact_keep_messages(mut self, count: usize) -> Self {
-        self.compact_keep_messages = count;
         self
     }
 }
@@ -272,24 +264,49 @@ impl PromptConfig {
 pub enum CacheStrategy {
     /// No caching - all content sent without cache_control
     Disabled,
-    /// Cache system prompt only (static content with long TTL)
-    SystemOnly,
-    /// Cache messages only (last user turn with short TTL)
-    MessagesOnly,
-    /// Cache both system and messages (recommended)
+    /// Cache static context only (system prompt, CLAUDE.md, rules, skills)
+    StaticOnly,
+    /// Cache tool metadata segment only
+    ToolsOnly,
+    /// Cache static context and tool metadata segments
+    StaticAndTools,
+    /// Cache conversation history only
+    ConversationOnly,
+    /// Cache static context and conversation history
+    StaticAndConversation,
+    /// Cache tool metadata and conversation history
+    ToolsAndConversation,
+    /// Cache static context, tool metadata, and conversation history
     #[default]
     Full,
 }
 
 impl CacheStrategy {
-    /// Returns true if system prompt caching is enabled
-    pub fn cache_system(&self) -> bool {
-        matches!(self, Self::SystemOnly | Self::Full)
+    /// Returns true if static-context caching is enabled.
+    pub fn cache_static(&self) -> bool {
+        matches!(
+            self,
+            Self::StaticOnly | Self::StaticAndTools | Self::StaticAndConversation | Self::Full
+        )
     }
 
-    /// Returns true if message caching is enabled
-    pub fn cache_messages(&self) -> bool {
-        matches!(self, Self::MessagesOnly | Self::Full)
+    /// Returns true if tool-metadata caching is enabled.
+    pub fn cache_tools(&self) -> bool {
+        matches!(
+            self,
+            Self::ToolsOnly | Self::StaticAndTools | Self::ToolsAndConversation | Self::Full
+        )
+    }
+
+    /// Returns true if conversation-history caching is enabled.
+    pub fn cache_conversation(&self) -> bool {
+        matches!(
+            self,
+            Self::ConversationOnly
+                | Self::StaticAndConversation
+                | Self::ToolsAndConversation
+                | Self::Full
+        )
     }
 
     /// Returns true if any caching is enabled
@@ -333,18 +350,50 @@ impl CacheConfig {
         }
     }
 
-    /// Create a system-only cache configuration
-    pub fn system_only() -> Self {
+    /// Create a static-context-only cache configuration.
+    pub fn static_only() -> Self {
         Self {
-            strategy: CacheStrategy::SystemOnly,
+            strategy: CacheStrategy::StaticOnly,
             ..Default::default()
         }
     }
 
-    /// Create a messages-only cache configuration
-    pub fn messages_only() -> Self {
+    /// Create a tool-metadata-only cache configuration.
+    pub fn tools_only() -> Self {
         Self {
-            strategy: CacheStrategy::MessagesOnly,
+            strategy: CacheStrategy::ToolsOnly,
+            ..Default::default()
+        }
+    }
+
+    /// Create a static-context-plus-tools cache configuration.
+    pub fn static_and_tools() -> Self {
+        Self {
+            strategy: CacheStrategy::StaticAndTools,
+            ..Default::default()
+        }
+    }
+
+    /// Create a conversation-only cache configuration.
+    pub fn conversation_only() -> Self {
+        Self {
+            strategy: CacheStrategy::ConversationOnly,
+            ..Default::default()
+        }
+    }
+
+    /// Create a static-context-plus-conversation cache configuration.
+    pub fn static_and_conversation() -> Self {
+        Self {
+            strategy: CacheStrategy::StaticAndConversation,
+            ..Default::default()
+        }
+    }
+
+    /// Create a tools-plus-conversation cache configuration.
+    pub fn tools_and_conversation() -> Self {
+        Self {
+            strategy: CacheStrategy::ToolsAndConversation,
             ..Default::default()
         }
     }
@@ -367,12 +416,12 @@ impl CacheConfig {
         self
     }
 
-    /// Get message TTL if message caching is enabled, None otherwise.
+    /// Get conversation TTL if conversation caching is enabled, None otherwise.
     ///
-    /// This is a convenience method to avoid duplicating the cache_messages() check
+    /// This is a convenience method to avoid duplicating the cache_conversation() check
     /// at every call site.
-    pub fn message_ttl_option(&self) -> Option<crate::types::CacheTtl> {
-        if self.strategy.cache_messages() {
+    pub fn conversation_ttl_option(&self) -> Option<crate::types::CacheTtl> {
+        if self.strategy.cache_conversation() {
             Some(self.message_ttl)
         } else {
             None
@@ -547,34 +596,62 @@ mod tests {
         let config = CacheConfig::disabled();
         assert_eq!(config.strategy, CacheStrategy::Disabled);
         assert!(!config.strategy.is_enabled());
-        assert!(!config.strategy.cache_system());
-        assert!(!config.strategy.cache_messages());
+        assert!(!config.strategy.cache_static());
+        assert!(!config.strategy.cache_tools());
+        assert!(!config.strategy.cache_conversation());
     }
 
     #[test]
-    fn test_cache_strategy_system_only() {
-        let config = CacheConfig::system_only();
-        assert_eq!(config.strategy, CacheStrategy::SystemOnly);
+    fn test_cache_strategy_static_only() {
+        let config = CacheConfig::static_only();
+        assert_eq!(config.strategy, CacheStrategy::StaticOnly);
         assert!(config.strategy.is_enabled());
-        assert!(config.strategy.cache_system());
-        assert!(!config.strategy.cache_messages());
+        assert!(config.strategy.cache_static());
+        assert!(!config.strategy.cache_tools());
+        assert!(!config.strategy.cache_conversation());
     }
 
     #[test]
-    fn test_cache_strategy_messages_only() {
-        let config = CacheConfig::messages_only();
-        assert_eq!(config.strategy, CacheStrategy::MessagesOnly);
+    fn test_cache_strategy_conversation_only() {
+        let config = CacheConfig::conversation_only();
+        assert_eq!(config.strategy, CacheStrategy::ConversationOnly);
         assert!(config.strategy.is_enabled());
-        assert!(!config.strategy.cache_system());
-        assert!(config.strategy.cache_messages());
+        assert!(!config.strategy.cache_static());
+        assert!(!config.strategy.cache_tools());
+        assert!(config.strategy.cache_conversation());
+    }
+
+    #[test]
+    fn test_cache_strategy_static_and_tools() {
+        let config = CacheConfig::static_and_tools();
+        assert!(config.strategy.cache_static());
+        assert!(config.strategy.cache_tools());
+        assert!(!config.strategy.cache_conversation());
+    }
+
+    #[test]
+    fn test_cache_strategy_static_and_conversation() {
+        let config = CacheConfig::static_and_conversation();
+        assert!(config.strategy.cache_static());
+        assert!(!config.strategy.cache_tools());
+        assert!(config.strategy.cache_conversation());
+    }
+
+    #[test]
+    fn test_cache_strategy_tools_and_conversation() {
+        let config = CacheConfig::tools_and_conversation();
+        assert!(!config.strategy.cache_static());
+        assert!(config.strategy.cache_tools());
+        assert!(config.strategy.cache_conversation());
     }
 
     #[test]
     fn test_cache_strategy_full() {
         let config = CacheConfig::default();
         assert!(config.strategy.is_enabled());
-        assert!(config.strategy.cache_system());
-        assert!(config.strategy.cache_messages());
+        assert!(config.strategy.cache_static());
+        assert!(config.strategy.cache_tools());
+        assert!(config.strategy.cache_conversation());
     }
 
     #[test]

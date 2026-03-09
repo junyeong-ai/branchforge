@@ -160,7 +160,12 @@ impl Agent {
         let mut total_usage = Usage::default();
 
         let mut request_builder = {
-            let builder = RequestBuilder::new(&self.config, Arc::clone(&self.tools));
+            let static_context = match &self.orchestrator {
+                Some(orchestrator) => orchestrator.read().await.static_context().clone(),
+                None => crate::context::StaticContext::new(),
+            };
+            let builder =
+                RequestBuilder::new(&self.config, Arc::clone(&self.tools), static_context);
 
             if let Some(ref tsm) = self.tool_search_manager {
                 let prepared = tsm.prepare_tools().await;
@@ -207,7 +212,7 @@ impl Agent {
             let messages = self
                 .state
                 .with_session(|session| {
-                    session.to_api_messages_with_cache(self.config.cache.message_ttl_option())
+                    session.to_api_messages_with_cache(self.config.cache.conversation_ttl_option())
                 })
                 .await;
 

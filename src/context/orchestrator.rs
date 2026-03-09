@@ -177,14 +177,14 @@ impl PromptOrchestrator {
     pub fn find_skills_by_triggers(&self, input: &str) -> Vec<&SkillIndex> {
         self.skill_registry
             .iter()
-            .filter(|s| s.matches_triggers(input))
+            .filter(|s| !s.disable_model_invocation && s.matches_triggers(input))
             .collect()
     }
 
     pub fn find_skill_by_command(&self, input: &str) -> Option<&SkillIndex> {
         self.skill_registry
             .iter()
-            .find(|s| s.matches_command(input))
+            .find(|s| !s.disable_model_invocation && s.matches_command(input))
     }
 
     pub fn build_skill_summary(&self) -> String {

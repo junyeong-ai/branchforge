@@ -340,14 +340,6 @@ impl AgentBuilder {
         self
     }
 
-    /// Sets the number of messages to preserve during compaction.
-    ///
-    /// Default: `4`
-    pub fn compact_keep_messages(mut self, count: usize) -> Self {
-        self.config.execution.compact_keep_messages = count;
-        self
-    }
-
     // =========================================================================
     // Caching
     // =========================================================================
@@ -355,9 +347,10 @@ impl AgentBuilder {
     /// Configures prompt caching strategy.
     ///
     /// # Options
-    /// - `CacheConfig::default()` - Full caching (system + messages)
-    /// - `CacheConfig::system_only()` - System prompt only (1h TTL)
-    /// - `CacheConfig::messages_only()` - Messages only (5m TTL)
+    /// - `CacheConfig::default()` - Static, tools, and conversation
+    /// - `CacheConfig::static_only()` - Static context only (1h TTL)
+    /// - `CacheConfig::tools_only()` - Tool metadata only (1h TTL)
+    /// - `CacheConfig::conversation_only()` - Conversation only (5m TTL)
     /// - `CacheConfig::disabled()` - No caching
     pub fn cache(mut self, config: CacheConfig) -> Self {
         self.config.cache = config;

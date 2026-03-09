@@ -47,6 +47,11 @@ impl Agent {
                 .await
                 .map_err(|e| crate::Error::Session(format!("Queue full: {}", e)))?;
         }
+        let static_context = match &self.orchestrator {
+            Some(orchestrator) => orchestrator.read().await.static_context().clone(),
+            None => crate::context::StaticContext::new(),
+        };
+
         let state = StreamState::new(
             StreamStateConfig {
                 tool_state: self.state.clone(),
@@ -55,7 +60,11 @@ impl Agent {
                 tools: Arc::clone(&self.tools),
                 hooks: Arc::clone(&self.hooks),
                 hook_context: self.hook_context(),
-                request_builder: RequestBuilder::new(&self.config, Arc::clone(&self.tools)),
+                request_builder: RequestBuilder::new(
+                    &self.config,
+                    Arc::clone(&self.tools),
+                    static_context,
+                ),
                 orchestrator: self.orchestrator.clone(),
                 session_id: Arc::clone(&self.session_id),
                 budget_tracker: Arc::clone(&self.budget_tracker),
@@ -334,7 +343,7 @@ impl StreamState {
             .cfg
             .tool_state
             .with_session(|session| {
-                session.to_api_messages_with_cache(self.cfg.config.cache.message_ttl_option())
+                session.to_api_messages_with_cache(self.cfg.config.cache.conversation_ttl_option())
             })
             .await;
 

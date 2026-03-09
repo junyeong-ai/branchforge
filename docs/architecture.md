@@ -21,6 +21,16 @@
 - Persistence backends rebuild projections from graph state.
 - Provider-specific behavior stays inside client adapter layers.
 
+## Prompt Cache Segments
+
+The runtime treats prompt caching as three segments:
+
+- static context: system prompt, `CLAUDE.md`, skill summaries, rule summaries
+- tool metadata: built-in tool summaries, MCP tool metadata, server-tool summaries
+- conversation history: active message projection with a cache breakpoint on the latest user turn
+
+This keeps graph history and prompt caching aligned without making tool execution semantics part of static context.
+
 ## Request Path
 
 1. `Agent` builds runtime state and prompt inputs.

@@ -352,10 +352,9 @@ impl ToolState {
     pub async fn compact(
         &self,
         client: &crate::Client,
-        keep_messages: usize,
     ) -> crate::Result<crate::types::CompactResult> {
         let mut session = self.0.session.write().await;
-        session.compact(client, keep_messages).await
+        session.compact(client).await
     }
 }
 

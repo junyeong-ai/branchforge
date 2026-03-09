@@ -146,21 +146,11 @@ impl SessionManager {
         ))
     }
 
-    pub async fn resume_prompt_with_replay(
-        &self,
-        id: &SessionId,
-        from_node: Option<crate::graph::NodeId>,
-        prompt: &str,
-    ) -> SessionResult<Option<(crate::graph::ReplayInput, String)>> {
-        let replay = self.replay_input(id, from_node).await?;
-        Ok(replay.map(|replay| (replay, prompt.to_string())))
-    }
-
     pub async fn export_branch_json(&self, id: &SessionId) -> SessionResult<Option<String>> {
         let export = self.export_branch(id).await?;
         export
             .as_ref()
-            .map(crate::session::branch_export_to_json)
+            .map(crate::session::SessionExporter::branch_to_json)
             .transpose()
             .map_err(|e| SessionError::Storage {
                 message: e.to_string(),
@@ -169,7 +159,9 @@ impl SessionManager {
 
     pub async fn export_branch_html(&self, id: &SessionId) -> SessionResult<Option<String>> {
         let export = self.export_branch(id).await?;
-        Ok(export.as_ref().map(crate::session::branch_export_to_html))
+        Ok(export
+            .as_ref()
+            .map(crate::session::SessionExporter::branch_to_html))
     }
 
     pub async fn bookmark_current_head(

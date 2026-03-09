@@ -11,13 +11,14 @@ pub mod persistence_postgres;
 #[cfg(feature = "redis-backend")]
 pub mod persistence_redis;
 pub mod queue;
+mod replay;
 pub mod session_state;
 pub mod state;
 pub mod types;
 
 pub use crate::types::TokenUsage;
 pub use compact::{CompactExecutor, CompactStrategy, DEFAULT_COMPACT_THRESHOLD};
-pub use export::{branch_export_to_html, branch_export_to_json};
+pub use export::SessionExporter;
 pub use manager::SessionManager;
 pub use persistence::{MemoryPersistence, Persistence, PersistenceFactory};
 #[cfg(feature = "jsonl")]
@@ -31,6 +32,7 @@ pub use persistence_postgres::{
 #[cfg(feature = "redis-backend")]
 pub use persistence_redis::{RedisConfig, RedisPersistence};
 pub use queue::{InputQueue, MergedInput, QueueError, QueuedInput, SharedInputQueue};
+pub use replay::ReplayService;
 pub use session_state::{ExecutionGuard, ToolState};
 pub use state::{
     MessageId, MessageMetadata, Session, SessionConfig, SessionId, SessionMessage,

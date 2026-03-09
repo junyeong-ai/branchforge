@@ -174,7 +174,7 @@ impl Session {
     }
 
     pub fn export_current_branch(&self) -> Option<crate::graph::BranchExport> {
-        self.graph.export_branch(self.graph.primary_branch)
+        crate::session::SessionExporter::export_branch(&self.graph, self.graph.primary_branch)
     }
 
     pub fn bookmark_current_head(
@@ -190,8 +190,7 @@ impl Session {
         &self,
         from_node: Option<crate::graph::NodeId>,
     ) -> crate::graph::ReplayInput {
-        self.graph
-            .replay_input(self.graph.primary_branch, from_node)
+        crate::session::ReplayService::replay_input(&self.graph, from_node)
     }
 
     fn record_message_in_graph(&mut self, message: &SessionMessage) {
@@ -391,8 +390,8 @@ impl Session {
         self.add_message(msg);
     }
 
-    pub fn should_compact(&self, max_tokens: u64, threshold: f32, keep_messages: usize) -> bool {
-        self.current_branch_messages().len() > keep_messages
+    pub fn should_compact(&self, max_tokens: u64, threshold: f32) -> bool {
+        !self.current_branch_messages().is_empty()
             && self.current_input_tokens as f32 > max_tokens as f32 * threshold
     }
 
@@ -404,104 +403,15 @@ impl Session {
     pub async fn compact(
         &mut self,
         client: &crate::Client,
-        keep_messages: usize,
     ) -> crate::Result<crate::types::CompactResult> {
-        use crate::client::ModelType;
-        use crate::client::messages::CreateMessageRequest;
-        use crate::types::CompactResult;
-
-        let branch_messages = self.current_branch_messages();
-        if branch_messages.len() <= keep_messages {
-            return Ok(CompactResult::NotNeeded);
-        }
-
-        let tokens_before = self.current_input_tokens;
-        let original_count = branch_messages.len();
-        let split_point = original_count - keep_messages;
-        let to_summarize: Vec<_> = branch_messages[..split_point].to_vec();
-        let to_keep: Vec<_> = branch_messages[split_point..].to_vec();
-
-        let summary_prompt = Self::format_for_summary(&to_summarize);
-        let model = client.adapter().model(ModelType::Small).to_string();
-        let request = CreateMessageRequest::new(&model, vec![Message::user(&summary_prompt)])
-            .max_tokens(2000);
-        let response = client.send(request).await?;
-        let summary = response.text();
-
-        // Build new message list before modifying self (swap pattern for data safety)
-        let mut new_messages = Vec::with_capacity(1 + to_keep.len());
-        let summary_msg = SessionMessage::user(vec![ContentBlock::text(format!(
-            "[Previous conversation summary]\n{}",
-            summary
-        ))])
-        .as_compact_summary();
-        new_messages.push(summary_msg);
-
-        let mut new_leaf_id = Some(new_messages[0].id.clone());
-        for mut msg in to_keep {
-            msg.parent_id = new_leaf_id.clone();
-            new_leaf_id = Some(msg.id.clone());
-            new_messages.push(msg);
-        }
-
-        // Atomic swap: replace old state only after new state is fully constructed
-        self.messages = new_messages;
-        self.current_leaf_id = new_leaf_id;
-        // Reset to 0: actual value will be set by next API call's update_usage().
-        // This also prevents immediate re-compaction since should_compact() returns false when 0.
-        self.current_input_tokens = 0;
-        self.summary = Some(summary.clone());
-        self.updated_at = Utc::now();
-
-        let record = CompactRecord::new(self.id)
-            .counts(original_count, self.messages.len())
-            .summary(summary.clone())
-            .saved_tokens(tokens_before as usize);
-        self.record_compact(record);
-
-        Ok(CompactResult::Compacted {
-            original_count,
-            new_count: self.messages.len(),
-            saved_tokens: tokens_before as usize,
-            summary,
-        })
-    }
-
-    fn format_for_summary(messages: &[SessionMessage]) -> String {
-        let estimated_capacity = messages.len() * 500 + 200;
-        let mut formatted = String::with_capacity(estimated_capacity.min(32768));
-        formatted.push_str(
-            "Summarize this conversation concisely. \
-             Preserve key decisions, code changes, file paths, and important context:\n\n",
+        let executor = crate::session::compact::CompactExecutor::new(
+            crate::session::compact::CompactStrategy::default(),
         );
-
-        for msg in messages {
-            let role = match msg.role {
-                Role::User => "User",
-                Role::Assistant => "Assistant",
-            };
-            formatted.push_str(role);
-            formatted.push_str(":\n");
-
-            for block in &msg.content {
-                if let Some(text) = block.as_text() {
-                    if text.len() > 800 {
-                        let mut end = 800;
-                        while !text.is_char_boundary(end) {
-                            end -= 1;
-                        }
-                        formatted.push_str(&text[..end]);
-                        formatted.push_str("... [truncated]\n");
-                    } else {
-                        formatted.push_str(text);
-                        formatted.push('\n');
-                    }
-                }
-            }
-            formatted.push('\n');
+        let result = executor.execute(self, client).await?;
+        if matches!(result, crate::types::CompactResult::Compacted { .. }) {
+            self.current_input_tokens = 0;
         }
-
-        formatted
+        Ok(result)
     }
 
     pub fn clear_messages(&mut self) {

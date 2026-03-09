@@ -31,7 +31,10 @@ Compaction preserves graph history.
 
 - A summary node is appended to the graph.
 - A compaction checkpoint is recorded.
-- The compatibility message projection may be reduced for downstream message-based flows.
+- The active message projection is reduced to a summary-first view for downstream message-based flows.
+- Full branch history remains available for replay, export, bookmarks, checkpoints, and future graph queries.
+
+Compaction does not depend on preserving a fixed number of recent raw turns. Instead, the runtime summarizes the active branch and keeps graph history authoritative.
 
 ## Programmatic Use
 

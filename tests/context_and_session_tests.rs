@@ -427,10 +427,12 @@ mod settings_tests {
             settings.env.get("TEST_VAR"),
             Some(&"test_value".to_string())
         );
-        assert!(settings
-            .permissions
-            .deny
-            .contains(&"Read(./.env)".to_string()));
+        assert!(
+            settings
+                .permissions
+                .deny
+                .contains(&"Read(./.env)".to_string())
+        );
     }
 
     #[tokio::test]

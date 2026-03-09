@@ -59,36 +59,61 @@ impl StaticContext {
         self
     }
 
-    /// Convert static context to system blocks with 1-hour TTL caching.
+    /// Convert static context to system blocks.
     ///
-    /// Per Anthropic best practices:
-    /// - Static content uses longer TTL (1 hour)
-    /// - Long TTL content must come before short TTL content
-    pub fn to_system_blocks(&self) -> Vec<SystemBlock> {
+    /// Static blocks are cached only when the caller enables static-context caching.
+    pub fn to_system_blocks(&self, cache_static: bool, ttl: CacheTtl) -> Vec<SystemBlock> {
         let mut blocks = Vec::new();
-        let ttl = CacheTtl::OneHour;
 
         if !self.system_prompt.is_empty() {
-            blocks.push(SystemBlock::cached_with_ttl(&self.system_prompt, ttl));
+            blocks.push(self.make_block(&self.system_prompt, cache_static, ttl));
         }
 
         if !self.claude_md.is_empty() {
-            blocks.push(SystemBlock::cached_with_ttl(&self.claude_md, ttl));
+            blocks.push(self.make_block(&self.claude_md, cache_static, ttl));
         }
 
         if !self.skill_summary.is_empty() {
-            blocks.push(SystemBlock::cached_with_ttl(&self.skill_summary, ttl));
+            blocks.push(self.make_block(&self.skill_summary, cache_static, ttl));
         }
 
         if !self.rules_summary.is_empty() {
-            blocks.push(SystemBlock::cached_with_ttl(&self.rules_summary, ttl));
-        }
-
-        if !self.mcp_tool_metadata.is_empty() {
-            blocks.push(SystemBlock::cached_with_ttl(self.build_mcp_summary(), ttl));
+            blocks.push(self.make_block(&self.rules_summary, cache_static, ttl));
         }
 
         blocks
+    }
+
+    pub fn tool_summary(&self) -> Option<String> {
+        let mut lines = Vec::new();
+
+        if !self.tool_definitions.is_empty() {
+            lines.push("# Built-in Tools".to_string());
+            for tool in &self.tool_definitions {
+                lines.push(format!("- {}: {}", tool.name, tool.description));
+            }
+        }
+
+        if !self.mcp_tool_metadata.is_empty() {
+            if !lines.is_empty() {
+                lines.push(String::new());
+            }
+            lines.push(self.build_mcp_summary());
+        }
+
+        if lines.is_empty() {
+            None
+        } else {
+            Some(lines.join("\n"))
+        }
+    }
+
+    fn make_block(&self, text: &str, cached: bool, ttl: CacheTtl) -> SystemBlock {
+        if cached {
+            SystemBlock::cached_with_ttl(text, ttl)
+        } else {
+            SystemBlock::uncached(text)
+        }
     }
 
     fn build_mcp_summary(&self) -> String {
@@ -115,6 +140,8 @@ impl StaticContext {
 
         for tool in &self.tool_definitions {
             tool.name.hash(&mut hasher);
+            tool.description.hash(&mut hasher);
+            tool.input_schema.to_string().hash(&mut hasher);
         }
 
         for mcp in &self.mcp_tool_metadata {
@@ -161,7 +188,7 @@ mod tests {
             .system_prompt("You are a helpful assistant")
             .claude_md("# Project\nThis is a Rust project");
 
-        let blocks = static_context.to_system_blocks();
+        let blocks = static_context.to_system_blocks(true, CacheTtl::OneHour);
         assert_eq!(blocks.len(), 2);
         assert!(blocks[0].text.contains("helpful assistant"));
         assert!(blocks[1].text.contains("Rust project"));

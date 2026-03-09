@@ -218,12 +218,7 @@ pub(crate) async fn handle_compaction(
 ) {
     let should_compact = tool_state
         .with_session(|session| {
-            config.auto_compact
-                && session.should_compact(
-                    max_tokens,
-                    config.compact_threshold,
-                    config.compact_keep_messages,
-                )
+            config.auto_compact && session.should_compact(max_tokens, config.compact_threshold)
         })
         .await;
 
@@ -240,9 +235,7 @@ pub(crate) async fn handle_compaction(
     }
 
     debug!("Compacting session context");
-    let compact_result = tool_state
-        .compact(client, config.compact_keep_messages)
-        .await;
+    let compact_result = tool_state.compact(client).await;
 
     match compact_result {
         Ok(CompactResult::Compacted { saved_tokens, .. }) => {

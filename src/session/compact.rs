@@ -9,7 +9,7 @@ use super::state::{Session, SessionMessage};
 use super::types::CompactRecord;
 use super::{SessionError, SessionResult};
 use crate::client::DEFAULT_SMALL_MODEL;
-use crate::types::{CompactResult, ContentBlock, Role};
+use crate::types::{CompactResult, ContentBlock, Message, Role};
 
 /// Context usage threshold for triggering compaction (80%).
 pub const DEFAULT_COMPACT_THRESHOLD: f32 = 0.8;
@@ -144,6 +144,29 @@ impl CompactExecutor {
             summary_prompt,
             message_count: messages.len(),
         })
+    }
+
+    pub async fn execute(
+        &self,
+        session: &mut Session,
+        client: &crate::Client,
+    ) -> crate::Result<CompactResult> {
+        use crate::client::messages::CreateMessageRequest;
+
+        let prepared = self.prepare_compact(session)?;
+        let PreparedCompact::Ready { summary_prompt, .. } = prepared else {
+            return Ok(CompactResult::NotNeeded);
+        };
+
+        let request = CreateMessageRequest::new(
+            &self.strategy.summary_model,
+            vec![Message::user(&summary_prompt)],
+        )
+        .max_tokens(self.strategy.max_summary_tokens);
+        let response = client.send(request).await?;
+        let result = self.apply_compact(session, response.text());
+        self.record_compact(session, &result);
+        Ok(result)
     }
 
     pub fn apply_compact(&self, session: &mut Session, summary: String) -> CompactResult {

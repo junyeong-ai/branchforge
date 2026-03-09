@@ -57,6 +57,19 @@ impl AgentBuilder {
         if let Some(budget) = tenant_budget {
             agent = agent.tenant_budget(budget);
         }
+
+        if let Some(orchestrator) = agent.orchestrator() {
+            let static_hash = {
+                let context = orchestrator.read().await.static_context().clone();
+                context.tools(agent.tools().definitions()).content_hash()
+            };
+            agent
+                .state()
+                .with_session_mut(|session| {
+                    session.static_context_hash = Some(static_hash);
+                })
+                .await;
+        }
         if let Some(tsm) = self.tool_search_manager {
             agent = agent.tool_search_manager(tsm);
         }
@@ -302,10 +315,6 @@ impl AgentBuilder {
     async fn build_orchestrator(&mut self) -> PromptOrchestrator {
         let mut static_context = StaticContext::new();
 
-        if let Some(ref prompt) = self.config.prompt.system_prompt {
-            static_context = static_context.system_prompt(prompt.clone());
-        }
-
         let mut claude_md = String::new();
         let mut rule_indices = std::mem::take(&mut self.rule_indices);
 
@@ -325,10 +334,15 @@ impl AgentBuilder {
 
         if !skill_registry.is_empty() {
             let mut lines = vec!["# Available Skills".to_string()];
-            for skill in skill_registry.iter() {
+            for skill in skill_registry
+                .iter()
+                .filter(|skill| !skill.disable_model_invocation)
+            {
                 lines.push(skill.to_summary_line());
             }
-            static_context = static_context.skill_summary(lines.join("\n"));
+            if lines.len() > 1 {
+                static_context = static_context.skill_summary(lines.join("\n"));
+            }
         }
 
         let mut rule_registry: IndexRegistry<RuleIndex> = IndexRegistry::new();
