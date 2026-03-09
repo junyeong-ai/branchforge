@@ -1,269 +1,45 @@
-# Skills System
+# Skills
 
-Skills are specialized workflows that activate on-demand for context optimization.
+Skills are reusable workflow instructions loaded from project or user resources.
 
-> **Related**: [Subagents Guide](subagents.md) for independent agent execution with similar configuration options
+## Where Skills Come From
 
-## Overview
+- project-level `.claude/skills/`
+- user-level `~/.claude/skills/`
 
-```
-┌─────────────────────────────────────────────────────────┐
-│                    Skill Sources                         │
-├─────────────────────────────────────────────────────────┤
-│                                                          │
-│  ┌────────────┐ ┌────────────┐ ┌────────────┐           │
-│  │ Enterprise │ │    User    │ │  Project   │           │
-│  │ /Library/..│ │ ~/.claude/ │ │ .claude/   │           │
-│  │ skills/    │ │  skills/   │ │  skills/   │           │
-│  └─────┬──────┘ └─────┬──────┘ └─────┬──────┘           │
-│        │              │              │                   │
-│        └──────────────┼──────────────┘                   │
-│                       ▼                                  │
-│              ┌────────────────┐                          │
-│              │ SkillRegistry  │                          │
-│              └───────┬────────┘                          │
-│                      │                                   │
-│          ┌───────────┼───────────┐                       │
-│          ▼           ▼           ▼                       │
-│     Explicit    Trigger      Slash                       │
-│      Call       Match       Command                      │
-│                                                          │
-└─────────────────────────────────────────────────────────┘
-```
+## Supported Forms
 
-## Skill Definition
+- single markdown file
+- directory-based skill with `SKILL.md`
 
-### Programmatic
+## What Skills Can Define
 
-```rust
-use claude_agent::{SkillIndex, ContentSource};
+- name and description
+- tool restrictions
+- triggers
+- model override
+- optional command-style arguments
 
-let skill = SkillIndex::new("deploy", "Production deployment workflow")
-    .source(ContentSource::in_memory(r#"
-Deploy the application to $ARGUMENTS environment:
-1. Run tests
-2. Build artifacts
-3. Deploy to server
-4. Verify health checks
-    "#))
-    .triggers(["deploy", "release"])
-    .allowed_tools(["Bash", "Read"])
-    .model("claude-sonnet-4-5-20250929");
-```
-
-### File-based
-
-Create `.claude/skills/deploy.md`:
+## Example
 
 ```markdown
 ---
 name: deploy
-description: Production deployment workflow
+description: Deployment workflow
 allowed-tools:
   - Bash
   - Read
-model: claude-sonnet-4-5-20250929
 ---
 
-Deploy the application to $ARGUMENTS environment:
-1. Run tests
-2. Build artifacts
-3. Deploy to server
-4. Verify health checks
+Deploy to $ARGUMENTS.
 ```
 
-## Frontmatter Options
+## Related Concepts
 
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `name` | string | (required) | Skill identifier |
-| `description` | string | (required) | Brief description |
-| `allowed-tools` | array | `[]` | Tool restrictions |
-| `model` | string | — | Model override |
-| `triggers` | array | `[]` | Keywords for auto-activation |
-| `argument-hint` | string | — | Usage hint (e.g., `"[file or PR]"`) |
-| `disable-model-invocation` | bool | `false` | Prevent model from invoking this skill |
-| `user-invocable` | bool | `true` | Whether users can invoke via slash command |
-| `context` | string | — | Additional context identifier |
-| `agent` | string | — | Target agent for execution |
-| `hooks` | object | — | Lifecycle hooks (map of event → `HookRule[]`) |
+- skills provide reusable workflow context
+- subagents provide isolated execution contexts
 
-## File Patterns
+## Related Guides
 
-Skills can be defined as:
-- **File**: `.claude/skills/deploy.skill.md`
-- **Directory**: `.claude/skills/deploy/SKILL.md` (for skills with supporting files)
-
-## Activation Methods
-
-### 1. Explicit Invocation
-
-Use the Skill tool directly:
-
-```json
-{
-  "skill": "deploy",
-  "args": "production"
-}
-```
-
-### 2. Trigger-based
-
-Skills can auto-activate based on keywords:
-
-```rust
-let skill = SkillIndex::new("deploy", "Deploy")
-    .source(ContentSource::in_memory("..."))
-    .triggers(["deploy", "release", "ship"]);
-
-// "deploy to production" → activates deploy skill
-// "ship it" → also activates deploy skill
-```
-
-### 3. Slash Commands
-
-User-defined commands in `.claude/commands/`:
-
-```
-.claude/commands/
-├── deploy.md
-├── review.md
-└── db/
-    ├── migrate.md
-    └── seed.md
-```
-
-Command namespace: `db:migrate`, `db:seed`
-
-## Slash Command Format
-
-`.claude/commands/review.md`:
-
-```markdown
----
-description: Code review workflow
-allowed-tools:
-  - Read
-  - Grep
-  - Glob
-argument-hint: "[file or PR number]"
-model: claude-haiku-4-5-20251001
----
-
-Review the code in $ARGUMENTS:
-1. Check for bugs and security issues
-2. Verify code style
-3. Suggest improvements
-
-Use $1 for the first argument, $2 for second, etc.
-```
-
-## Variable Substitution
-
-| Variable | Description |
-|----------|-------------|
-| `$ARGUMENTS` | Full argument string |
-| `$1`, `$2`... | Positional arguments (up to $9) |
-
-### File References
-
-```markdown
-# Include another file
-@./guidelines.md
-@~/global-rules.md
-```
-
-### Bash Execution
-
-```markdown
-# Execute command and include output
-Current branch: !`git branch --show-current`
-```
-
-## Tool Restrictions
-
-Skills can limit available tools:
-
-```rust
-let skill = SkillIndex::new("reader", "Read-only")
-    .source(ContentSource::in_memory("..."))
-    .allowed_tools(["Read", "Glob", "Grep"]);
-
-// Only Read, Glob, Grep are available during this skill
-```
-
-Pattern-based restrictions:
-
-```rust
-.allowed_tools(["Bash(git:*)", "Read"])
-// Bash only for git commands, Read always allowed
-```
-
-## Model Override
-
-Skills can specify a different model:
-
-```rust
-// Use faster model for simple tasks
-let skill = SkillIndex::new("quick-check", "Fast check")
-    .source(ContentSource::in_memory("..."))
-    .model("claude-haiku-4-5-20251001");
-
-// Use stronger model for complex tasks
-let skill = SkillIndex::new("architect", "Design")
-    .source(ContentSource::in_memory("..."))
-    .model("claude-opus-4-6");
-```
-
-## Registration
-
-```rust
-let agent = Agent::builder()
-    .from_claude_code(path).await?
-    .project_resources()         // Loads skills from .claude/skills/
-    .skill(deploy_skill)              // Add programmatic skills
-    .skill(review_skill)
-    .build()
-    .await?;
-```
-
-Or load from directory:
-
-```rust
-let loader = SkillIndexLoader::new();
-let skills = loader.scan_directory(&skills_dir).await?;
-
-for skill in skills {
-    agent_builder = agent_builder.skill(skill);
-}
-```
-
-## Progressive Disclosure
-
-Skills implement progressive disclosure:
-
-1. **Index only**: Only skill names/descriptions in system prompt
-2. **On activation**: Full skill content loaded when triggered
-3. **Context efficiency**: Unused skills don't consume tokens
-
-```
-System Prompt:
-  Skills: deploy, review, migrate (descriptions only)
-
-User: "deploy to production"
-  → Load full deploy skill content
-  → Execute with skill-specific tools/model
-```
-
-## Skill Result
-
-```rust
-pub struct SkillResult {
-    pub success: bool,
-    pub output: String,
-    pub error: Option<String>,
-    pub allowed_tools: Vec<String>,  // Tool restrictions
-    pub model: Option<String>,       // Model override
-    pub base_dir: Option<PathBuf>,   // For path resolution
-}
-```
+- `memory-system.md`
+- `subagents.md`

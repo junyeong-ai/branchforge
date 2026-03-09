@@ -1,30 +1,33 @@
 # claude-agent-rs
 
-**프로덕션 레디 Claude API Rust SDK**
+Rust로 작성된 stateful coding agent runtime입니다.
 
 [![Crates.io](https://img.shields.io/crates/v/claude-agent.svg)](https://crates.io/crates/claude-agent)
 [![Docs.rs](https://img.shields.io/docsrs/claude-agent)](https://docs.rs/claude-agent)
 [![Rust](https://img.shields.io/badge/rust-1.92%2B-orange.svg)](https://www.rust-lang.org)
 [![License](https://img.shields.io/crates/l/claude-agent.svg)](LICENSE)
-[![DeepWiki](https://img.shields.io/badge/DeepWiki-junyeong--ai%2Fclaude--agent--rs-blue.svg?logo=data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAACwAAAAyCAYAAAAnWDnqAAAAAXNSR0IArs4c6QAAA05JREFUaEPtmUtyEzEQhtWTQyQLHNak2AB7ZnyXZMEjXMGeK/AIi+QuHrMnbChYY7MIh8g01fJoopFb0uhhEqqcbWTp06/uv1saEDv4O3n3dV60RfP947Mm9/SQc0ICFQgzfc4CYZoTPAswgSJCCUJUnAAoRHOAUOcATwbmVLWdGoH//PB8mnKqScAhsD0kYP3j/Yt5LPQe2KvcXmGvRHcDnpxfL2zOYJ1mFwrryWTz0advv1Ut4CJgf5uhDuDj5eUcAUoahrdY/56ebRWeraTjMt/00Sh3UDtjgHtQNHwcRGOC98BJEAEymycmYcWwOprTgcB6VZ5JK5TAJ+fXGLBm3FDAmn6oPPjR4rKCAoJCal2eAiQp2x0vxTPB3ALO2CRkwmDy5WohzBDwSEFKRwPbknEggCPB/imwrycgxX2NzoMCHhPkDwqYMr9tRcP5qNrMZHkVnOjRMWwLCcr8ohBVb1OMjxLwGCvjTikrsBOiA6fNyCrm8V1rP93iVPpwaE+gO0SsWmPiXB+jikdf6SizrT5qKasx5j8ABbHpFTx+vFXp9EnYQmLx02h1QTTrl6eDqxLnGjporxl3NL3agEvXdT0WmEost648sQOYAeJS9Q7bfUVoMGnjo4AZdUMQku50McDcMWcBPvr0SzbTAFDfvJqwLzgxwATnCgnp4wDl6Aa+Ax283gghmj+vj7feE2KBBRMW3FzOpLOADl0Isb5587h/U4gGvkt5v60Z1VLG8BhYjbzRwyQZemwAd6cCR5/XFWLYZRIMpX39AR0tjaGGiGzLVyhse5C9RKC6ai42ppWPKiBagOvaYk8lO7DajerabOZP46Lby5wKjw1HCRx7p9sVMOWGzb/vA1hwiWc6jm3MvQDTogQkiqIhJV0nBQBTU+3okKCFDy9WwferkHjtxib7t3xIUQtHxnIwtx4mpg26/HfwVNVDb4oI9RHmx5WGelRVlrtiw43zboCLaxv46AZeB3IlTkwouebTr1y2NjSpHz68WNFjHvupy3q8TFn3Hos2IAk4Ju5dCo8B3wP7VPr/FGaKiG+T+v+TQqIrOqMTL1VdWV1DdmcbO8KXBz6esmYWYKPwDL5b5FA1a0hwapHiom0r/cKaoqr+27/XcrS5UwSMbQAAAABJRU5ErkJggg==)](https://deepwiki.com/junyeong-ai/claude-agent-rs)
 
 [English](README.md) | 한국어
 
----
+## 소개
 
-## 왜 claude-agent-rs인가?
+`claude-agent-rs`는 단순한 API 바인딩이 아니라, 장기적인 작업 흐름을 다루는 Rust 기반 agent runtime입니다.
 
-| 기능 | claude-agent-rs | 기타 SDK |
-|------|:---:|:---:|
-| **순수 Rust, 런타임 의존성 없음** | 네이티브 | Node.js/Python 필요 |
-| **Claude Code CLI 인증 재사용** | OAuth 토큰 공유 | 수동 API 키 설정 |
-| **자동 프롬프트 캐싱** | 시스템 + 메시지 캐싱 | 수동 구현 |
-| **TOCTOU-Safe 파일 연산** | `openat()` + `O_NOFOLLOW` | 표준 파일 I/O |
-| **멀티 클라우드 지원** | Bedrock, Vertex, Foundry | 제한적 또는 없음 |
-| **OS 레벨 샌드박싱** | Landlock, Seatbelt | 없음 |
-| **포괄적 테스트** | 프로덕션 검증됨 | 다양함 |
+이 프로젝트는 다음을 목표로 합니다.
 
----
+- graph-first 세션 모델
+- replay, export, bookmark, checkpoint를 포함한 지속 가능한 작업 기록
+- Anthropic, Bedrock, Vertex AI, Azure AI Foundry 지원
+- 안전한 로컬 도구 실행과 권한 제어
+- Claude Code 스타일의 프로젝트 리소스(`CLAUDE.md`, skills, rules) 활용
+
+## 핵심 가치
+
+- `SessionGraph`를 canonical state로 사용합니다.
+- `Session.messages`는 message-based API를 위한 projection으로 유지합니다.
+- 세션은 분기, replay, export가 가능한 작업 그래프로 관리됩니다.
+- JSONL, PostgreSQL, Redis persistence를 지원합니다.
+- built-in tools, MCP, subagents, skills를 같은 runtime 안에서 조합할 수 있습니다.
 
 ## 빠른 시작
 
@@ -36,368 +39,107 @@ claude-agent = "0.2"
 tokio = { version = "1", features = ["full"] }
 ```
 
-### 간단한 쿼리
+### 간단한 질의
 
 ```rust
 use claude_agent::query;
 
 #[tokio::main]
 async fn main() -> claude_agent::Result<()> {
-    let response = query("Rust의 장점을 설명해줘").await?;
+    let response = query("Explain the benefits of Rust").await?;
     println!("{response}");
     Ok(())
 }
 ```
 
-### 스트리밍 응답
+### 에이전트 생성
 
 ```rust
-use claude_agent::stream;
-use futures::StreamExt;
-use std::pin::pin;
-
-#[tokio::main]
-async fn main() -> claude_agent::Result<()> {
-    let stream = stream("양자 컴퓨팅이란?").await?;
-    let mut stream = pin!(stream);
-
-    while let Some(chunk) = stream.next().await {
-        print!("{}", chunk?);
-    }
-    Ok(())
-}
-```
-
-### 도구를 포함한 에이전트
-
-```rust
-use claude_agent::{Agent, AgentEvent, ToolAccess};
-use futures::StreamExt;
-use std::pin::pin;
+use claude_agent::{Agent, ToolAccess};
 
 #[tokio::main]
 async fn main() -> claude_agent::Result<()> {
     let agent = Agent::builder()
-        .from_claude_code("./my-project").await?  // Auth + working_dir + server tools
-        .tools(ToolAccess::all())                 // 12개 내장 도구
+        .from_claude_code(".").await?
+        .tools(ToolAccess::all())
         .build()
         .await?;
 
-    let stream = agent.execute_stream("main.rs의 버그를 찾아서 수정해줘").await?;
-    let mut stream = pin!(stream);
-
-    while let Some(event) = stream.next().await {
-        match event? {
-            AgentEvent::Text(text) => print!("{text}"),
-            AgentEvent::ToolComplete { name, .. } => eprintln!("\n[{name}]"),
-            AgentEvent::Complete(result) => {
-                eprintln!("\n토큰: {}", result.total_tokens());
-            }
-            _ => {}
-        }
-    }
+    let result = agent.execute("Summarize this repository").await?;
+    println!("{}", result.output);
     Ok(())
 }
 ```
 
----
-
 ## 인증
 
-### Claude Code CLI (권장)
+지원되는 인증 방식은 다음과 같습니다.
 
-```rust
-Agent::builder()
-    .from_claude_code(".").await?  // ~/.claude/credentials.json 사용
-    .build()
-    .await?
-```
+- Anthropic API key
+- Claude Code CLI credentials
+- AWS Bedrock
+- Google Vertex AI
+- Azure AI Foundry
 
-### API Key
-
-```rust
-use claude_agent::Auth;
-
-Agent::builder()
-    .auth(Auth::api_key("sk-ant-...")).await?
-    .build()
-    .await?
-```
-
-### 클라우드 공급자
+예시:
 
 ```rust
 use claude_agent::Auth;
 
-// AWS Bedrock
-Agent::builder()
-    .auth(Auth::bedrock("us-east-1")).await?
-    .build().await?
-
-// Google Vertex AI
-Agent::builder()
-    .auth(Auth::vertex("project-id", "us-central1")).await?
-    .build().await?
-
-// Azure AI Foundry
-Agent::builder()
-    .auth(Auth::foundry("resource-name")).await?
-    .build().await?
+let agent = claude_agent::Agent::builder()
+    .auth(Auth::api_key("sk-ant-..."))
+    .await?
+    .build()
+    .await?;
 ```
 
-### 혼합: 임의 인증 + Claude Code 리소스
+상세 내용은 `docs/authentication.md`, `docs/cloud-providers.md`를 참고하세요.
 
-```rust
-// Bedrock 인증 + .claude/ 프로젝트 리소스 사용
-Agent::builder()
-    .auth(Auth::bedrock("us-east-1")).await?
-    .working_dir("./my-project")
-    .project_resources()       // OAuth 없이 .claude/ 로드
-    .build().await?
-```
+## 세션과 리플레이
 
-자세한 내용: [인증 가이드](docs/authentication.md) | [클라우드 공급자](docs/cloud-providers.md)
+세션은 graph-first 구조로 관리됩니다.
 
----
+- branch
+- replay
+- export
+- bookmark
+- checkpoint
 
-## 도구
+이 구조 덕분에 긴 코딩 세션을 단순 로그가 아니라 재개 가능한 작업 기록으로 다룰 수 있습니다.
 
-### 12개 내장 도구
+상세 내용은 `docs/session.md`를 참고하세요.
 
-| 카테고리 | 도구 |
-|----------|------|
-| **파일** | Read, Write, Edit, Glob, Grep |
-| **셸** | Bash, KillShell |
-| **에이전트** | Task, TaskOutput, TodoWrite, Skill |
-| **계획** | Plan |
+## 도구 시스템
 
-### 3개 서버 도구 (Anthropic API 전용)
+내장 도구는 파일 작업, 셸 실행, 계획, 서브에이전트 실행을 포함합니다.
 
-| 도구 | 설명 |
-|------|------|
-| **WebFetch** | URL 콘텐츠 가져오기 및 처리 |
-| **WebSearch** | 인용과 함께 웹 검색 |
-| **ToolSearch** | 정규식 또는 BM25로 도구 검색 |
+- File: Read, Write, Edit, Glob, Grep
+- Execution: Bash, KillShell
+- Agent: Task, TaskOutput, TodoWrite, Skill
+- Planning: Plan
+- Server tools: WebFetch, WebSearch, ToolSearch
 
-```rust
-// 서버 도구는 OAuth/CLI 인증 사용 시 자동 활성화
-Agent::builder()
-    .from_claude_code(".").await?
-    .build().await?
-```
-
-### 도구 접근 제어
-
-```rust
-ToolAccess::all()                           // 12개 전체 도구
-ToolAccess::only(["Read", "Grep", "Glob"])  // 특정 도구
-ToolAccess::except(["Bash", "Write"])       // 도구 제외
-```
-
-자세한 내용: [도구 가이드](docs/tools.md)
-
----
-
-## 핵심 기능
-
-### 프롬프트 캐싱
-
-Anthropic 베스트 프랙티스 기반 자동 캐싱:
-
-- **시스템 프롬프트 캐싱**: 정적 컨텍스트 1시간 TTL로 캐싱
-- **메시지 히스토리 캐싱**: 마지막 user 턴 5분 TTL로 캐싱
-
-```rust
-use claude_agent::CacheConfig;
-
-Agent::builder()
-    .cache(CacheConfig::default())        // 전체 캐싱 (권장)
-    // .cache(CacheConfig::system_only()) // 시스템 프롬프트만 (1시간 TTL)
-    // .cache(CacheConfig::messages_only()) // 메시지만 (5분 TTL)
-    // .cache(CacheConfig::disabled())    // 캐싱 비활성화
-```
-
-### 4개 내장 서브에이전트
-
-| 타입 | 모델 | 용도 |
-|------|------|------|
-| `Bash` | Small (Haiku) | 명령 실행 전문 |
-| `Explore` | Small (Haiku) | 빠른 코드베이스 검색 |
-| `Plan` | Primary | 구현 계획 수립 |
-| `general-purpose` | Primary | 복잡한 다단계 작업 |
-
-자세한 내용: [서브에이전트 가이드](docs/subagents.md)
-
-### 스킬 시스템
-
-마크다운으로 재사용 가능한 스킬 정의:
-
-`.claude/skills/deploy.md`:
-```markdown
----
-description: 프로덕션 배포
-allowed-tools: [Bash, Read]
----
-$ARGUMENTS 환경에 배포합니다.
-```
-
-자세한 내용: [스킬 가이드](docs/skills.md)
-
-### 메모리 시스템
-
-프로젝트 컨텍스트를 위해 `CLAUDE.md` 자동 로드:
-
-```markdown
-# 프로젝트 가이드
-@import ./docs/architecture.md
-
-## 규칙
-- Rust 2024 Edition 사용
-```
-
-자세한 내용: [메모리 시스템 가이드](docs/memory-system.md)
-
-### 세션 영속성
-
-| 백엔드 | 기능 | 용도 |
-|--------|------|------|
-| Memory | (기본) | 개발 |
-| JSONL | `jsonl` | CLI 호환 |
-| PostgreSQL | `postgres` | 프로덕션 |
-| Redis | `redis-backend` | 고처리량 |
-
-자세한 내용: [세션 가이드](docs/session.md)
-
-### 훅 시스템
-
-실행 제어를 위한 10개 라이프사이클 이벤트:
-
-| 차단 가능 | 차단 불가 |
-|-----------|-----------|
-| PreToolUse, UserPromptSubmit | PostToolUse, PostToolUseFailure |
-| SessionStart, SubagentStart | Stop, SubagentStop |
-| | PreCompact, SessionEnd |
-
-자세한 내용: [훅 가이드](docs/hooks.md)
-
-### MCP 통합
-
-```rust
-use claude_agent::mcp::{McpManager, McpServerConfig};
-use std::collections::HashMap;
-
-let mcp = McpManager::new();
-mcp.add_server("filesystem", McpServerConfig::Stdio {
-    command: "npx".into(),
-    args: vec!["-y".into(), "@anthropic-ai/mcp-server-filesystem".into()],
-    env: HashMap::new(),
-    cwd: None,
-}).await?;
-
-Agent::builder().mcp_manager(mcp).build().await?
-```
-
-자세한 내용: [MCP 가이드](docs/mcp.md)
-
----
-
-## 보안
-
-| 기능 | 설명 |
-|------|------|
-| **OS 샌드박스** | Landlock (Linux 5.13+), Seatbelt (macOS) |
-| **TOCTOU-Safe** | `openat()` + `O_NOFOLLOW` 원자적 연산 |
-| **Bash AST** | tree-sitter 기반 위험 명령 탐지 |
-| **리소스 제한** | `setrlimit()` 프로세스 격리 |
-| **네트워크 필터** | 도메인 화이트리스트/블랙리스트 |
-
-자세한 내용: [보안 가이드](docs/security.md) | [샌드박스 가이드](docs/sandbox.md)
-
----
+상세 내용은 `docs/tools.md`를 참고하세요.
 
 ## 문서
 
-| 문서 | 설명 |
-|------|------|
-| [아키텍처](docs/architecture.md) | 시스템 구조 및 데이터 흐름 |
-| [인증](docs/authentication.md) | OAuth, API Key, 클라우드 연동 |
-| [도구](docs/tools.md) | 12개 내장 + 3개 서버 도구 |
-| [스킬](docs/skills.md) | 슬래시 명령 및 스킬 정의 |
-| [서브에이전트](docs/subagents.md) | 서브에이전트 생성 및 관리 |
-| [메모리](docs/memory-system.md) | CLAUDE.md 및 @import |
-| [훅](docs/hooks.md) | 10개 라이프사이클 이벤트 |
-| [플러그인](docs/plugins.md) | 플러그인 시스템 및 네임스페이스 |
-| [MCP](docs/mcp.md) | 외부 MCP 서버 |
-| [세션](docs/session.md) | 영속성 및 프롬프트 캐싱 |
-| [권한](docs/permissions.md) | 권한 모드 및 정책 |
-| [보안](docs/security.md) | TOCTOU-safe 연산 |
-| [샌드박스](docs/sandbox.md) | Landlock 및 Seatbelt |
-| [모델](docs/models.md) | 모델 레지스트리 및 요금제 |
-| [토큰](docs/tokens.md) | 컨텍스트 윈도우 추적 |
-| [예산](docs/budget.md) | 비용 제한 (USD) |
-| [관측성](docs/observability.md) | OpenTelemetry 연동 |
-| [출력 스타일](docs/output-styles.md) | 응답 형식 |
-| [클라우드](docs/cloud-providers.md) | Bedrock, Vertex, Foundry |
+- `docs/architecture.md`
+- `docs/authentication.md`
+- `docs/cloud-providers.md`
+- `docs/session.md`
+- `docs/tools.md`
+- `docs/security.md`
+- `docs/permissions.md`
+- `docs/subagents.md`
+- `docs/skills.md`
+- `docs/memory-system.md`
 
----
+## 품질 기준
 
-## 기능 플래그
-
-```toml
-[dependencies]
-claude-agent = { version = "0.2", features = ["mcp", "postgres"] }
-```
-
-| 기능 | 설명 |
-|------|------|
-| `cli-integration` | Claude Code CLI 지원 (기본) |
-| `mcp` | MCP 프로토콜 지원 |
-| `multimedia` | PDF 읽기 지원 |
-| `aws` | AWS Bedrock |
-| `gcp` | Google Vertex AI |
-| `azure` | Azure AI Foundry |
-| `jsonl` | JSONL 영속성 (CLI 호환) |
-| `postgres` | PostgreSQL 영속성 |
-| `redis-backend` | Redis 영속성 |
-| `plugins` | 플러그인 시스템 |
-| `otel` | OpenTelemetry |
-| `full` | 모든 기능 (multimedia 제외) |
-
----
-
-## 예제
+이 저장소는 다음 품질 게이트를 기준으로 유지됩니다.
 
 ```bash
-cargo run --example advanced_test          # 스킬, 서브에이전트, 훅
-cargo run --example all_tools_test         # 12개 전체 도구
-cargo run --example server_tools           # WebFetch, WebSearch
-cargo run --example sandbox_verification   # 샌드박스 테스트
+cargo nextest run --all-features
+cargo clippy --all-features -- -D warnings
+cargo fmt --all -- --check
 ```
-
----
-
-## 환경 변수
-
-| 변수 | 설명 |
-|------|------|
-| `ANTHROPIC_API_KEY` | API 키 |
-| `ANTHROPIC_MODEL` | 기본 모델 |
-| `CLAUDE_CODE_USE_BEDROCK` | Bedrock 활성화 |
-| `CLAUDE_CODE_USE_VERTEX` | Vertex AI 활성화 |
-| `CLAUDE_CODE_USE_FOUNDRY` | Foundry 활성화 |
-
----
-
-## 테스트
-
-```bash
-cargo test                    # 전체 테스트 스위트
-cargo test -- --ignored       # + 라이브 API 테스트
-cargo clippy --all-features   # 린트
-```
-
----
-
-## 라이선스
-
-MIT

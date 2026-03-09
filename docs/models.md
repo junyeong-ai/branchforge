@@ -1,206 +1,23 @@
-# Model Registry
+# Models
 
-Runtime-extensible model management with alias resolution and pricing tiers.
+Model selection is handled through the model registry.
 
-## Overview
+## Registry Responsibilities
 
-```
-┌─────────────────────────────────────────────────────────────┐
-│                     Model Registry                           │
-├─────────────────────────────────────────────────────────────┤
-│                                                              │
-│  ┌───────────────┐  ┌───────────────┐  ┌───────────────┐    │
-│  │  ModelSpec    │  │  ModelFamily  │  │  PricingTier  │    │
-│  │               │  │               │  │               │    │
-│  │ - id          │  │ - Opus        │  │ - Standard    │    │
-│  │ - family      │  │ - Sonnet      │  │   (≤200K)     │    │
-│  │ - capabilities│  │ - Haiku       │  │ - Extended    │    │
-│  │ - provider_ids│  │               │  │   (>200K, 2x) │    │
-│  └───────────────┘  └───────────────┘  └───────────────┘    │
-│                                                              │
-└─────────────────────────────────────────────────────────────┘
-```
+- built-in model definitions
+- alias resolution
+- family grouping
+- provider-specific model identifiers
+- capability metadata
 
-## Built-in Models
+## Families
 
-| Family | Model ID | Context Window | Extended |
-|--------|----------|----------------|----------|
-| Opus | `claude-opus-4-6` | 200K | - |
-| Sonnet | `claude-sonnet-4-5-20250929` | 200K | 1M |
-| Haiku | `claude-haiku-4-5-20251001` | 200K | - |
+- Opus
+- Sonnet
+- Haiku
 
-## Alias Resolution
+## Related Systems
 
-The registry supports multiple alias formats:
-
-```rust
-use claude_agent::models::registry;
-
-let registry = registry();
-
-// All of these resolve to the same model
-registry.resolve("sonnet");                      // Family alias
-registry.resolve("claude-sonnet-4-5-20250929");  // Full ID
-registry.resolve("my-sonnet-variant");           // Substring fallback
-```
-
-### Resolution Order
-
-1. **Direct ID lookup**: Exact match in registry
-2. **Alias lookup**: Registered aliases (e.g., "sonnet" → latest Sonnet)
-3. **Substring fallback**: Family detection from name (contains "opus", "sonnet", "haiku")
-
-## ModelSpec
-
-```rust
-pub struct ModelSpec {
-    pub id: ModelId,
-    pub family: ModelFamily,
-    pub version: ModelVersion,
-    pub capabilities: Capabilities,
-    pub pricing: ModelPricing,
-    pub provider_ids: ProviderIds,
-}
-
-pub struct ModelVersion {
-    pub version: String,
-    pub snapshot: Option<String>,
-    pub knowledge_cutoff: Option<String>,
-}
-
-pub struct Capabilities {
-    pub context_window: u64,              // Standard limit (200K)
-    pub extended_context_window: Option<u64>,  // Extended limit (1M, if supported)
-    pub max_output_tokens: u64,
-    pub thinking: bool,
-    pub vision: bool,
-    pub tool_use: bool,
-    pub caching: bool,
-}
-```
-
-### Effective Context Window
-
-```rust
-impl Capabilities {
-    pub fn effective_context(&self, extended_enabled: bool) -> u64 {
-        if extended_enabled {
-            self.extended_context_window.unwrap_or(self.context_window)
-        } else {
-            self.context_window
-        }
-    }
-
-    pub fn supports_extended_context(&self) -> bool {
-        self.extended_context_window.is_some()
-    }
-}
-```
-
-## Pricing Tiers
-
-Two pricing tiers based on context window usage:
-
-| Tier | Token Range | Cost Impact |
-|------|-------------|-------------|
-| Standard | <= 200,000 | Base pricing |
-| Extended | > 200,000 | 2x input/cache cost (set via `ModelPricing::long_context_multiplier`) |
-
-```rust
-use claude_agent::tokens::PricingTier;
-
-let tier = PricingTier::for_context(150_000);  // Standard
-let tier = PricingTier::for_context(250_000);  // Extended
-
-assert!(tier.is_extended());
-```
-
-## Extended Context (1M)
-
-Enable 1M context window via AgentBuilder:
-
-```rust
-use claude_agent::Agent;
-
-let agent = Agent::builder()
-    .auth(auth).await?
-    .extended_context(true)  // Enable 1M context
-    .build()
-    .await?;
-```
-
-This automatically adds the `context-1m-2025-08-07` beta feature.
-
-## Runtime Registration
-
-Register custom models at runtime:
-
-```rust
-use claude_agent::models::{ModelRegistry, ModelSpec, ModelFamily, ModelVersion, Capabilities};
-use claude_agent::budget::ModelPricing;
-use rust_decimal_macros::dec;
-
-let mut reg = ModelRegistry::builtins();
-reg.register(ModelSpec {
-    id: "my-custom-model".into(),
-    family: ModelFamily::Sonnet,
-    version: ModelVersion {
-        version: "1.0".into(),
-        snapshot: None,
-        knowledge_cutoff: None,
-    },
-    capabilities: Capabilities {
-        context_window: 200_000,
-        extended_context_window: Some(1_000_000),
-        max_output_tokens: 64_000,
-        thinking: true,
-        vision: true,
-        tool_use: true,
-        caching: true,
-    },
-    pricing: ModelPricing::from_base(dec!(3), dec!(15)),
-    provider_ids: Default::default(),
-});
-
-// Add alias
-reg.add_alias("custom", "my-custom-model".into());
-```
-
-## Provider IDs
-
-Models have different IDs across cloud providers:
-
-```rust
-pub struct ProviderIds {
-    pub anthropic: Option<String>,
-    pub bedrock: Option<String>,
-    pub vertex: Option<String>,
-    pub foundry: Option<String>,
-}
-
-// Lookup by provider
-let spec = registry.for_provider(ProviderKind::Bedrock, "anthropic.claude-sonnet-4-5-20250929-v1:0");
-```
-
-## ModelRole
-
-Default models by role:
-
-| Role | Default | Purpose |
-|------|---------|---------|
-| Primary | Sonnet | Main agent model |
-| Small | Haiku | Subagents, fast tasks |
-| Reasoning | Opus | Complex reasoning |
-
-```rust
-use claude_agent::models::{registry, ModelRole};
-
-let registry = registry();
-let primary = registry.default_for_role(ModelRole::Primary);
-let small = registry.default_for_role(ModelRole::Small);
-```
-
-## See Also
-
-- [Token Tracking](tokens.md) - Context window management
-- [Budget Management](budget.md) - Cost tracking and limits
+- `tokens.md` for context-window handling
+- `budget.md` for pricing and cost control
+- `cloud-providers.md` for provider-specific routing

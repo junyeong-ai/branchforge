@@ -1,275 +1,42 @@
 # Cloud Providers
 
-claude-agent-rs supports multiple cloud platforms through the ProviderAdapter system.
+`claude-agent-rs` supports multiple Anthropic delivery paths through provider adapters.
 
-> **Related**: [Authentication Guide](authentication.md) for credential resolution and OAuth setup
+## Supported Providers
 
-## Overview
+- Anthropic direct API
+- AWS Bedrock
+- Google Vertex AI
+- Azure AI Foundry
 
-```
-┌─────────────────────────────────────────────────────────────┐
-│                    Provider Adapters                         │
-├─────────────────────────────────────────────────────────────┤
-│                                                              │
-│  ┌─────────────┐  ┌─────────────┐  ┌─────────────┐          │
-│  │  Anthropic  │  │   Bedrock   │  │   Vertex    │          │
-│  │   (Direct)  │  │    (AWS)    │  │  (Google)   │          │
-│  └──────┬──────┘  └──────┬──────┘  └──────┬──────┘          │
-│         │                │                │                  │
-│         └────────────────┼────────────────┘                  │
-│                          │                                   │
-│                          ▼                                   │
-│                 ┌─────────────────┐                          │
-│                 │ ProviderAdapter │                          │
-│                 │     trait       │                          │
-│                 └────────┬────────┘                          │
-│                          │                                   │
-│         ┌────────────────┼────────────────┐                  │
-│         ▼                ▼                ▼                  │
-│  ┌─────────────┐  ┌─────────────┐  ┌─────────────┐          │
-│  │ build_url() │  │ transform   │  │ apply_auth  │          │
-│  │             │  │  _request() │  │  _headers() │          │
-│  └─────────────┘  └─────────────┘  └─────────────┘          │
-│                                                              │
-│  ┌─────────────┐                                             │
-│  │   Foundry   │                                             │
-│  │   (Azure)   │                                             │
-│  └─────────────┘                                             │
-│                                                              │
-└─────────────────────────────────────────────────────────────┘
-```
+## Adapter Responsibilities
 
-## Anthropic (Direct API)
+Each provider adapter is responsible for:
 
-Direct connection to Anthropic's API.
+- endpoint construction
+- request lowering
+- authentication headers or tokens
+- provider-specific model IDs
+- provider-specific streaming behavior
+
+## Practical Guidance
+
+- Use Anthropic direct API when you want the closest match to Anthropic-native features.
+- Use Bedrock, Vertex AI, or Foundry when deployment policy requires cloud-provider-native credentials or endpoints.
+- Do not assume perfect provider capability parity for every Anthropic feature.
+
+## Examples
 
 ```rust
-// Using API key
-let client = Client::builder()
-    .auth(Auth::api_key("sk-ant-api03-..."))
-    .build()
-    .await?;
+use claude_agent::{Auth, Client};
 
-// Using environment variable
-let client = Client::builder()
-    .auth(Auth::from_env())
-    .build()
-    .await?;
-
-// Using Claude Code CLI credentials
-let client = Client::builder()
-    .auth(Auth::claude_cli())
-    .build()
-    .await?;
+let anthropic = Client::builder().auth(Auth::from_env()).build().await?;
+let bedrock = Client::builder().auth(Auth::bedrock("us-east-1")).build().await?;
+let vertex = Client::builder().auth(Auth::vertex("my-project", "us-central1")).build().await?;
+let foundry = Client::builder().auth(Auth::foundry("my-resource")).build().await?;
 ```
 
-### Configuration
+## See Also
 
-| Environment Variable | Description |
-|---------------------|-------------|
-| `ANTHROPIC_API_KEY` | API key |
-| `ANTHROPIC_MODEL` | Default model |
-| `ANTHROPIC_BASE_URL` | Custom endpoint |
-
-### Request Format
-
-```http
-POST https://api.anthropic.com/v1/messages
-Authorization: Bearer {token}  (OAuth)
-x-api-key: {key}               (API key)
-anthropic-version: 2023-06-01
-anthropic-beta: prompt-caching-2024-07-31
-```
-
-## AWS Bedrock
-
-Claude models via Amazon Bedrock.
-
-```rust
-// Using Auth enum (recommended)
-let client = Client::builder()
-    .auth(Auth::bedrock("us-east-1"))
-    .build()
-    .await?;
-```
-
-### Configuration
-
-| Environment Variable | Description |
-|---------------------|-------------|
-| `AWS_REGION` | AWS region |
-| `AWS_ACCESS_KEY_ID` | Access key |
-| `AWS_SECRET_ACCESS_KEY` | Secret key |
-| `AWS_SESSION_TOKEN` | Session token (optional) |
-| `CLAUDE_CODE_USE_BEDROCK` | Enable flag |
-
-### Authentication
-
-Uses AWS credential chain:
-1. Environment variables
-2. AWS config file (`~/.aws/credentials`)
-3. IAM role (EC2, ECS, Lambda)
-4. Web identity token
-
-### Request Format
-
-```http
-POST https://bedrock-runtime.{region}.amazonaws.com/model/{model}/invoke
-Authorization: AWS4-HMAC-SHA256 ...
-```
-
-### Model Mapping
-
-| Standard | Bedrock (ProviderIds) | Bedrock (ModelConfig default) |
-|----------|---------|------|
-| claude-sonnet-4-5 | anthropic.claude-sonnet-4-5-20250929-v1:0 | global.anthropic.claude-sonnet-4-5-20250929-v1:0 |
-| claude-haiku-4-5 | anthropic.claude-haiku-4-5-20251001-v1:0 | global.anthropic.claude-haiku-4-5-20251001-v1:0 |
-| claude-opus-4-6 | anthropic.claude-opus-4-6-v1:0 | global.anthropic.claude-opus-4-6-v1:0 |
-
-> **Note**: `ModelConfig::bedrock()` uses the `global.` prefix for maximum availability across regions. The `ProviderIds` in `ModelSpec` store the base IDs without the prefix.
-
-## Google Vertex AI
-
-Claude models via Google Cloud Vertex AI.
-
-```rust
-let client = Client::builder()
-    .auth(Auth::vertex("my-gcp-project", "us-central1"))
-    .build()
-    .await?;
-```
-
-### Configuration
-
-| Environment Variable | Description |
-|---------------------|-------------|
-| `GOOGLE_CLOUD_PROJECT` | GCP project ID |
-| `GOOGLE_APPLICATION_CREDENTIALS` | Service account key path |
-| `CLOUD_ML_REGION` | Vertex AI region |
-| `CLAUDE_CODE_USE_VERTEX` | Enable flag |
-
-### Authentication
-
-Uses Application Default Credentials:
-1. `GOOGLE_APPLICATION_CREDENTIALS` environment variable
-2. gcloud CLI credentials
-3. Compute Engine metadata service
-4. GKE workload identity
-
-### Request Format
-
-```http
-POST https://{region}-aiplatform.googleapis.com/v1/projects/{project}/locations/{region}/publishers/anthropic/models/{model}:streamRawPredict
-Authorization: Bearer {oauth_token}
-```
-
-### Model Mapping
-
-| Standard | Vertex |
-|----------|--------|
-| claude-sonnet-4-5-20250929 | claude-sonnet-4-5@20250929 |
-| claude-haiku-4-5-20251001 | claude-haiku-4-5@20251001 |
-| claude-opus-4-6 | claude-opus-4-6 |
-
-## Azure AI Foundry
-
-Claude models via Azure AI Foundry.
-
-```rust
-let client = Client::builder()
-    .auth(Auth::foundry("my-resource"))
-    .build()
-    .await?;
-```
-
-### Configuration
-
-| Environment Variable | Description |
-|---------------------|-------------|
-| `AZURE_CLIENT_ID` | Service principal client ID |
-| `AZURE_CLIENT_SECRET` | Service principal secret |
-| `AZURE_TENANT_ID` | Azure AD tenant ID |
-| `AZURE_SUBSCRIPTION_ID` | Azure subscription |
-| `CLAUDE_CODE_USE_FOUNDRY` | Enable flag |
-
-### Authentication
-
-Uses Azure Identity chain:
-1. Environment credentials
-2. Managed identity
-3. Azure CLI credentials
-4. Workload identity
-
-### Request Format
-
-```http
-POST https://{resource}.services.ai.azure.com/anthropic/v1/messages
-Authorization: Bearer {azure_token}
-anthropic-version: 2023-06-01
-```
-
-## Provider Adapter Trait
-
-```rust
-#[async_trait]
-pub trait ProviderAdapter: Send + Sync + Debug {
-    fn config(&self) -> &ProviderConfig;
-    fn name(&self) -> &'static str;
-    fn base_url(&self) -> &str;
-    fn model(&self, model_type: ModelType) -> &str;
-    async fn build_url(&self, model: &str, stream: bool) -> String;
-    async fn prepare_request(&self, request: CreateMessageRequest) -> CreateMessageRequest;
-    async fn transform_request(&self, request: CreateMessageRequest) -> Result<serde_json::Value>;
-    fn transform_response(&self, response: serde_json::Value) -> Result<ApiResponse>;
-    async fn apply_auth_headers(&self, req: reqwest::RequestBuilder) -> reqwest::RequestBuilder;
-    async fn send(&self, http: &reqwest::Client, request: CreateMessageRequest) -> Result<ApiResponse>;
-    async fn send_stream(&self, http: &reqwest::Client, request: CreateMessageRequest) -> Result<reqwest::Response>;
-    async fn count_tokens(&self, http: &reqwest::Client, request: CountTokensRequest) -> Result<CountTokensResponse>;
-    async fn refresh_credentials(&self) -> Result<()>;
-    async fn ensure_fresh_credentials(&self) -> Result<()>;
-    fn supports_credential_refresh(&self) -> bool;
-}
-```
-
-## Model Types
-
-```rust
-pub enum ModelType {
-    Primary,    // Main model for conversations (Sonnet)
-    Small,      // Fast model for simple tasks (Haiku)
-    Reasoning,  // Powerful model for complex tasks (Opus)
-}
-```
-
-## Auto-Detection
-
-Environment-based provider selection:
-
-```rust
-let client = Client::from_env()?;
-
-// Checks in order:
-// 1. CLAUDE_CODE_USE_BEDROCK → Bedrock
-// 2. CLAUDE_CODE_USE_VERTEX → Vertex
-// 3. CLAUDE_CODE_USE_FOUNDRY → Foundry
-// 4. ANTHROPIC_API_KEY → Direct Anthropic
-```
-
-## Token Caching
-
-Providers cache authentication tokens:
-
-```rust
-// Automatic refresh before expiry
-// Bedrock: STS tokens (1 hour)
-// Vertex: OAuth tokens (1 hour)
-// Foundry: Azure AD tokens (1 hour)
-```
-
-## Best Practices
-
-1. **Use environment variables**: Don't hardcode credentials
-2. **Prefer managed identity**: Use IAM roles, workload identity
-3. **Set region close to users**: Reduce latency
-4. **Monitor quotas**: Cloud providers have rate limits
-5. **Enable logging**: Track API usage and errors
+- `authentication.md`
+- `architecture/provider-capabilities.md`
