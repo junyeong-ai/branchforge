@@ -39,6 +39,8 @@ use sqlx::postgres::PgPoolOptions;
 use sqlx::{PgPool, Postgres, Row, Transaction};
 use uuid::Uuid;
 
+use crate::graph::SessionGraph;
+
 use super::persistence::Persistence;
 use super::state::{Session, SessionConfig, SessionId, SessionMessage};
 use super::types::{CompactRecord, Plan, QueueItem, QueueStatus, SummarySnapshot, TodoItem};
@@ -121,6 +123,9 @@ impl PgPoolConfig {
 pub struct PostgresConfig {
     pub sessions_table: String,
     pub messages_table: String,
+    pub graph_events_table: String,
+    pub checkpoints_table: String,
+    pub bookmarks_table: String,
     pub compacts_table: String,
     pub summaries_table: String,
     pub queue_table: String,
@@ -157,6 +162,9 @@ impl PostgresConfig {
         Ok(Self {
             sessions_table: format!("{prefix}sessions"),
             messages_table: format!("{prefix}messages"),
+            graph_events_table: format!("{prefix}graph_events"),
+            checkpoints_table: format!("{prefix}checkpoints"),
+            bookmarks_table: format!("{prefix}bookmarks"),
             compacts_table: format!("{prefix}compacts"),
             summaries_table: format!("{prefix}summaries"),
             queue_table: format!("{prefix}queue"),
@@ -182,6 +190,9 @@ impl PostgresConfig {
         vec![
             &self.sessions_table,
             &self.messages_table,
+            &self.graph_events_table,
+            &self.checkpoints_table,
+            &self.bookmarks_table,
             &self.compacts_table,
             &self.summaries_table,
             &self.queue_table,
@@ -294,6 +305,45 @@ impl PostgresSchema {
                 sessions = c.sessions_table
             ),
             format!(
+                r#"CREATE TABLE IF NOT EXISTS {graph_events} (
+    id UUID PRIMARY KEY,
+    session_id VARCHAR(255) NOT NULL,
+    event JSONB NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    CONSTRAINT fk_{graph_events}_session FOREIGN KEY (session_id) REFERENCES {sessions}(id) ON DELETE CASCADE
+);"#,
+                graph_events = c.graph_events_table,
+                sessions = c.sessions_table
+            ),
+            format!(
+                r#"CREATE TABLE IF NOT EXISTS {checkpoints} (
+    id UUID PRIMARY KEY,
+    session_id VARCHAR(255) NOT NULL,
+    branch_id UUID NOT NULL,
+    label TEXT NOT NULL,
+    note TEXT,
+    tags JSONB NOT NULL DEFAULT '[]',
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    CONSTRAINT fk_{checkpoints}_session FOREIGN KEY (session_id) REFERENCES {sessions}(id) ON DELETE CASCADE
+);"#,
+                checkpoints = c.checkpoints_table,
+                sessions = c.sessions_table
+            ),
+            format!(
+                r#"CREATE TABLE IF NOT EXISTS {bookmarks} (
+    id UUID PRIMARY KEY,
+    session_id VARCHAR(255) NOT NULL,
+    node_id UUID NOT NULL,
+    branch_id UUID NOT NULL,
+    label TEXT NOT NULL,
+    note TEXT,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    CONSTRAINT fk_{bookmarks}_session FOREIGN KEY (session_id) REFERENCES {sessions}(id) ON DELETE CASCADE
+);"#,
+                bookmarks = c.bookmarks_table,
+                sessions = c.sessions_table
+            ),
+            format!(
                 r#"CREATE TABLE IF NOT EXISTS {compacts} (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     session_id VARCHAR(255) NOT NULL,
@@ -401,6 +451,18 @@ impl PostgresSchema {
                 c.messages_table
             ),
             format!(
+                "CREATE INDEX IF NOT EXISTS idx_{0}_session ON {0}(session_id)",
+                c.graph_events_table
+            ),
+            format!(
+                "CREATE INDEX IF NOT EXISTS idx_{0}_session ON {0}(session_id)",
+                c.checkpoints_table
+            ),
+            format!(
+                "CREATE INDEX IF NOT EXISTS idx_{0}_session ON {0}(session_id)",
+                c.bookmarks_table
+            ),
+            format!(
                 "CREATE INDEX IF NOT EXISTS idx_{0}_created ON {0}(session_id, created_at)",
                 c.messages_table
             ),
@@ -459,6 +521,18 @@ impl PostgresSchema {
             (
                 c.messages_table.clone(),
                 format!("idx_{}_created", c.messages_table),
+            ),
+            (
+                c.graph_events_table.clone(),
+                format!("idx_{}_session", c.graph_events_table),
+            ),
+            (
+                c.checkpoints_table.clone(),
+                format!("idx_{}_session", c.checkpoints_table),
+            ),
+            (
+                c.bookmarks_table.clone(),
+                format!("idx_{}_session", c.bookmarks_table),
             ),
             (
                 c.compacts_table.clone(),
@@ -669,7 +743,10 @@ impl PostgresPersistence {
         .storage_err()?
         .ok_or_else(|| SessionError::NotFound { id: id_str.clone() })?;
 
-        let messages = self.load_messages(session_id).await?;
+        let graph_events = self.load_graph_events(session_id).await?;
+        let checkpoints = self.load_checkpoints(session_id).await?;
+        let bookmarks = self.load_bookmarks(session_id).await?;
+        let messages = Vec::new();
         let compacts = self.load_compacts(session_id).await?;
         let todos = self.load_todos_internal(session_id).await?;
         let plan = self.load_plan_internal(session_id).await?;
@@ -716,7 +793,7 @@ impl PostgresPersistence {
             .ok()
             .and_then(|s| s.parse().ok());
 
-        Ok(Session {
+        let mut session = Session {
             id: *session_id,
             parent_id: row
                 .try_get::<&str, _>("parent_id")
@@ -747,103 +824,130 @@ impl PostgresPersistence {
             todos,
             current_plan: plan,
             compact_history: VecDeque::from(compacts),
-        })
+            graph: SessionGraph::default(),
+        };
+        session.graph = if !graph_events.is_empty() {
+            let mut graph = crate::graph::GraphMaterializer::from_events(&graph_events);
+            graph.id = session.id.0;
+            graph.created_at = session.created_at;
+            graph
+        } else {
+            let mut graph = SessionGraph::new("main");
+            graph.id = session.id.0;
+            graph.created_at = session.created_at;
+            graph
+        };
+        session.refresh_message_projection();
+        session.graph.checkpoints = checkpoints.into_iter().map(|c| (c.id, c)).collect();
+        session.graph.bookmarks = bookmarks.into_iter().map(|b| (b.id, b)).collect();
+        session.refresh_message_projection();
+        Ok(session)
     }
 
-    async fn load_messages(&self, session_id: &SessionId) -> SessionResult<Vec<SessionMessage>> {
+    async fn load_graph_events(
+        &self,
+        session_id: &SessionId,
+    ) -> SessionResult<Vec<crate::graph::GraphEvent>> {
         let c = &self.config;
 
         let rows = sqlx::query(&format!(
             r#"
-            SELECT id, parent_id, role, content, is_sidechain, is_compact_summary,
-                   model, request_id, usage, metadata, environment, created_at
-            FROM {messages}
+            SELECT event
+            FROM {graph_events}
             WHERE session_id = $1
             ORDER BY created_at ASC
             "#,
-            messages = c.messages_table
+            graph_events = c.graph_events_table
         ))
         .bind(session_id.to_string())
         .fetch_all(self.pool.as_ref())
         .await
         .storage_err()?;
 
-        let mut messages = Vec::with_capacity(rows.len());
-
+        let mut events = Vec::with_capacity(rows.len());
         for row in rows {
-            let id_str = match row.try_get::<&str, _>("id") {
-                Ok(id) => id,
-                Err(e) => {
-                    tracing::warn!(error = %e, "Skipping message row: failed to get id");
-                    continue;
-                }
-            };
-
-            let id = match id_str.parse() {
-                Ok(id) => id,
-                Err(e) => {
-                    tracing::warn!(id = id_str, error = %e, "Skipping message row: failed to parse id");
-                    continue;
-                }
-            };
-
-            let content: Vec<crate::types::ContentBlock> = match row
-                .try_get::<serde_json::Value, _>("content")
-                .ok()
-                .and_then(|v| serde_json::from_value(v).ok())
+            if let Ok(value) = row.try_get::<serde_json::Value, _>("event")
+                && let Ok(event) = serde_json::from_value(value)
             {
-                Some(c) => c,
-                None => {
-                    tracing::warn!(id = id_str, "Skipping message row: failed to parse content");
-                    continue;
-                }
-            };
-
-            let role: crate::types::Role =
-                match row.try_get::<&str, _>("role").ok().and_then(db_to_enum) {
-                    Some(r) => r,
-                    None => {
-                        tracing::warn!(id = id_str, "Skipping message row: failed to parse role");
-                        continue;
-                    }
-                };
-
-            let usage = row
-                .try_get::<serde_json::Value, _>("usage")
-                .ok()
-                .and_then(|v| serde_json::from_value(v).ok());
-
-            let metadata = match row.try_get::<serde_json::Value, _>("metadata") {
-                Ok(v) => serde_json::from_value(v).unwrap_or_else(|e| {
-                    tracing::warn!(id = id_str, error = %e, "Failed to deserialize message metadata");
-                    Default::default()
-                }),
-                Err(_) => Default::default(),
-            };
-
-            let environment = row
-                .try_get::<serde_json::Value, _>("environment")
-                .ok()
-                .and_then(|v| serde_json::from_value(v).ok());
-
-            messages.push(SessionMessage {
-                id,
-                parent_id: row
-                    .try_get::<&str, _>("parent_id")
-                    .ok()
-                    .and_then(|s| s.parse().ok()),
-                role,
-                content,
-                is_sidechain: row.try_get("is_sidechain").unwrap_or(false),
-                is_compact_summary: row.try_get("is_compact_summary").unwrap_or(false),
-                usage,
-                timestamp: row.try_get("created_at").unwrap_or_else(|_| Utc::now()),
-                metadata,
-                environment,
-            });
+                events.push(event);
+            }
         }
+        Ok(events)
+    }
 
-        Ok(messages)
+    async fn load_checkpoints(
+        &self,
+        session_id: &SessionId,
+    ) -> SessionResult<Vec<crate::graph::Checkpoint>> {
+        let c = &self.config;
+        let rows = sqlx::query(&format!(
+            "SELECT id, branch_id, label, note, tags, created_at FROM {} WHERE session_id = $1 ORDER BY created_at ASC",
+            c.checkpoints_table
+        ))
+        .bind(session_id.to_string())
+        .fetch_all(self.pool.as_ref())
+        .await
+        .storage_err()?;
+
+        let mut checkpoints = Vec::with_capacity(rows.len());
+        for row in rows {
+            if let (Ok(id), Ok(branch_id), Ok(label), created_at) = (
+                row.try_get("id"),
+                row.try_get("branch_id"),
+                row.try_get("label"),
+                row.try_get("created_at").unwrap_or_else(|_| Utc::now()),
+            ) {
+                checkpoints.push(crate::graph::Checkpoint {
+                    id,
+                    branch_id,
+                    label,
+                    note: row.try_get("note").ok(),
+                    tags: row
+                        .try_get::<serde_json::Value, _>("tags")
+                        .ok()
+                        .and_then(|v| serde_json::from_value(v).ok())
+                        .unwrap_or_default(),
+                    created_at,
+                });
+            }
+        }
+        Ok(checkpoints)
+    }
+
+    async fn load_bookmarks(
+        &self,
+        session_id: &SessionId,
+    ) -> SessionResult<Vec<crate::graph::Bookmark>> {
+        let c = &self.config;
+        let rows = sqlx::query(&format!(
+            "SELECT id, node_id, branch_id, label, note, created_at FROM {} WHERE session_id = $1 ORDER BY created_at ASC",
+            c.bookmarks_table
+        ))
+        .bind(session_id.to_string())
+        .fetch_all(self.pool.as_ref())
+        .await
+        .storage_err()?;
+
+        let mut bookmarks = Vec::with_capacity(rows.len());
+        for row in rows {
+            if let (Ok(id), Ok(node_id), Ok(branch_id), Ok(label), created_at) = (
+                row.try_get("id"),
+                row.try_get("node_id"),
+                row.try_get("branch_id"),
+                row.try_get("label"),
+                row.try_get("created_at").unwrap_or_else(|_| Utc::now()),
+            ) {
+                bookmarks.push(crate::graph::Bookmark {
+                    id,
+                    node_id,
+                    branch_id,
+                    label,
+                    note: row.try_get("note").ok(),
+                    created_at,
+                });
+            }
+        }
+        Ok(bookmarks)
     }
 
     async fn load_compacts(&self, session_id: &SessionId) -> SessionResult<Vec<CompactRecord>> {
@@ -1267,6 +1371,130 @@ impl PostgresPersistence {
         Ok(())
     }
 
+    async fn save_graph_events_tx(
+        &self,
+        tx: &mut Transaction<'_, Postgres>,
+        session_id: &SessionId,
+        events: &[crate::graph::GraphEvent],
+    ) -> SessionResult<()> {
+        let c = &self.config;
+        let current_ids: Vec<Uuid> = events.iter().map(|event| event.metadata.id).collect();
+
+        for event in events {
+            sqlx::query(&format!(
+                r#"
+                INSERT INTO {graph_events} (id, session_id, event, created_at)
+                VALUES ($1, $2, $3, $4)
+                ON CONFLICT (id) DO UPDATE SET
+                    event = EXCLUDED.event,
+                    created_at = EXCLUDED.created_at
+                "#,
+                graph_events = c.graph_events_table
+            ))
+            .bind(event.metadata.id)
+            .bind(session_id.to_string())
+            .bind(serde_json::to_value(event).unwrap_or_else(|_| serde_json::json!({})))
+            .bind(event.metadata.occurred_at)
+            .execute(&mut **tx)
+            .await
+            .storage_err()?;
+        }
+
+        if !current_ids.is_empty() {
+            sqlx::query(&format!(
+                "DELETE FROM {graph_events} WHERE session_id = $1 AND id != ALL($2)",
+                graph_events = c.graph_events_table
+            ))
+            .bind(session_id.to_string())
+            .bind(&current_ids)
+            .execute(&mut **tx)
+            .await
+            .storage_err()?;
+        }
+
+        Ok(())
+    }
+
+    async fn save_checkpoints_tx(
+        &self,
+        tx: &mut Transaction<'_, Postgres>,
+        session_id: &SessionId,
+        checkpoints: &[crate::graph::Checkpoint],
+    ) -> SessionResult<()> {
+        let c = &self.config;
+        let current_ids: Vec<Uuid> = checkpoints.iter().map(|checkpoint| checkpoint.id).collect();
+
+        for checkpoint in checkpoints {
+            sqlx::query(&format!(
+                "INSERT INTO {} (id, session_id, branch_id, label, note, tags, created_at) VALUES ($1,$2,$3,$4,$5,$6,$7) ON CONFLICT (id) DO UPDATE SET branch_id = EXCLUDED.branch_id, label = EXCLUDED.label, note = EXCLUDED.note, tags = EXCLUDED.tags, created_at = EXCLUDED.created_at",
+                c.checkpoints_table
+            ))
+            .bind(checkpoint.id)
+            .bind(session_id.to_string())
+            .bind(checkpoint.branch_id)
+            .bind(&checkpoint.label)
+            .bind(&checkpoint.note)
+            .bind(serde_json::to_value(&checkpoint.tags).unwrap_or_else(|_| serde_json::json!([])))
+            .bind(checkpoint.created_at)
+            .execute(&mut **tx)
+            .await
+            .storage_err()?;
+        }
+
+        if !current_ids.is_empty() {
+            sqlx::query(&format!(
+                "DELETE FROM {} WHERE session_id = $1 AND id != ALL($2)",
+                c.checkpoints_table
+            ))
+            .bind(session_id.to_string())
+            .bind(&current_ids)
+            .execute(&mut **tx)
+            .await
+            .storage_err()?;
+        }
+        Ok(())
+    }
+
+    async fn save_bookmarks_tx(
+        &self,
+        tx: &mut Transaction<'_, Postgres>,
+        session_id: &SessionId,
+        bookmarks: &[crate::graph::Bookmark],
+    ) -> SessionResult<()> {
+        let c = &self.config;
+        let current_ids: Vec<Uuid> = bookmarks.iter().map(|bookmark| bookmark.id).collect();
+
+        for bookmark in bookmarks {
+            sqlx::query(&format!(
+                "INSERT INTO {} (id, session_id, node_id, branch_id, label, note, created_at) VALUES ($1,$2,$3,$4,$5,$6,$7) ON CONFLICT (id) DO UPDATE SET node_id = EXCLUDED.node_id, branch_id = EXCLUDED.branch_id, label = EXCLUDED.label, note = EXCLUDED.note, created_at = EXCLUDED.created_at",
+                c.bookmarks_table
+            ))
+            .bind(bookmark.id)
+            .bind(session_id.to_string())
+            .bind(bookmark.node_id)
+            .bind(bookmark.branch_id)
+            .bind(&bookmark.label)
+            .bind(&bookmark.note)
+            .bind(bookmark.created_at)
+            .execute(&mut **tx)
+            .await
+            .storage_err()?;
+        }
+
+        if !current_ids.is_empty() {
+            sqlx::query(&format!(
+                "DELETE FROM {} WHERE session_id = $1 AND id != ALL($2)",
+                c.bookmarks_table
+            ))
+            .bind(session_id.to_string())
+            .bind(&current_ids)
+            .execute(&mut **tx)
+            .await
+            .storage_err()?;
+        }
+        Ok(())
+    }
+
     async fn save_inner(&self, session: &Session) -> SessionResult<()> {
         let c = &self.config;
 
@@ -1336,8 +1564,34 @@ impl PostgresPersistence {
         .await
         .storage_err()?;
 
-        self.save_messages_tx(&mut tx, &session.id, &session.messages)
+        let message_projection = session.current_branch_messages();
+
+        self.save_messages_tx(&mut tx, &session.id, &message_projection)
             .await?;
+        self.save_graph_events_tx(&mut tx, &session.id, &session.graph.events)
+            .await?;
+        self.save_checkpoints_tx(
+            &mut tx,
+            &session.id,
+            &session
+                .graph
+                .checkpoints
+                .values()
+                .cloned()
+                .collect::<Vec<_>>(),
+        )
+        .await?;
+        self.save_bookmarks_tx(
+            &mut tx,
+            &session.id,
+            &session
+                .graph
+                .bookmarks
+                .values()
+                .cloned()
+                .collect::<Vec<_>>(),
+        )
+        .await?;
         self.save_todos_tx(&mut tx, &session.id, &session.todos)
             .await?;
         self.save_compacts_tx(&mut tx, &session.id, &session.compact_history)
@@ -1721,5 +1975,64 @@ impl Persistence for PostgresPersistence {
             Ok(result.rows_affected() as usize)
         })
         .await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::session::{Session, SessionConfig};
+    use crate::types::ContentBlock;
+
+    #[test]
+    fn postgres_config_includes_graph_events_table() {
+        let config = PostgresConfig::default();
+        assert!(
+            config
+                .table_names()
+                .contains(&config.graph_events_table.as_str())
+        );
+    }
+
+    #[test]
+    fn postgres_schema_includes_graph_events_table() {
+        let config = PostgresConfig::default();
+        let ddl = PostgresSchema::table_ddl(&config).join("\n");
+        let indexes = PostgresSchema::index_ddl(&config).join("\n");
+
+        assert!(ddl.contains(&config.graph_events_table));
+        assert!(ddl.contains(&config.checkpoints_table));
+        assert!(ddl.contains(&config.bookmarks_table));
+        assert!(indexes.contains(&format!("idx_{}_session", config.graph_events_table)));
+        assert!(indexes.contains(&format!("idx_{}_session", config.checkpoints_table)));
+        assert!(indexes.contains(&format!("idx_{}_session", config.bookmarks_table)));
+    }
+
+    #[test]
+    fn graph_projection_restores_messages_when_events_exist() {
+        let mut session = Session::new(SessionConfig::default());
+        session.add_message(crate::session::SessionMessage::user(vec![
+            ContentBlock::text("hi"),
+        ]));
+        session.add_message(crate::session::SessionMessage::assistant(vec![
+            ContentBlock::text("hello"),
+        ]));
+
+        let mut restored = Session::new(SessionConfig::default());
+        restored.id = session.id;
+        restored.created_at = session.created_at;
+        restored.graph = crate::graph::GraphMaterializer::from_events(&session.graph.events);
+        restored.refresh_message_projection();
+
+        assert_eq!(restored.current_branch_messages().len(), 2);
+    }
+
+    #[test]
+    fn postgres_schema_includes_checkpoint_and_bookmark_tables() {
+        let config = PostgresConfig::default();
+        let ddl = PostgresSchema::table_ddl(&config).join("\n");
+
+        assert!(ddl.contains(&config.checkpoints_table));
+        assert!(ddl.contains(&config.bookmarks_table));
     }
 }

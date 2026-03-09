@@ -9,6 +9,7 @@ use uuid::Uuid;
 use super::state::{Session, SessionId, SessionMessage};
 use super::types::{QueueItem, SummarySnapshot};
 use super::{SessionError, SessionResult};
+use crate::graph::{GraphEvent, GraphMaterializer, SessionGraph};
 
 #[async_trait::async_trait]
 pub trait Persistence: Send + Sync {
@@ -37,6 +38,37 @@ pub trait Persistence: Send + Sync {
 
     // Cleanup
     async fn cleanup_expired(&self) -> SessionResult<usize>;
+
+    async fn append_graph_event(
+        &self,
+        session_id: &SessionId,
+        event: GraphEvent,
+    ) -> SessionResult<()> {
+        let mut session = self
+            .load(session_id)
+            .await?
+            .ok_or_else(|| SessionError::NotFound {
+                id: session_id.to_string(),
+            })?;
+        let graph_id = session.graph.id;
+        let created_at = session.graph.created_at;
+        let primary_branch = session.graph.primary_branch;
+        session.graph.events.push(event);
+        session.graph = GraphMaterializer::from_events(&session.graph.events);
+        session.graph.id = graph_id;
+        session.graph.created_at = created_at;
+        if session.graph.branches.contains_key(&primary_branch) {
+            session.graph.primary_branch = primary_branch;
+        }
+        self.save(&session).await
+    }
+
+    async fn load_graph(&self, session_id: &SessionId) -> SessionResult<Option<SessionGraph>> {
+        Ok(self
+            .load(session_id)
+            .await?
+            .map(|session| session.to_graph()))
+    }
 
     /// Append a message to an existing session.
     ///
@@ -80,6 +112,10 @@ impl MemoryPersistence {
         self.sessions.write().await.clear();
         self.summaries.write().await.clear();
         self.queue.write().await.clear();
+    }
+
+    pub async fn load_graph(&self, session_id: &SessionId) -> SessionResult<Option<SessionGraph>> {
+        <Self as Persistence>::load_graph(self, session_id).await
     }
 }
 
@@ -272,6 +308,7 @@ impl PersistenceFactory {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::graph::{GraphEvent, GraphEventBody, NodeKind};
     use crate::session::state::SessionConfig;
     use crate::types::ContentBlock;
 
@@ -329,7 +366,7 @@ mod tests {
             .unwrap();
 
         let loaded = persistence.load(&id).await.unwrap().unwrap();
-        assert_eq!(loaded.messages.len(), 1);
+        assert_eq!(loaded.current_branch_messages().len(), 1);
     }
 
     #[tokio::test]
@@ -386,5 +423,67 @@ mod tests {
 
         assert_eq!(persistence.cleanup_expired().await.unwrap(), 1);
         assert_eq!(persistence.count().await, 0);
+    }
+
+    #[tokio::test]
+    async fn test_append_graph_event() {
+        let persistence = MemoryPersistence::new();
+        let session = Session::new(SessionConfig::default());
+        let id = session.id;
+
+        persistence.save(&session).await.unwrap();
+        persistence
+            .append_graph_event(
+                &id,
+                GraphEvent::new(GraphEventBody::NodeAppended {
+                    node_id: uuid::Uuid::new_v4(),
+                    branch_id: session.graph.primary_branch,
+                    parent_id: None,
+                    kind: NodeKind::User,
+                    tags: vec!["test".to_string()],
+                    payload: serde_json::json!({"text": "hello"}),
+                }),
+            )
+            .await
+            .unwrap();
+
+        let graph = persistence.load_graph(&id).await.unwrap().unwrap();
+        assert_eq!(graph.events.len(), 1);
+        assert_eq!(graph.branch_nodes(graph.primary_branch).len(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_graph_first_roundtrip_restores_projection() {
+        let persistence = MemoryPersistence::new();
+        let mut session = Session::new(SessionConfig::default());
+        session.add_message(SessionMessage::user(vec![ContentBlock::text("Hello")]));
+        session.clear_messages();
+
+        persistence.save(&session).await.unwrap();
+
+        let loaded = persistence.load(&session.id).await.unwrap().unwrap();
+        assert_eq!(loaded.current_branch_messages().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_graph_first_roundtrip_preserves_bookmarks_and_checkpoints() {
+        let persistence = MemoryPersistence::new();
+        let mut session = Session::new(SessionConfig::default());
+        session.add_message(SessionMessage::user(vec![ContentBlock::text("Hello")]));
+        session.graph.create_checkpoint(
+            session.graph.primary_branch,
+            "milestone",
+            Some("saved".to_string()),
+            vec!["tag".to_string()],
+        );
+        session.bookmark_current_head("head", Some("note".to_string()));
+        session.clear_messages();
+
+        persistence.save(&session).await.unwrap();
+
+        let loaded = persistence.load(&session.id).await.unwrap().unwrap();
+        assert_eq!(loaded.current_branch_messages().len(), 1);
+        assert_eq!(loaded.graph.checkpoints.len(), 1);
+        assert_eq!(loaded.graph.bookmarks.len(), 1);
     }
 }

@@ -35,10 +35,10 @@ use uuid::Uuid;
 
 use super::state::{MessageId, Session, SessionConfig, SessionId, SessionMessage, SessionType};
 use super::types::{
-    CompactRecord, EnvironmentContext, Plan, QueueItem, QueueOperation, QueueStatus,
-    SummarySnapshot, TodoItem,
+    CompactRecord, Plan, QueueItem, QueueOperation, QueueStatus, SummarySnapshot, TodoItem,
 };
 use super::{Persistence, SessionError, SessionResult};
+use crate::graph::{GraphEvent, GraphMaterializer};
 use crate::types::{ContentBlock, Role, TokenUsage};
 
 // ============================================================================
@@ -163,6 +163,9 @@ impl JsonlConfigBuilder {
 pub enum JsonlEntry {
     User(UserEntry),
     Assistant(AssistantEntry),
+    GraphEvent(GraphEventEntry),
+    Bookmark(BookmarkEntry),
+    Checkpoint(CheckpointEntry),
     System(SystemEntry),
     QueueOperation(QueueOperationEntry),
     Summary(SummaryEntry),
@@ -170,6 +173,44 @@ pub enum JsonlEntry {
     Todo(TodoEntry),
     Plan(PlanEntry),
     Compact(CompactEntry),
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct GraphEventEntry {
+    #[serde(rename = "sessionId")]
+    pub session_id: String,
+    #[serde(rename = "eventId")]
+    pub event_id: String,
+    pub event: GraphEvent,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct BookmarkEntry {
+    #[serde(rename = "sessionId")]
+    pub session_id: String,
+    pub id: String,
+    #[serde(rename = "nodeId")]
+    pub node_id: String,
+    #[serde(rename = "branchId")]
+    pub branch_id: String,
+    pub label: String,
+    pub note: Option<String>,
+    #[serde(rename = "createdAt")]
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct CheckpointEntry {
+    #[serde(rename = "sessionId")]
+    pub session_id: String,
+    pub id: String,
+    #[serde(rename = "branchId")]
+    pub branch_id: String,
+    pub label: String,
+    pub note: Option<String>,
+    pub tags: Vec<String>,
+    #[serde(rename = "createdAt")]
+    pub created_at: DateTime<Utc>,
 }
 
 /// Common fields shared by message entries.
@@ -205,18 +246,6 @@ impl EntryCommon {
                 .and_then(|e| e.git_branch.clone())
                 .unwrap_or_default(),
             is_sidechain: msg.is_sidechain,
-        }
-    }
-
-    fn to_environment(&self) -> EnvironmentContext {
-        EnvironmentContext {
-            cwd: self.cwd.clone(),
-            git_branch: if self.git_branch.is_empty() {
-                None
-            } else {
-                Some(self.git_branch.clone())
-            },
-            ..Default::default()
         }
     }
 }
@@ -459,58 +488,12 @@ impl JsonlEntry {
         }
     }
 
-    fn to_session_message(&self) -> Option<SessionMessage> {
-        match self {
-            JsonlEntry::User(entry) => {
-                let content: Vec<ContentBlock> =
-                    serde_json::from_value(entry.message.content.clone()).unwrap_or_else(|e| {
-                        tracing::warn!(
-                            uuid = %entry.common.uuid,
-                            error = %e,
-                            "Failed to deserialize user message content"
-                        );
-                        Vec::new()
-                    });
-                let mut msg = SessionMessage::user(content);
-                msg.id = MessageId::from_string(&entry.common.uuid);
-                msg.parent_id = entry
-                    .common
-                    .parent_uuid
-                    .as_ref()
-                    .map(MessageId::from_string);
-                msg.timestamp = entry.common.timestamp;
-                msg.is_sidechain = entry.common.is_sidechain;
-                msg.is_compact_summary = entry.is_compact_summary;
-                msg.environment = Some(entry.common.to_environment());
-                Some(msg)
-            }
-            JsonlEntry::Assistant(entry) => {
-                let content: Vec<ContentBlock> =
-                    serde_json::from_value(entry.message.content.clone()).unwrap_or_else(|e| {
-                        tracing::warn!(
-                            uuid = %entry.common.uuid,
-                            error = %e,
-                            "Failed to deserialize assistant message content"
-                        );
-                        Vec::new()
-                    });
-                let mut msg = SessionMessage::assistant(content);
-                msg.id = MessageId::from_string(&entry.common.uuid);
-                msg.parent_id = entry
-                    .common
-                    .parent_uuid
-                    .as_ref()
-                    .map(MessageId::from_string);
-                msg.timestamp = entry.common.timestamp;
-                msg.is_sidechain = entry.common.is_sidechain;
-                msg.usage = entry.message.usage.as_ref().map(TokenUsage::from);
-                msg.metadata.model.clone_from(&entry.message.model);
-                msg.metadata.request_id.clone_from(&entry.request_id);
-                msg.environment = Some(entry.common.to_environment());
-                Some(msg)
-            }
-            _ => None,
-        }
+    fn from_graph_event(session_id: &SessionId, event: &GraphEvent) -> Self {
+        JsonlEntry::GraphEvent(GraphEventEntry {
+            session_id: session_id.to_string(),
+            event_id: event.metadata.id.to_string(),
+            event: event.clone(),
+        })
     }
 
     #[cfg(test)]
@@ -518,6 +501,14 @@ impl JsonlEntry {
         match self {
             JsonlEntry::User(e) => Some(&e.common.uuid),
             JsonlEntry::Assistant(e) => Some(&e.common.uuid),
+            _ => None,
+        }
+    }
+
+    #[cfg(test)]
+    fn graph_event_id(&self) -> Option<&str> {
+        match self {
+            JsonlEntry::GraphEvent(e) => Some(&e.event_id),
             _ => None,
         }
     }
@@ -818,6 +809,15 @@ impl JsonlPersistence {
                     updated_at = e.common.timestamp;
                     persisted_ids.insert(e.common.uuid.clone());
                 }
+                JsonlEntry::GraphEvent(e) => {
+                    persisted_ids.insert(format!("graph:{}", e.event_id));
+                }
+                JsonlEntry::Bookmark(e) => {
+                    persisted_ids.insert(format!("bookmark:{}", e.id));
+                }
+                JsonlEntry::Checkpoint(e) => {
+                    persisted_ids.insert(format!("checkpoint:{}", e.id));
+                }
                 JsonlEntry::SessionMeta(m) => {
                     tenant_id.clone_from(&m.tenant_id);
                     updated_at = m.updated_at;
@@ -969,18 +969,16 @@ impl JsonlPersistence {
         let mut session = Session::new(SessionConfig::default());
         session.id = session_id;
 
-        let mut messages: HashMap<String, SessionMessage> = HashMap::with_capacity(entries.len());
         let mut todos_map: HashMap<String, TodoItem> = HashMap::new();
         let mut latest_plan: Option<Plan> = None;
         let mut compacts: Vec<CompactRecord> = Vec::new();
+        let mut graph_events: Vec<GraphEvent> = Vec::new();
+        let mut bookmarks: Vec<BookmarkEntry> = Vec::new();
+        let mut checkpoints: Vec<CheckpointEntry> = Vec::new();
 
         for entry in entries {
             match entry {
-                JsonlEntry::User(_) | JsonlEntry::Assistant(_) => {
-                    if let Some(msg) = entry.to_session_message() {
-                        messages.insert(msg.id.to_string(), msg);
-                    }
-                }
+                JsonlEntry::User(_) | JsonlEntry::Assistant(_) => {}
                 JsonlEntry::SessionMeta(m) => {
                     session.tenant_id = m.tenant_id;
                     session.parent_id = m
@@ -1065,15 +1063,11 @@ impl JsonlPersistence {
                         created_at: c.created_at,
                     });
                 }
+                JsonlEntry::GraphEvent(entry) => graph_events.push(entry.event),
+                JsonlEntry::Bookmark(entry) => bookmarks.push(entry),
+                JsonlEntry::Checkpoint(entry) => checkpoints.push(entry),
                 _ => {}
             }
-        }
-
-        // Topological sort preserving order
-        let ordered = Self::topological_sort(&messages);
-        session.messages = Vec::with_capacity(ordered.len());
-        for msg in ordered {
-            session.add_message(msg);
         }
 
         // Restore todos, plan, and compacts
@@ -1083,47 +1077,49 @@ impl JsonlPersistence {
             .sort_by(|a, b| a.created_at.cmp(&b.created_at));
         session.current_plan = latest_plan;
         session.compact_history = VecDeque::from(compacts);
-
-        session
-    }
-
-    fn topological_sort(messages: &HashMap<String, SessionMessage>) -> Vec<SessionMessage> {
-        if messages.is_empty() {
-            return Vec::new();
-        }
-
-        // Build parent -> children mapping, sorted by timestamp to preserve order
-        let mut children: HashMap<Option<String>, Vec<&SessionMessage>> = HashMap::new();
-        for msg in messages.values() {
-            children
-                .entry(msg.parent_id.as_ref().map(|p| p.to_string()))
-                .or_default()
-                .push(msg);
-        }
-
-        // Sort each group by timestamp
-        for group in children.values_mut() {
-            group.sort_by(|a, b| a.timestamp.cmp(&b.timestamp));
-        }
-
-        // BFS traversal using VecDeque for FIFO order
-        let mut result = Vec::with_capacity(messages.len());
-        let mut queue = std::collections::VecDeque::new();
-
-        // Start with root messages (no parent)
-        if let Some(roots) = children.remove(&None) {
-            queue.extend(roots);
-        }
-
-        while let Some(msg) = queue.pop_front() {
-            let id = msg.id.to_string();
-            result.push(msg.clone());
-            if let Some(child_msgs) = children.remove(&Some(id)) {
-                queue.extend(child_msgs);
+        session.graph = GraphMaterializer::from_events(&graph_events);
+        session.graph.id = session.id.0;
+        session.graph.created_at = session.created_at;
+        for bookmark in bookmarks {
+            if let (Ok(id), Ok(node_id), Ok(branch_id)) = (
+                Uuid::parse_str(&bookmark.id),
+                Uuid::parse_str(&bookmark.node_id),
+                Uuid::parse_str(&bookmark.branch_id),
+            ) {
+                session.graph.bookmarks.insert(
+                    id,
+                    crate::graph::Bookmark {
+                        id,
+                        node_id,
+                        branch_id,
+                        label: bookmark.label,
+                        note: bookmark.note,
+                        created_at: bookmark.created_at,
+                    },
+                );
             }
         }
+        for checkpoint in checkpoints {
+            if let (Ok(id), Ok(branch_id)) = (
+                Uuid::parse_str(&checkpoint.id),
+                Uuid::parse_str(&checkpoint.branch_id),
+            ) {
+                session.graph.checkpoints.insert(
+                    id,
+                    crate::graph::Checkpoint {
+                        id,
+                        branch_id,
+                        label: checkpoint.label,
+                        note: checkpoint.note,
+                        tags: checkpoint.tags,
+                        created_at: checkpoint.created_at,
+                    },
+                );
+            }
+        }
+        session.refresh_message_projection();
 
-        result
+        session
     }
 }
 
@@ -1152,11 +1148,53 @@ impl Persistence for JsonlPersistence {
         new_entries.push(Self::session_to_meta_entry(session));
 
         // Only new messages (incremental)
-        for msg in &session.messages {
+        let message_projection = session.current_branch_messages();
+
+        for msg in &message_projection {
             let id = msg.id.to_string();
             if !persisted_ids.contains(&id) {
                 new_entries.push(JsonlEntry::from_message(&session.id, msg));
                 new_ids.insert(id);
+            }
+        }
+
+        for event in &session.graph.events {
+            let event_id = format!("graph:{}", event.metadata.id);
+            if !persisted_ids.contains(&event_id) {
+                new_entries.push(JsonlEntry::from_graph_event(&session.id, event));
+                new_ids.insert(event_id);
+            }
+        }
+
+        for bookmark in session.graph.bookmarks.values() {
+            let bookmark_id = format!("bookmark:{}", bookmark.id);
+            if !persisted_ids.contains(&bookmark_id) {
+                new_entries.push(JsonlEntry::Bookmark(BookmarkEntry {
+                    session_id: session.id.to_string(),
+                    id: bookmark.id.to_string(),
+                    node_id: bookmark.node_id.to_string(),
+                    branch_id: bookmark.branch_id.to_string(),
+                    label: bookmark.label.clone(),
+                    note: bookmark.note.clone(),
+                    created_at: bookmark.created_at,
+                }));
+                new_ids.insert(bookmark_id);
+            }
+        }
+
+        for checkpoint in session.graph.checkpoints.values() {
+            let checkpoint_id = format!("checkpoint:{}", checkpoint.id);
+            if !persisted_ids.contains(&checkpoint_id) {
+                new_entries.push(JsonlEntry::Checkpoint(CheckpointEntry {
+                    session_id: session.id.to_string(),
+                    id: checkpoint.id.to_string(),
+                    branch_id: checkpoint.branch_id.to_string(),
+                    label: checkpoint.label.clone(),
+                    note: checkpoint.note.clone(),
+                    tags: checkpoint.tags.clone(),
+                    created_at: checkpoint.created_at,
+                }));
+                new_ids.insert(checkpoint_id);
             }
         }
 
@@ -1583,7 +1621,7 @@ mod tests {
 
         let loaded = persistence.load(&session.id).await.unwrap().unwrap();
         assert_eq!(loaded.id, session.id);
-        assert_eq!(loaded.messages.len(), 2);
+        assert_eq!(loaded.current_branch_messages().len(), 2);
     }
 
     #[tokio::test]
@@ -1600,7 +1638,7 @@ mod tests {
         persistence.save(&session).await.unwrap();
 
         let loaded = persistence.load(&session.id).await.unwrap().unwrap();
-        assert_eq!(loaded.messages.len(), 2);
+        assert_eq!(loaded.current_branch_messages().len(), 2);
     }
 
     #[tokio::test]
@@ -1700,27 +1738,28 @@ mod tests {
 
         let loaded = persistence.load(&session.id).await.unwrap().unwrap();
 
-        assert_eq!(loaded.messages.len(), 4);
+        let messages = loaded.current_branch_messages();
+        assert_eq!(messages.len(), 4);
         assert!(
-            loaded.messages[0]
+            messages[0]
                 .content
                 .iter()
                 .any(|c| c.as_text() == Some("Q1"))
         );
         assert!(
-            loaded.messages[1]
+            messages[1]
                 .content
                 .iter()
                 .any(|c| c.as_text() == Some("A1"))
         );
         assert!(
-            loaded.messages[2]
+            messages[2]
                 .content
                 .iter()
                 .any(|c| c.as_text() == Some("Q2"))
         );
         assert!(
-            loaded.messages[3]
+            messages[3]
                 .content
                 .iter()
                 .any(|c| c.as_text() == Some("A2"))
@@ -1754,6 +1793,24 @@ mod tests {
         assert!(matches!(parsed, JsonlEntry::User(_)));
     }
 
+    #[test]
+    fn test_graph_event_entry_serialization() {
+        let session_id = SessionId::new();
+        let event = GraphEvent::new(crate::graph::GraphEventBody::NodeAppended {
+            node_id: Uuid::new_v4(),
+            branch_id: Uuid::new_v4(),
+            parent_id: None,
+            kind: crate::graph::NodeKind::User,
+            tags: vec!["test".to_string()],
+            payload: serde_json::json!({"content": []}),
+        });
+        let entry = JsonlEntry::from_graph_event(&session_id, &event);
+
+        let json = serde_json::to_string(&entry).unwrap();
+        let parsed: JsonlEntry = serde_json::from_str(&json).unwrap();
+        assert!(matches!(parsed, JsonlEntry::GraphEvent(_)));
+    }
+
     #[tokio::test]
     async fn test_no_duplicate_writes() {
         let (persistence, _temp) = create_test_persistence().await;
@@ -1772,6 +1829,128 @@ mod tests {
             .filter(|e| e.message_uuid().is_some())
             .count();
         assert_eq!(message_count, 1, "Should not duplicate message entries");
+
+        let graph_event_count = entries
+            .iter()
+            .filter(|e| e.graph_event_id().is_some())
+            .count();
+        assert_eq!(
+            graph_event_count, 1,
+            "Should not duplicate graph event entries"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_graph_events_roundtrip() {
+        let (persistence, _temp) = create_test_persistence().await;
+
+        let mut session = Session::new(SessionConfig::default());
+        session.add_message(SessionMessage::user(vec![ContentBlock::text("Hello")]));
+        session.add_message(SessionMessage::assistant(vec![ContentBlock::text("Hi")]));
+        assert_eq!(session.graph.events.len(), 2);
+
+        persistence.save(&session).await.unwrap();
+
+        let file_path = persistence.session_file_path(&session.id, None);
+        let raw = std::fs::read_to_string(&file_path).unwrap();
+        assert!(raw.contains("\"type\":\"graph_event\""));
+        let entries = read_entries_sync(&file_path).unwrap();
+        assert_eq!(
+            entries
+                .iter()
+                .filter(|e| e.graph_event_id().is_some())
+                .count(),
+            2
+        );
+
+        let loaded = persistence.load(&session.id).await.unwrap().unwrap();
+        assert_eq!(loaded.graph.events.len(), 2);
+        assert_eq!(loaded.current_branch_messages().len(), 2);
+        assert_eq!(
+            loaded.graph.branch_nodes(loaded.graph.primary_branch).len(),
+            2
+        );
+    }
+
+    #[tokio::test]
+    async fn test_bookmarks_roundtrip() {
+        let (persistence, _temp) = create_test_persistence().await;
+
+        let mut session = Session::new(SessionConfig::default());
+        session.add_message(SessionMessage::user(vec![ContentBlock::text("Hello")]));
+        session.bookmark_current_head("start", Some("saved".to_string()));
+
+        persistence.save(&session).await.unwrap();
+
+        let loaded = persistence.load(&session.id).await.unwrap().unwrap();
+        assert_eq!(loaded.graph.bookmarks.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_checkpoints_roundtrip() {
+        let (persistence, _temp) = create_test_persistence().await;
+
+        let mut session = Session::new(SessionConfig::default());
+        session.add_message(SessionMessage::user(vec![ContentBlock::text("Hello")]));
+        session.graph.create_checkpoint(
+            session.graph.primary_branch,
+            "milestone",
+            Some("saved".to_string()),
+            vec!["tag".to_string()],
+        );
+
+        persistence.save(&session).await.unwrap();
+
+        let loaded = persistence.load(&session.id).await.unwrap().unwrap();
+        assert_eq!(loaded.graph.checkpoints.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_graph_first_roundtrip_uses_projection_helper() {
+        let (persistence, _temp) = create_test_persistence().await;
+
+        let mut session = Session::new(SessionConfig::default());
+        session.add_message(SessionMessage::user(vec![ContentBlock::text("hello")]));
+        session.add_message(SessionMessage::assistant(vec![ContentBlock::text("world")]));
+        session.clear_messages();
+
+        persistence.save(&session).await.unwrap();
+
+        let loaded = persistence.load(&session.id).await.unwrap().unwrap();
+        let messages = loaded.current_branch_messages();
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0].content[0].as_text(), Some("hello"));
+        assert_eq!(messages[1].content[0].as_text(), Some("world"));
+    }
+
+    #[tokio::test]
+    async fn test_direct_graph_event_append_roundtrip() {
+        let (persistence, _temp) = create_test_persistence().await;
+        let path = persistence.session_file_path(&SessionId::new(), None);
+        let event = GraphEvent::new(crate::graph::GraphEventBody::NodeAppended {
+            node_id: Uuid::new_v4(),
+            branch_id: Uuid::new_v4(),
+            parent_id: None,
+            kind: crate::graph::NodeKind::User,
+            tags: Vec::new(),
+            payload: serde_json::json!({"content": []}),
+        });
+
+        append_entries_sync(
+            &path,
+            &[JsonlEntry::from_graph_event(&SessionId::new(), &event)],
+            true,
+        )
+        .unwrap();
+
+        let entries = read_entries_sync(&path).unwrap();
+        assert_eq!(
+            entries
+                .iter()
+                .filter(|e| e.graph_event_id().is_some())
+                .count(),
+            1
+        );
     }
 
     #[test]

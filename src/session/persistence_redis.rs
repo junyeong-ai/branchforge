@@ -196,9 +196,11 @@ impl Persistence for RedisPersistence {
     async fn save(&self, session: &Session) -> SessionResult<()> {
         let mut conn = self.get_connection().await?;
         let key = self.session_key(&session.id);
-        let data = serde_json::to_string(session).map_err(SessionError::Serialization)?;
+        let mut persisted = session.clone();
+        persisted.refresh_message_projection();
+        let data = serde_json::to_string(&persisted).map_err(SessionError::Serialization)?;
 
-        let ttl_secs = session
+        let ttl_secs = persisted
             .config
             .ttl_secs
             .or_else(|| self.config.default_ttl.map(|d| d.as_secs()));
@@ -215,16 +217,16 @@ impl Persistence for RedisPersistence {
             }
         }
 
-        if let Some(ref tenant_id) = session.tenant_id {
+        if let Some(ref tenant_id) = persisted.tenant_id {
             pipe.cmd("SADD")
                 .arg(self.tenant_key(tenant_id))
-                .arg(session.id.to_string());
+                .arg(persisted.id.to_string());
         }
 
-        if let Some(parent_id) = session.parent_id {
+        if let Some(parent_id) = persisted.parent_id {
             pipe.cmd("SADD")
                 .arg(self.children_key(&parent_id))
-                .arg(session.id.to_string());
+                .arg(persisted.id.to_string());
         }
 
         pipe.query_async::<()>(&mut conn).await.storage_err()?;
@@ -240,8 +242,9 @@ impl Persistence for RedisPersistence {
 
         match data {
             Some(json) => {
-                let session: Session =
+                let mut session: Session =
                     serde_json::from_str(&json).map_err(SessionError::Serialization)?;
+                session.refresh_message_projection();
                 Ok(Some(session))
             }
             None => Ok(None),
