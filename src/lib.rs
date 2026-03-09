@@ -1,9 +1,10 @@
 //! # claude-agent
 //!
-//! Rust SDK for building AI agents with Anthropic's Claude.
+//! Rust runtime for building stateful coding agents.
 //!
-//! This crate provides a production-ready, memory-efficient way to build AI agents
-//! using the Anthropic Messages API directly, without CLI subprocess dependencies.
+//! This crate provides a production-ready, provider-agnostic runtime for long-lived
+//! agent workflows with durable session graphs, safe tool execution, and explicit
+//! provider capabilities.
 //!
 //! ## Quick Start
 //!
@@ -60,6 +61,8 @@ pub mod client;
 pub mod common;
 pub mod config;
 pub mod context;
+pub mod credentials;
+pub mod graph;
 pub mod hooks;
 pub mod mcp;
 pub mod models;
@@ -69,7 +72,10 @@ pub mod permissions;
 #[cfg(feature = "plugins")]
 pub mod plugins;
 pub mod prelude;
+pub mod prompting;
 pub mod prompts;
+pub mod provider;
+pub mod runtime;
 pub mod security;
 pub mod session;
 pub mod skills;
@@ -85,7 +91,15 @@ pub mod types;
 pub use agent::{Agent, AgentBuilder, AgentConfig, AgentEvent, AgentResult};
 pub use auth::{Auth, Credential};
 pub use client::{Client, ClientBuilder};
+pub use credentials::{CredentialKind, CredentialRecord};
+pub use graph::{
+    Bookmark, Branch, BranchExport, BranchId, Checkpoint, ExportBookmark, ExportNode, GraphEvent,
+    GraphEventBody, GraphMaterializer, GraphNode, NodeId, NodeKind, ReplayInput, SessionGraph,
+};
 pub use permissions::{PermissionMode, PermissionPolicy};
+pub use prompting::PromptFrame;
+pub use provider::{CapabilitySupport, ProviderProfile};
+pub use runtime::{RunDescriptor, RuntimeEventRecorder};
 pub use tools::{ExecutionContext, SchemaTool, Tool, ToolAccess, ToolRegistry};
 pub use types::{ContentBlock, Message, Role, ToolDefinition, ToolError, ToolOutput, ToolResult};
 

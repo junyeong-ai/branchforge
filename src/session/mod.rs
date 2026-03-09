@@ -1,6 +1,7 @@
 //! Session management for stateful conversations.
 
 pub mod compact;
+mod export;
 pub mod manager;
 pub mod persistence;
 #[cfg(feature = "jsonl")]
@@ -16,6 +17,7 @@ pub mod types;
 
 pub use crate::types::TokenUsage;
 pub use compact::{CompactExecutor, CompactStrategy, DEFAULT_COMPACT_THRESHOLD};
+pub use export::{branch_export_to_html, branch_export_to_json};
 pub use manager::SessionManager;
 pub use persistence::{MemoryPersistence, Persistence, PersistenceFactory};
 #[cfg(feature = "jsonl")]
