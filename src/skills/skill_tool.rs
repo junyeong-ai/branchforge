@@ -7,7 +7,7 @@ use schemars::JsonSchema;
 use serde::Deserialize;
 use tokio::sync::RwLock;
 
-use super::{SkillExecutor, SkillIndex};
+use super::{SkillIndex, SkillRuntime};
 use crate::common::IndexRegistry;
 use crate::tools::{ExecutionContext, SchemaTool};
 use crate::types::ToolResult;
@@ -17,30 +17,30 @@ use crate::types::ToolResult;
 /// Skills are stored as lightweight indices (metadata only). Full content
 /// is loaded on-demand only when the skill is executed.
 pub struct SkillTool {
-    executor: Arc<RwLock<SkillExecutor>>,
+    runtime: Arc<RwLock<SkillRuntime>>,
 }
 
 impl SkillTool {
-    /// Create a new SkillTool with the given executor.
-    pub fn new(executor: SkillExecutor) -> Self {
+    /// Create a new SkillTool with the given runtime.
+    pub fn new(runtime: SkillRuntime) -> Self {
         Self {
-            executor: Arc::new(RwLock::new(executor)),
+            runtime: Arc::new(RwLock::new(runtime)),
         }
     }
 
     /// Create a SkillTool with an empty registry.
     pub fn defaults() -> Self {
-        Self::new(SkillExecutor::defaults())
+        Self::new(SkillRuntime::defaults())
     }
 
     /// Create a SkillTool with a pre-populated registry.
     pub fn registry(registry: IndexRegistry<SkillIndex>) -> Self {
-        Self::new(SkillExecutor::new(registry))
+        Self::new(SkillRuntime::new(registry))
     }
 
-    /// Get a reference to the executor.
-    pub fn executor(&self) -> &Arc<RwLock<SkillExecutor>> {
-        &self.executor
+    /// Get a reference to the runtime.
+    pub fn runtime(&self) -> &Arc<RwLock<SkillRuntime>> {
+        &self.runtime
     }
 
     /// Generate description with available skills list.
@@ -52,18 +52,17 @@ impl SkillTool {
     /// The skill list includes only metadata (name, description, tools),
     /// NOT the full content - this is the progressive disclosure pattern.
     pub async fn description_with_skills(&self) -> String {
-        let executor = self.executor.read().await;
-        let registry = executor.registry();
-        Self::build_description(registry)
+        let runtime = self.runtime.read().await;
+        Self::build_description(runtime.list_model_invocable_skills())
     }
 
     /// Build the full dynamic description from a registry snapshot.
-    fn build_description(registry: &IndexRegistry<SkillIndex>) -> String {
-        let skills_section = if registry.is_empty() {
+    fn build_description(skills: Vec<&SkillIndex>) -> String {
+        let skills_section = if skills.is_empty() {
             "<skill>\n<name>No skills registered</name>\n<description>Register skills using IndexRegistry</description>\n</skill>".to_string()
         } else {
-            registry
-                .iter()
+            skills
+                .into_iter()
                 .map(|skill| {
                     let tools_hint = if skill.allowed_tools.is_empty() {
                         String::new()
@@ -124,14 +123,14 @@ Important:
 
     /// Register a skill in the executor's registry.
     pub async fn register_skill(&self, skill: SkillIndex) {
-        let mut executor = self.executor.write().await;
-        executor.registry_mut().register(skill);
+        let mut runtime = self.runtime.write().await;
+        runtime.registry_mut().register(skill);
     }
 
     /// Register multiple skills.
     pub async fn register_skills(&self, skills: impl IntoIterator<Item = SkillIndex>) {
-        let mut executor = self.executor.write().await;
-        executor.registry_mut().register_all(skills);
+        let mut runtime = self.runtime.write().await;
+        runtime.registry_mut().register_all(skills);
     }
 }
 
@@ -162,15 +161,15 @@ impl SchemaTool for SkillTool {
         // try_read() is intentional: custom_description() is sync (called from Tool::definition()),
         // so we cannot .await. On lock contention, falls back to static DESCRIPTION — acceptable
         // because definition() is typically called during setup, not under write-lock contention.
-        self.executor
+        self.runtime
             .try_read()
             .ok()
-            .map(|executor| Self::build_description(executor.registry()))
+            .map(|runtime| Self::build_description(runtime.list_model_invocable_skills()))
     }
 
     async fn handle(&self, input: SkillInput, _context: &ExecutionContext) -> ToolResult {
-        let executor = self.executor.read().await;
-        let result = executor.execute(&input.skill, input.args.as_deref()).await;
+        let runtime = self.runtime.read().await;
+        let result = runtime.execute(&input.skill, input.args.as_deref()).await;
 
         if result.success {
             ToolResult::success(result.output)
@@ -243,8 +242,8 @@ mod tests {
     #[tokio::test]
     async fn test_skill_tool_with_defaults() {
         let tool = SkillTool::defaults();
-        let executor = tool.executor.read().await;
-        assert!(!executor.has_skill("nonexistent"));
+        let runtime = tool.runtime.read().await;
+        assert!(!runtime.has_skill("nonexistent"));
     }
 
     #[tokio::test]
@@ -288,8 +287,8 @@ mod tests {
         tool.register_skill(test_skill("dynamic", "Dynamic skill", "content"))
             .await;
 
-        let executor = tool.executor.read().await;
-        assert!(executor.has_skill("dynamic"));
+        let runtime = tool.runtime.read().await;
+        assert!(runtime.has_skill("dynamic"));
     }
 
     #[test]

@@ -6,7 +6,7 @@ use crate::client::{CloudProvider, ProviderConfig};
 use crate::common::Index;
 use crate::common::IndexRegistry;
 use crate::context::{MemoryProvider, PromptOrchestrator, RuleIndex, StaticContext};
-use crate::skills::SkillExecutor;
+use crate::skills::SkillRuntime;
 use crate::tools::{ToolRegistry, ToolSearchConfig, ToolSearchManager};
 
 use super::builder::AgentBuilder;
@@ -354,7 +354,10 @@ impl AgentBuilder {
         let skill_count = skill_registry.iter().count();
         tracing::debug!(skill_count, "build_tools: skill_registry taken");
         let subagent_registry = self.subagent_registry.take();
-        let skill_executor = SkillExecutor::new(skill_registry);
+        let mut skill_executor = SkillRuntime::new(skill_registry);
+        if let Some(ref registry) = subagent_registry {
+            skill_executor = skill_executor.subagent_registry(registry.clone());
+        }
 
         let working_dir = self
             .config

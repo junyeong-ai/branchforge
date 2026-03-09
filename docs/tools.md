@@ -35,6 +35,15 @@ ToolAccess::except(["Bash", "Write"]);
 - shell execution is analyzed before execution
 - permission rules can restrict tools and scoped inputs
 
+## Skill Tool
+
+The `Skill` tool is a progressive-disclosure tool.
+
+- it exposes lightweight skill metadata in tool descriptions
+- it loads full skill content only on invocation
+- inline skills return rendered instructions into the current conversation
+- forked skills delegate execution through a separate agent context
+
 ## Related Guides
 
 - `permissions.md`

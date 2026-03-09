@@ -125,7 +125,7 @@ pub use output_style::OutputStyle;
 pub use session::{
     Session, SessionConfig, SessionId, SessionManager, SessionMessage, SessionState, ToolState,
 };
-pub use skills::{SkillExecutor, SkillIndex, SkillResult};
+pub use skills::{SkillIndex, SkillResult, SkillRuntime};
 pub use subagents::{SubagentIndex, builtin_subagents};
 
 #[cfg(feature = "cli-integration")]

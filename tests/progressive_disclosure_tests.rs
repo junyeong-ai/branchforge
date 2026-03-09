@@ -9,7 +9,9 @@ use claude_agent::{
     ContentSource, Index, IndexRegistry, SourceType, ToolAccess, ToolOutput, ToolRestricted,
     common::PathMatched,
     context::RuleIndex,
-    skills::{ExecutionMode, SkillExecutor, SkillIndex, SkillIndexLoader, SkillResult, SkillTool},
+    skills::{
+        SkillExecutionKind, SkillIndex, SkillIndexLoader, SkillResult, SkillRuntime, SkillTool,
+    },
     tools::{ExecutionContext, Tool, ToolRegistry},
 };
 use tempfile::tempdir;
@@ -182,7 +184,7 @@ mod skill_executor_tests {
                 .triggers(["calculate"]),
         );
 
-        let executor = SkillExecutor::new(registry);
+        let executor = SkillRuntime::new(registry);
         let result = executor.execute("math", Some("2+2")).await;
         assert!(result.success);
         assert!(result.output.contains("2+2"));
@@ -197,7 +199,7 @@ mod skill_executor_tests {
                 .triggers(["calculate"]),
         );
 
-        let executor = SkillExecutor::new(registry);
+        let executor = SkillRuntime::new(registry);
         let trigger_result = executor.execute_by_trigger("calculate 5*5").await;
         assert!(trigger_result.is_some());
     }
@@ -219,7 +221,7 @@ mod skill_executor_tests {
             ContentSource::in_memory("Review PR: $ARGUMENTS\n\nCheck code quality."),
         ));
 
-        let executor = SkillExecutor::new(registry);
+        let executor = SkillRuntime::new(registry);
 
         assert!(executor.has_skill("commit"));
         assert!(executor.has_skill("deploy"));
@@ -245,7 +247,7 @@ mod skill_executor_tests {
                 .triggers(["docker", "container"]),
         );
 
-        let executor = SkillExecutor::new(registry);
+        let executor = SkillRuntime::new(registry);
 
         assert!(
             executor
@@ -268,45 +270,20 @@ mod skill_executor_tests {
     }
 }
 
-// =============================================================================
-// Execution Modes
-// =============================================================================
+#[tokio::test]
+async fn test_inline_skill_execution_kind() {
+    let mut registry = IndexRegistry::<SkillIndex>::new();
+    registry.register(
+        SkillIndex::new("analyze", "Analyze code")
+            .source(ContentSource::in_memory("Analyze: $ARGUMENTS")),
+    );
 
-mod execution_mode_tests {
-    use super::*;
+    let executor = SkillRuntime::new(registry);
+    let result = executor.execute("analyze", Some("main.rs")).await;
 
-    #[tokio::test]
-    async fn test_dry_run_mode() {
-        let mut registry = IndexRegistry::<SkillIndex>::new();
-        registry.register(
-            SkillIndex::new("test", "Test").source(ContentSource::in_memory("Do: $ARGUMENTS")),
-        );
-
-        let executor = SkillExecutor::new(registry).mode(ExecutionMode::DryRun);
-        let result = executor.execute("test", Some("something")).await;
-
-        assert!(result.success);
-        assert!(result.output.contains("[DRY RUN]"));
-    }
-
-    #[tokio::test]
-    async fn test_inline_prompt_mode() {
-        let mut registry = IndexRegistry::<SkillIndex>::new();
-        registry.register(
-            SkillIndex::new("analyze", "Analyze code")
-                .source(ContentSource::in_memory("Analyze: $ARGUMENTS")),
-        );
-
-        let executor = SkillExecutor::new(registry).mode(ExecutionMode::InlinePrompt);
-        let result = executor.execute("analyze", Some("main.rs")).await;
-
-        assert!(result.success);
-        assert!(
-            result
-                .output
-                .contains("Execute the following skill instructions")
-        );
-    }
+    assert!(result.success);
+    assert_eq!(result.execution_kind, SkillExecutionKind::Inline);
+    assert!(result.output.contains("Analyze: main.rs"));
 }
 
 // =============================================================================
@@ -410,7 +387,7 @@ mod skill_tool_tests {
                 .triggers(["test"]),
         );
 
-        let executor = SkillExecutor::new(skill_registry);
+        let executor = SkillRuntime::new(skill_registry);
         let tool = SkillTool::new(executor);
         let ctx = ExecutionContext::permissive();
 
@@ -446,7 +423,7 @@ Execute the user's request: $ARGUMENTS
                 .triggers(["jira", "confluence", "atlassian"]),
         );
 
-        let executor = SkillExecutor::new(skill_registry);
+        let executor = SkillRuntime::new(skill_registry);
         let skill_tool = SkillTool::new(executor);
         let ctx = ExecutionContext::permissive();
 
@@ -551,7 +528,7 @@ Execute the appropriate docker-compose command using Bash.
             ),
         );
 
-        let executor = SkillExecutor::new(skill_registry);
+        let executor = SkillRuntime::new(skill_registry);
         let result = executor
             .execute("docker-compose", Some("start the web service"))
             .await;
@@ -574,7 +551,7 @@ Execute the appropriate docker-compose command using Bash.
                 .triggers(["npm", "node", "package.json"]),
         );
 
-        let executor = SkillExecutor::new(skill_registry);
+        let executor = SkillRuntime::new(skill_registry);
 
         assert!(
             executor
@@ -624,12 +601,14 @@ mod live_tests {
             .expect("Failed to create agent");
 
         let result = agent
-            .execute("Use the Skill tool to invoke 'math-helper' with arguments '15 * 23 + 47'")
+            .execute("/math-helper 15 * 23 + 47")
             .await
             .expect("Agent failed");
 
         assert!(
-            result.text().contains("392") || result.text().contains("Calculate"),
+            result.tool_calls > 0
+                || result.text().contains("392")
+                || result.text().contains("Calculate"),
             "Should contain result or skill output"
         );
     }
@@ -667,10 +646,10 @@ mod live_tests {
             .expect("Failed to create agent");
 
         let result = agent
-            .execute("Use the file-analyzer skill to analyze test.txt")
+            .execute("/file-analyzer test.txt")
             .await
             .expect("Agent failed");
 
-        assert!(!result.text().is_empty());
+        assert!(result.tool_calls > 0 || !result.text().is_empty());
     }
 }

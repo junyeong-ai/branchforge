@@ -1,45 +1,86 @@
 # Skills
 
-Skills are reusable workflow instructions loaded from project or user resources.
+Skills implement progressive disclosure for reusable workflows.
+
+The runtime keeps skill metadata cheap and always available, then loads full skill content only when a skill is invoked.
+
+## Core Model
+
+- `SkillIndex`: lightweight metadata used for discovery and prompt summaries
+- `SkillSpec`: the fully loaded skill with rendered content and invocation settings
+- `SkillRuntime`: runtime that resolves inline or forked skill execution
+- `SkillTool`: tool surface that dispatches to `SkillRuntime`
 
 ## Where Skills Come From
 
 - project-level `.claude/skills/`
 - user-level `~/.claude/skills/`
+- plugin-provided skill directories
+- in-memory skill definitions registered programmatically
 
-## Supported Forms
+## Supported Skill Behavior
 
-- single markdown file
-- directory-based skill with `SKILL.md`
+- slash-command invocation
+- trigger-based discovery
+- model-invocable or manual-only skills
+- tool restrictions through `allowed-tools`
+- model override through `model`
+- inline execution for prompt-scoped workflows
+- forked execution through `context: fork`
 
-## What Skills Can Define
+## Important Frontmatter Fields
 
-- name and description
-- tool restrictions
-- triggers
-- model override
-- optional command-style arguments
+- `name`
+- `description`
+- `argument-hint`
+- `disable-model-invocation`
+- `user-invocable`
+- `allowed-tools`
+- `model`
+- `context`
+- `agent`
+- `hooks`
+
+## Execution Semantics
+
+### Inline Skills
+
+Inline skills load full content on invocation and return rendered instructions back into the main conversation flow.
+
+Use inline skills for:
+
+- reference workflows
+- project conventions
+- guided code review or explanation playbooks
+
+### Forked Skills
+
+If `context: fork` is set, the runtime treats the skill as a delegated task and runs it in a forked agent context.
+
+Use forked skills for:
+
+- long-running research
+- isolated review or audit work
+- workflow steps that should not consume the main conversation context
 
 ## Example
 
 ```markdown
 ---
 name: deploy
-description: Deployment workflow
+description: Deploy the application to production
+disable-model-invocation: true
 allowed-tools:
   - Bash
-  - Read
+context: fork
+agent: Plan
 ---
 
-Deploy to $ARGUMENTS.
+Deploy $ARGUMENTS to production.
 ```
-
-## Related Concepts
-
-- skills provide reusable workflow context
-- subagents provide isolated execution contexts
 
 ## Related Guides
 
 - `memory-system.md`
 - `subagents.md`
+- `tools.md`

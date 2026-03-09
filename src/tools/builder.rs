@@ -20,7 +20,7 @@ pub struct ToolRegistryBuilder {
     access: ToolAccess,
     working_dir: Option<PathBuf>,
     task_registry: Option<TaskRegistry>,
-    skill_executor: Option<crate::skills::SkillExecutor>,
+    skill_executor: Option<crate::skills::SkillRuntime>,
     subagent_registry: Option<IndexRegistry<SubagentIndex>>,
     policy: Option<PermissionPolicy>,
     sandbox_config: Option<crate::security::SandboxConfig>,
@@ -60,7 +60,7 @@ impl ToolRegistryBuilder {
         self
     }
 
-    pub fn skill_executor(mut self, executor: crate::skills::SkillExecutor) -> Self {
+    pub fn skill_executor(mut self, executor: crate::skills::SkillRuntime) -> Self {
         self.skill_executor = Some(executor);
         self
     }

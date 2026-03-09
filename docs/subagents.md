@@ -36,6 +36,7 @@ Subagents can run in the background and later be polled through `TaskOutput`.
 
 - subagents run with their own execution context
 - task and replay flows can bootstrap message context when needed
+- skills with `context: fork` use the same isolated execution model
 
 ## Related Guides
 

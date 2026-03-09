@@ -7,14 +7,14 @@
 //!
 //! ```text
 //! ┌─────────────────┐     ┌──────────────────┐     ┌─────────────────┐
-//! │   SkillIndex    │────▶│  IndexRegistry   │────▶│  SkillExecutor  │
+//! │   SkillIndex    │────▶│  IndexRegistry   │────▶│   SkillRuntime  │
 //! │ (metadata only) │     │ <I: Index>       │     │ (lazy loading)  │
 //! └─────────────────┘     └──────────────────┘     └─────────────────┘
 //!         │                        │                        │
 //!         ▼                        ▼                        ▼
 //! ┌─────────────────┐      ┌──────────────────┐    ┌─────────────────┐
-//! │  ContentSource  │      │  Priority-based  │    │   SkillResult   │
-//! │ (lazy content)  │      │    Override      │    │   (output)      │
+//! │  ContentSource  │      │  Priority-based  │    │    SkillSpec    │
+//! │ (lazy content)  │      │    Override      │    │ + invocation     │
 //! └─────────────────┘      └──────────────────┘    └─────────────────┘
 //! ```
 //!
@@ -22,7 +22,7 @@
 //!
 //! ```rust,ignore
 //! use claude_agent::common::{ContentSource, IndexRegistry};
-//! use claude_agent::skills::{SkillIndex, SkillExecutor};
+//! use claude_agent::skills::{SkillIndex, SkillRuntime};
 //!
 //! // Create skill with metadata only (content loaded lazily)
 //! let skill = SkillIndex::new("commit", "Create git commits")
@@ -34,19 +34,19 @@
 //! registry.register(skill);
 //!
 //! // Execute loads content on-demand
-//! let executor = SkillExecutor::new(registry);
+//! let executor = SkillRuntime::new(registry);
 //! let result = executor.execute("commit", Some("fix bug")).await;
 //! ```
 
-mod executor;
 mod index;
 mod index_loader;
 mod processing;
+mod runtime;
 mod skill_tool;
 
-pub use executor::{ExecutionMode, SkillExecutionCallback, SkillExecutor};
 pub use index::SkillIndex;
 pub use index_loader::{SkillFrontmatter, SkillIndexLoader};
+pub use runtime::{SkillExecutionKind, SkillRuntime, SkillSpec};
 pub use skill_tool::SkillTool;
 
 use std::path::PathBuf;
@@ -62,12 +62,16 @@ pub struct SkillResult {
     pub success: bool,
     pub output: String,
     pub error: Option<String>,
+    #[serde(default)]
+    pub execution_kind: SkillExecutionKind,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub allowed_tools: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub base_dir: Option<PathBuf>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent: Option<String>,
 }
 
 impl SkillResult {
@@ -76,9 +80,11 @@ impl SkillResult {
             success: true,
             output: output.into(),
             error: None,
+            execution_kind: SkillExecutionKind::Inline,
             allowed_tools: Vec::new(),
             model: None,
             base_dir: None,
+            agent: None,
         }
     }
 
@@ -87,10 +93,17 @@ impl SkillResult {
             success: false,
             output: String::new(),
             error: Some(message.into()),
+            execution_kind: SkillExecutionKind::Inline,
             allowed_tools: Vec::new(),
             model: None,
             base_dir: None,
+            agent: None,
         }
+    }
+
+    pub fn execution_kind(mut self, kind: SkillExecutionKind) -> Self {
+        self.execution_kind = kind;
+        self
     }
 
     pub fn allowed_tools(mut self, tools: Vec<String>) -> Self {
@@ -105,6 +118,11 @@ impl SkillResult {
 
     pub fn base_dir(mut self, dir: Option<PathBuf>) -> Self {
         self.base_dir = dir;
+        self
+    }
+
+    pub fn agent(mut self, agent: Option<String>) -> Self {
+        self.agent = agent;
         self
     }
 

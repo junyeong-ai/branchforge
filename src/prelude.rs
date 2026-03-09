@@ -44,7 +44,7 @@ pub use crate::PromptOrchestrator;
 pub use crate::StaticContext;
 
 // Skills
-pub use crate::skills::{SkillExecutor, SkillIndex, SkillResult};
+pub use crate::skills::{SkillIndex, SkillResult, SkillRuntime};
 
 // Subagents
 pub use crate::SubagentIndex;

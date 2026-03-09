@@ -61,16 +61,22 @@ impl RoutingStrategy {
 
 /// Route user input to determine skill discovery strategy.
 pub fn route(input: &str, skill_indices: &[SkillIndex]) -> RoutingStrategy {
+    let eligible_skills: Vec<_> = skill_indices
+        .iter()
+        .filter(|skill| !skill.disable_model_invocation)
+        .collect();
+
     // 1. Check for explicit slash command
-    if let Some(skill) = skill_indices.iter().find(|s| s.matches_command(input)) {
+    if let Some(skill) = eligible_skills.iter().find(|s| s.matches_command(input)) {
         return RoutingStrategy::Explicit {
             skill_name: skill.name.clone(),
         };
     }
 
     // 2. Check for trigger keyword matches
-    let matches: Vec<_> = skill_indices
+    let matches: Vec<_> = eligible_skills
         .iter()
+        .copied()
         .filter(|s| s.matches_triggers(input))
         .collect();
 
@@ -94,7 +100,7 @@ pub fn route(input: &str, skill_indices: &[SkillIndex]) -> RoutingStrategy {
     }
 
     // 3. Fall back to semantic matching (Claude will decide)
-    if !skill_indices.is_empty() {
+    if !eligible_skills.is_empty() {
         RoutingStrategy::Semantic { confidence: 0.0 }
     } else {
         RoutingStrategy::NoSkill

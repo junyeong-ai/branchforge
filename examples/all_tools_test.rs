@@ -5,7 +5,7 @@
 //! - Process: Bash, KillShell
 //! - Session: TodoWrite, Plan
 //! - Subagent: Task, TaskOutput (via TaskRegistry)
-//! - Skills: SkillRegistry, SkillExecutor
+//! - Skills: SkillRegistry, SkillRuntime
 //!
 //! Run: cargo run --example all_tools_test
 
@@ -14,7 +14,7 @@ use claude_agent::agent::{AgentMetrics, AgentState, TaskOutputTool, TaskRegistry
 use claude_agent::common::{ContentSource, IndexRegistry};
 use claude_agent::security::SecurityContext;
 use claude_agent::session::{MemoryPersistence, SessionId, SessionState, ToolState};
-use claude_agent::skills::{SkillExecutor, SkillIndex};
+use claude_agent::skills::{SkillIndex, SkillRuntime};
 use claude_agent::tools::{
     BashTool, EditTool, ExecutionContext, GlobTool, GrepTool, KillShellTool, PlanTool,
     ProcessManager, ReadTool, TodoWriteTool, Tool, WriteTool,
@@ -361,7 +361,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .triggers(["greet"]),
     );
 
-    let executor = SkillExecutor::new(skill_registry);
+    let executor = SkillRuntime::new(skill_registry);
 
     runner.check("SkillRegistry", {
         if executor.has_skill("calculator") && executor.has_skill("greeter") {
@@ -372,7 +372,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     });
 
     let calc_result = executor.execute("calculator", Some("15 * 4")).await;
-    runner.check("SkillExecutor", {
+    runner.check("SkillRuntime", {
         if calc_result.success {
             Ok(())
         } else {
@@ -383,7 +383,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let triggered = executor
         .execute_by_trigger("please calculate 100 / 5")
         .await;
-    runner.check("SkillExecutor (trigger)", {
+    runner.check("SkillRuntime (trigger)", {
         if triggered.is_some() {
             Ok(())
         } else {

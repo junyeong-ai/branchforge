@@ -11,7 +11,7 @@ use std::sync::Arc;
 
 use tokio::sync::RwLock;
 
-use crate::common::{IndexRegistry, LoadedEntry};
+use crate::common::{Index, IndexRegistry, LoadedEntry};
 use crate::session::compact::DEFAULT_COMPACT_THRESHOLD;
 use crate::skills::SkillIndex;
 use crate::types::{TokenUsage, context_window};
@@ -188,7 +188,13 @@ impl PromptOrchestrator {
     }
 
     pub fn build_skill_summary(&self) -> String {
-        let summary = self.skill_registry.build_summary();
+        let summary = self
+            .skill_registry
+            .iter()
+            .filter(|skill| !skill.disable_model_invocation)
+            .map(|skill| skill.to_summary_line())
+            .collect::<Vec<_>>()
+            .join("\n");
         if summary.is_empty() {
             return String::new();
         }
