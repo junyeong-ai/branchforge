@@ -132,12 +132,13 @@ impl CompactExecutor {
             });
         }
 
-        let messages = session.current_branch();
+        let messages = session.current_branch_messages();
         if messages.is_empty() {
             return Ok(PreparedCompact::NotNeeded);
         }
 
-        let summary_prompt = self.format_for_summary(&messages);
+        let refs: Vec<_> = messages.iter().collect();
+        let summary_prompt = self.format_for_summary(&refs);
 
         Ok(PreparedCompact::Ready {
             summary_prompt,
@@ -146,10 +147,10 @@ impl CompactExecutor {
     }
 
     pub fn apply_compact(&self, session: &mut Session, summary: String) -> CompactResult {
-        let original_count = session.messages.len();
+        let projected_messages = session.current_branch_messages();
+        let original_count = projected_messages.len();
 
-        let removed_chars: usize = session
-            .messages
+        let removed_chars: usize = projected_messages
             .iter()
             .map(|m| {
                 m.content
@@ -161,7 +162,23 @@ impl CompactExecutor {
             .sum();
         let saved_tokens = (removed_chars / 4) as u64;
 
-        // Build replacement message before modifying session (swap pattern)
+        let branch_id = session.graph.primary_branch;
+        session.graph.append_node(
+            branch_id,
+            crate::graph::NodeKind::Summary,
+            serde_json::json!({
+                "content": [ContentBlock::text(format!("[Previous conversation summary]\n\n{}", summary))],
+                "summary": summary,
+            }),
+        );
+        session.graph.create_checkpoint(
+            branch_id,
+            "compaction",
+            Some("Context compaction summary appended".to_string()),
+            vec!["compaction".to_string()],
+        );
+
+        // Projection replacement only; graph history remains intact.
         let summary_msg = SessionMessage::user(vec![ContentBlock::text(format!(
             "[Previous conversation summary]\n\n{}",
             summary

@@ -157,10 +157,10 @@ fn test_tool_result_block_from_tool_result() {
 #[test]
 fn test_session_messages_basic() {
     let mut session = Session::new(SessionConfig::default());
-    assert!(session.messages.is_empty());
+    assert!(session.current_branch_messages().is_empty());
 
     session.add_user_message("Hello");
-    assert_eq!(session.messages.len(), 1);
+    assert_eq!(session.current_branch_messages().len(), 1);
 }
 
 #[test]

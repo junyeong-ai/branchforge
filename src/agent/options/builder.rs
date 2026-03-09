@@ -570,6 +570,24 @@ impl AgentBuilder {
         Ok(self)
     }
 
+    pub async fn fork_session_from_node(
+        mut self,
+        session_id: impl Into<String>,
+        from_node: crate::graph::NodeId,
+    ) -> crate::Result<Self> {
+        let manager = self.session_manager.take().unwrap_or_default();
+        let original_id = crate::session::SessionId::from(session_id.into());
+        let forked = manager
+            .fork_from_node(&original_id, from_node)
+            .await
+            .map_err(|e| crate::Error::Session(e.to_string()))?;
+
+        self.initial_messages = Some(forked.to_api_messages());
+        self.resume_session_id = Some(forked.id.to_string());
+        self.session_manager = Some(manager);
+        Ok(self)
+    }
+
     /// Resumes an existing session by ID.
     pub async fn resume_session(mut self, session_id: impl Into<String>) -> crate::Result<Self> {
         let session_id_str: String = session_id.into();
@@ -587,6 +605,23 @@ impl AgentBuilder {
             .collect();
 
         self.initial_messages = Some(messages);
+        self.resume_session_id = Some(id.to_string());
+        self.resumed_session = Some(session);
+        self.session_manager = Some(manager);
+        Ok(self)
+    }
+
+    pub async fn resume_session_from_node(
+        mut self,
+        session_id: impl Into<String>,
+        from_node: crate::graph::NodeId,
+    ) -> crate::Result<Self> {
+        let id = crate::session::SessionId::from(session_id.into());
+        let manager = self.session_manager.take().unwrap_or_default();
+        let session = manager.get(&id).await?;
+        let replay = session.replay_input(Some(from_node));
+
+        self.initial_messages = Some(replay.messages);
         self.resume_session_id = Some(id.to_string());
         self.resumed_session = Some(session);
         self.session_manager = Some(manager);
@@ -803,6 +838,8 @@ impl AgentBuilder {
 mod tests {
     use super::*;
     use crate::client::DEFAULT_MAX_TOKENS;
+    use crate::session::{SessionConfig, SessionManager, SessionMessage};
+    use crate::types::ContentBlock;
 
     #[test]
     fn test_tool_access() {
@@ -824,5 +861,57 @@ mod tests {
     fn test_max_tokens_custom() {
         let builder = AgentBuilder::new().max_tokens(16384);
         assert_eq!(builder.config.model.max_tokens, 16384);
+    }
+
+    #[tokio::test]
+    async fn test_resume_and_fork_from_node() {
+        let manager = SessionManager::in_memory();
+        let session = manager.create(SessionConfig::default()).await.unwrap();
+        let session_id = session.id;
+
+        manager
+            .add_message(
+                &session_id,
+                SessionMessage::user(vec![ContentBlock::text("one")]),
+            )
+            .await
+            .unwrap();
+        manager
+            .add_message(
+                &session_id,
+                SessionMessage::assistant(vec![ContentBlock::text("two")]),
+            )
+            .await
+            .unwrap();
+
+        let loaded = manager.get(&session_id).await.unwrap();
+        let from_node = loaded
+            .graph
+            .branch_head(loaded.graph.primary_branch)
+            .unwrap();
+
+        let resumed = AgentBuilder::new()
+            .session_manager(manager.clone())
+            .resume_session_from_node(session_id.to_string(), from_node)
+            .await
+            .unwrap();
+        let forked = AgentBuilder::new()
+            .session_manager(manager)
+            .fork_session_from_node(session_id.to_string(), from_node)
+            .await
+            .unwrap();
+
+        assert!(
+            resumed
+                .initial_messages
+                .as_ref()
+                .is_some_and(|messages| messages.len() == 1)
+        );
+        assert!(
+            forked
+                .initial_messages
+                .as_ref()
+                .is_some_and(|messages| messages.len() == 1)
+        );
     }
 }

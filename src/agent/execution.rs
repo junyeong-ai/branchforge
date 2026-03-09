@@ -13,7 +13,9 @@ use super::common::{
 use super::events::AgentResult;
 use super::executor::Agent;
 use super::request::RequestBuilder;
+use crate::graph::ReplayInput;
 use crate::hooks::{HookContext, HookEvent, HookInput};
+use crate::session::ToolExecution;
 use crate::types::{
     ContentBlock, Message, PermissionDenial, StopReason, ToolResultBlock, Usage, context_window,
 };
@@ -92,6 +94,14 @@ impl Agent {
         };
 
         self.execute(&enriched_prompt).await
+    }
+
+    pub async fn execute_with_replay(
+        &self,
+        replay: ReplayInput,
+        prompt: &str,
+    ) -> crate::Result<AgentResult> {
+        self.execute_with_messages(replay.messages, prompt).await
     }
 
     #[instrument(skip(self, prompt), fields(session_id = %self.session_id))]
@@ -267,6 +277,16 @@ impl Agent {
                     );
                 } else {
                     let input = pre_output.updated_input.unwrap_or(tool_use.input.clone());
+                    self.state
+                        .append_graph_node(
+                            crate::graph::NodeKind::ToolCall,
+                            serde_json::json!({
+                                "tool_use_id": tool_use.id.clone(),
+                                "tool_name": tool_use.name.clone(),
+                                "tool_input": input.clone(),
+                            }),
+                        )
+                        .await;
                     prepared.push((tool_use.id.clone(), tool_use.name.clone(), input));
                 }
             }
@@ -321,6 +341,15 @@ impl Agent {
                     &result,
                 )
                 .await;
+
+                self.state
+                    .record_tool_execution(
+                        ToolExecution::new(self.state.session_id(), &name, input.clone())
+                            .message(id.clone())
+                            .output(result.output.text(), is_error)
+                            .duration(duration_ms),
+                    )
+                    .await;
 
                 results.push(ToolResultBlock::from_tool_result(&id, &result));
             }

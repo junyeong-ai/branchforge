@@ -13,7 +13,7 @@ use crate::agent::{TaskOutputTool, TaskRegistry, TaskTool};
 use crate::common::IndexRegistry;
 use crate::permissions::PermissionPolicy;
 use crate::session::session_state::ToolState;
-use crate::session::{MemoryPersistence, SessionId};
+use crate::session::{MemoryPersistence, SessionId, SessionManager};
 use crate::subagents::SubagentIndex;
 
 pub struct ToolRegistryBuilder {
@@ -26,6 +26,7 @@ pub struct ToolRegistryBuilder {
     sandbox_config: Option<crate::security::SandboxConfig>,
     tool_state: Option<ToolState>,
     session_id: Option<SessionId>,
+    session_manager: Option<SessionManager>,
 }
 
 impl ToolRegistryBuilder {
@@ -40,6 +41,7 @@ impl ToolRegistryBuilder {
             sandbox_config: None,
             tool_state: None,
             session_id: None,
+            session_manager: None,
         }
     }
 
@@ -88,6 +90,11 @@ impl ToolRegistryBuilder {
         self
     }
 
+    pub fn session_manager(mut self, manager: SessionManager) -> Self {
+        self.session_manager = Some(manager);
+        self
+    }
+
     pub fn build(self) -> ToolRegistry {
         let access = &self.access;
         let wd = self
@@ -120,9 +127,13 @@ impl ToolRegistryBuilder {
             .tool_state
             .unwrap_or_else(|| ToolState::new(session_id));
 
+        let mut task_tool_builder = TaskTool::new(task_registry.clone());
+        if let Some(manager) = self.session_manager {
+            task_tool_builder = task_tool_builder.session_manager(manager);
+        }
         let task_tool: Arc<dyn Tool> = match self.subagent_registry {
-            Some(sr) => Arc::new(TaskTool::new(task_registry.clone()).subagent_registry(sr)),
-            None => Arc::new(TaskTool::new(task_registry.clone())),
+            Some(sr) => Arc::new(task_tool_builder.subagent_registry(sr)),
+            None => Arc::new(task_tool_builder),
         };
 
         let skill_tool: Arc<dyn Tool> = match self.skill_executor {

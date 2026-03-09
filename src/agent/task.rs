@@ -12,6 +12,7 @@ use crate::auth::Auth;
 use crate::client::CloudProvider;
 use crate::common::{Index, IndexRegistry};
 use crate::hooks::{HookEvent, HookInput};
+use crate::session::SessionManager;
 use crate::subagents::{SubagentIndex, builtin_subagents};
 use crate::tools::{ExecutionContext, SchemaTool};
 use crate::types::{Message, ToolResult};
@@ -20,6 +21,7 @@ pub struct TaskTool {
     registry: TaskRegistry,
     subagent_registry: IndexRegistry<SubagentIndex>,
     max_background_tasks: usize,
+    session_manager: Option<SessionManager>,
 }
 
 impl TaskTool {
@@ -30,7 +32,13 @@ impl TaskTool {
             registry,
             subagent_registry,
             max_background_tasks: 10,
+            session_manager: None,
         }
+    }
+
+    pub fn session_manager(mut self, session_manager: SessionManager) -> Self {
+        self.session_manager = Some(session_manager);
+        self
     }
 
     pub fn subagent_registry(mut self, subagent_registry: IndexRegistry<SubagentIndex>) -> Self {
@@ -90,6 +98,7 @@ Usage notes:
         &self,
         input: &TaskInput,
         previous_messages: Option<Vec<Message>>,
+        replay_messages: Option<Vec<Message>>,
     ) -> crate::Result<super::AgentResult> {
         let subagent = self
             .subagent_registry
@@ -117,7 +126,9 @@ Usage notes:
             .build()
             .await?;
 
-        match previous_messages {
+        let boot_messages = replay_messages.or(previous_messages);
+
+        match boot_messages {
             Some(messages) if !messages.is_empty() => {
                 debug!(
                     message_count = messages.len(),
@@ -168,6 +179,7 @@ impl Clone for TaskTool {
             registry: self.registry.clone(),
             subagent_registry: self.subagent_registry.clone(),
             max_background_tasks: self.max_background_tasks,
+            session_manager: self.session_manager.clone(),
         }
     }
 }
@@ -190,6 +202,12 @@ pub struct TaskInput {
     /// Optional agent ID to resume from. The agent continues with preserved context.
     #[serde(default)]
     pub resume: Option<String>,
+    /// Optional session id to replay from.
+    #[serde(default)]
+    pub replay_session: Option<String>,
+    /// Optional node id to replay from within the replay session.
+    #[serde(default)]
+    pub replay_from_node: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -215,6 +233,22 @@ impl SchemaTool for TaskTool {
     async fn handle(&self, input: TaskInput, context: &ExecutionContext) -> ToolResult {
         let previous_messages = if let Some(ref resume_id) = input.resume {
             self.registry.get_messages(resume_id).await
+        } else {
+            None
+        };
+        let replay_messages = if let Some(ref replay_session) = input.replay_session {
+            let manager = self.session_manager.clone().unwrap_or_default();
+            let session_id = crate::session::SessionId::from(replay_session.clone());
+            let from_node = input
+                .replay_from_node
+                .as_ref()
+                .and_then(|node| uuid::Uuid::parse_str(node).ok());
+            manager
+                .replay_input(&session_id, from_node)
+                .await
+                .ok()
+                .flatten()
+                .map(|replay| replay.messages)
         } else {
             None
         };
@@ -264,7 +298,7 @@ impl SchemaTool for TaskTool {
 
             let handle = tokio::spawn(async move {
                 select! {
-                    result = tool_clone.spawn_agent(&input_clone, prev_messages) => {
+                    result = tool_clone.spawn_agent(&input_clone, prev_messages, replay_messages.clone()) => {
                         match result {
                             Ok(agent_result) => {
                                 registry.save_messages(&task_id, agent_result.messages.clone()).await;
@@ -309,7 +343,10 @@ impl SchemaTool for TaskTool {
             )
             .await;
 
-            match self.spawn_agent(&input, previous_messages).await {
+            match self
+                .spawn_agent(&input, previous_messages, replay_messages)
+                .await
+            {
                 Ok(agent_result) => {
                     self.registry
                         .save_messages(&agent_id, agent_result.messages.clone())

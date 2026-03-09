@@ -6,6 +6,7 @@ use super::persistence::{MemoryPersistence, Persistence};
 use super::state::{Session, SessionConfig, SessionId, SessionMessage, SessionState};
 use super::{SessionError, SessionResult};
 
+#[derive(Clone)]
 pub struct SessionManager {
     persistence: Arc<dyn Persistence>,
 }
@@ -88,19 +89,99 @@ impl SessionManager {
         forked.summary = original.summary.clone();
 
         // Copy messages up to current leaf
-        for msg in original.current_branch() {
-            let mut cloned = msg.clone();
+        for msg in original.current_branch_messages() {
+            let mut cloned = msg;
             cloned.is_sidechain = true;
-            forked.messages.push(cloned);
-        }
-
-        // Update leaf pointer
-        if let Some(last) = forked.messages.last() {
-            forked.current_leaf_id = Some(last.id.clone());
+            forked.add_message(cloned);
         }
 
         self.persistence.save(&forked).await?;
         Ok(forked)
+    }
+
+    pub async fn fork_from_node(
+        &self,
+        id: &SessionId,
+        from_node: crate::graph::NodeId,
+    ) -> SessionResult<Session> {
+        let original = self.get(id).await?;
+        let replay = original.replay_input(Some(from_node));
+
+        let mut forked = Session::new(original.config.clone());
+        forked.parent_id = Some(original.id);
+        forked.tenant_id = original.tenant_id.clone();
+        forked.summary = original.summary.clone();
+
+        for message in replay.messages {
+            let mut session_message = match message.role {
+                crate::types::Role::User => SessionMessage::user(message.content),
+                crate::types::Role::Assistant => SessionMessage::assistant(message.content),
+            };
+            session_message.is_sidechain = true;
+            forked.add_message(session_message);
+        }
+
+        self.persistence.save(&forked).await?;
+        Ok(forked)
+    }
+
+    pub async fn export_branch(
+        &self,
+        id: &SessionId,
+    ) -> SessionResult<Option<crate::graph::BranchExport>> {
+        let session = self.get(id).await?;
+        Ok(session.export_current_branch())
+    }
+
+    pub async fn replay_input(
+        &self,
+        id: &SessionId,
+        from_node: Option<crate::graph::NodeId>,
+    ) -> SessionResult<Option<crate::graph::ReplayInput>> {
+        let session = self.get(id).await?;
+        Ok(Some(
+            session
+                .graph
+                .replay_input(session.graph.primary_branch, from_node),
+        ))
+    }
+
+    pub async fn resume_prompt_with_replay(
+        &self,
+        id: &SessionId,
+        from_node: Option<crate::graph::NodeId>,
+        prompt: &str,
+    ) -> SessionResult<Option<(crate::graph::ReplayInput, String)>> {
+        let replay = self.replay_input(id, from_node).await?;
+        Ok(replay.map(|replay| (replay, prompt.to_string())))
+    }
+
+    pub async fn export_branch_json(&self, id: &SessionId) -> SessionResult<Option<String>> {
+        let export = self.export_branch(id).await?;
+        export
+            .as_ref()
+            .map(crate::session::branch_export_to_json)
+            .transpose()
+            .map_err(|e| SessionError::Storage {
+                message: e.to_string(),
+            })
+    }
+
+    pub async fn export_branch_html(&self, id: &SessionId) -> SessionResult<Option<String>> {
+        let export = self.export_branch(id).await?;
+        Ok(export.as_ref().map(crate::session::branch_export_to_html))
+    }
+
+    pub async fn bookmark_current_head(
+        &self,
+        id: &SessionId,
+        label: impl Into<String>,
+        note: Option<String>,
+    ) -> SessionResult<Option<uuid::Uuid>> {
+        let mut session = self.get(id).await?;
+        let bookmark = session.bookmark_current_head(label, note);
+        self.persistence.save(&session).await?;
+        Ok(bookmark)
     }
 
     pub async fn complete(&self, id: &SessionId) -> SessionResult<()> {
@@ -144,7 +225,7 @@ mod tests {
         let session = manager.create(SessionConfig::default()).await.unwrap();
 
         assert_eq!(session.state, SessionState::Created);
-        assert!(session.messages.is_empty());
+        assert!(session.current_branch_messages().is_empty());
     }
 
     #[tokio::test]
@@ -176,7 +257,7 @@ mod tests {
         manager.add_message(&session_id, message).await.unwrap();
 
         let restored = manager.get(&session_id).await.unwrap();
-        assert_eq!(restored.messages.len(), 1);
+        assert_eq!(restored.current_branch_messages().len(), 1);
     }
 
     #[tokio::test]
@@ -197,12 +278,163 @@ mod tests {
         let forked = manager.fork(&session_id).await.unwrap();
 
         // Forked session should have the same messages
-        assert_eq!(forked.messages.len(), 2);
+        let forked_messages = forked.current_branch_messages();
+        assert_eq!(forked_messages.len(), 2);
         assert_ne!(forked.id, session_id);
         assert_eq!(forked.parent_id, Some(session_id));
 
-        // Messages should be marked as sidechain
-        assert!(forked.messages.iter().all(|m| m.is_sidechain));
+        assert!(forked_messages.iter().all(|m| m.is_sidechain));
+    }
+
+    #[tokio::test]
+    async fn test_session_manager_export_and_replay() {
+        let manager = SessionManager::in_memory();
+        let session = manager.create(SessionConfig::default()).await.unwrap();
+        let session_id = session.id;
+
+        manager
+            .add_message(
+                &session_id,
+                SessionMessage::user(vec![ContentBlock::text("hello")]),
+            )
+            .await
+            .unwrap();
+        manager
+            .add_message(
+                &session_id,
+                SessionMessage::assistant(vec![ContentBlock::text("world")]),
+            )
+            .await
+            .unwrap();
+
+        let export = manager
+            .export_branch_json(&session_id)
+            .await
+            .unwrap()
+            .unwrap();
+        let replay = manager
+            .replay_input(&session_id, None)
+            .await
+            .unwrap()
+            .unwrap();
+
+        assert!(export.contains("hello"));
+        assert_eq!(replay.messages.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_session_manager_replay_survives_projection_refresh() {
+        let manager = SessionManager::in_memory();
+        let mut session = manager.create(SessionConfig::default()).await.unwrap();
+        session.add_message(SessionMessage::user(vec![ContentBlock::text("hello")]));
+        session.add_message(SessionMessage::assistant(vec![ContentBlock::text("world")]));
+        session.clear_messages();
+        manager.persistence.save(&session).await.unwrap();
+
+        let replay = manager
+            .replay_input(&session.id, None)
+            .await
+            .unwrap()
+            .unwrap();
+        let export = manager
+            .export_branch_json(&session.id)
+            .await
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(replay.messages.len(), 2);
+        assert!(export.contains("hello"));
+    }
+
+    #[tokio::test]
+    async fn test_session_manager_export_html() {
+        let manager = SessionManager::in_memory();
+        let session = manager.create(SessionConfig::default()).await.unwrap();
+        let session_id = session.id;
+
+        manager
+            .add_message(
+                &session_id,
+                SessionMessage::user(vec![ContentBlock::text("hello")]),
+            )
+            .await
+            .unwrap();
+
+        let html = manager
+            .export_branch_html(&session_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(html.contains("Branch:"));
+        assert!(html.contains("Timeline"));
+    }
+
+    #[tokio::test]
+    async fn test_session_manager_bookmark_and_fork_from_node() {
+        let manager = SessionManager::in_memory();
+        let session = manager.create(SessionConfig::default()).await.unwrap();
+        let session_id = session.id;
+
+        manager
+            .add_message(
+                &session_id,
+                SessionMessage::user(vec![ContentBlock::text("one")]),
+            )
+            .await
+            .unwrap();
+        manager
+            .add_message(
+                &session_id,
+                SessionMessage::assistant(vec![ContentBlock::text("two")]),
+            )
+            .await
+            .unwrap();
+
+        let loaded = manager.get(&session_id).await.unwrap();
+        let from_node = loaded
+            .graph
+            .branch_head(loaded.graph.primary_branch)
+            .unwrap();
+        let bookmark = manager
+            .bookmark_current_head(&session_id, "checkpoint", Some("saved".to_string()))
+            .await
+            .unwrap();
+        let forked = manager
+            .fork_from_node(&session_id, from_node)
+            .await
+            .unwrap();
+
+        assert!(bookmark.is_some());
+        let forked_messages = forked.current_branch_messages();
+        assert_eq!(forked_messages.len(), 1);
+        assert!(forked_messages[0].is_sidechain);
+    }
+
+    #[tokio::test]
+    async fn test_session_manager_export_html_includes_bookmark() {
+        let manager = SessionManager::in_memory();
+        let session = manager.create(SessionConfig::default()).await.unwrap();
+        let session_id = session.id;
+
+        manager
+            .add_message(
+                &session_id,
+                SessionMessage::user(vec![ContentBlock::text("hello")]),
+            )
+            .await
+            .unwrap();
+        manager
+            .bookmark_current_head(&session_id, "mark", Some("note".to_string()))
+            .await
+            .unwrap();
+
+        let html = manager
+            .export_branch_html(&session_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(html.contains("Bookmarks"));
+        assert!(html.contains("mark"));
     }
 
     #[tokio::test]

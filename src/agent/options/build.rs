@@ -386,6 +386,10 @@ impl AgentBuilder {
             .tool_state(tool_state)
             .session_id(session_id);
 
+        if let Some(ref manager) = self.session_manager {
+            builder = builder.session_manager(manager.clone());
+        }
+
         if let Some(sr) = subagent_registry {
             builder = builder.subagent_registry(sr);
         }

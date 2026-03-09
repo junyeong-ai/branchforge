@@ -10,6 +10,7 @@ use uuid::Uuid;
 use super::queue::{MergedInput, QueueError, QueuedInput, SharedInputQueue};
 use super::state::{Session, SessionConfig, SessionId};
 use super::types::{CompactRecord, Plan, PlanStatus, TodoItem, ToolExecution};
+use crate::graph::{NodeId, NodeKind};
 
 const MAX_EXECUTION_LOG_SIZE: usize = 1000;
 
@@ -169,17 +170,38 @@ impl ToolState {
 
     pub async fn record_tool_execution(&self, mut exec: ToolExecution) {
         let plan_id = {
-            let session = self.0.session.read().await;
-            if let Some(ref plan) = session.current_plan
+            let mut session = self.0.session.write().await;
+            let branch_id = session.graph.primary_branch;
+            let plan_id = if let Some(ref plan) = session.current_plan
                 && plan.status == PlanStatus::Executing
             {
                 Some(plan.id)
             } else {
                 None
-            }
+            };
+            session.graph.append_node(
+                branch_id,
+                NodeKind::ToolResult,
+                serde_json::json!({
+                    "tool_name": exec.tool_name,
+                    "tool_input": exec.tool_input,
+                    "tool_output": exec.tool_output,
+                    "is_error": exec.is_error,
+                    "error_message": exec.error_message,
+                    "duration_ms": exec.duration_ms,
+                    "message_id": exec.message_id,
+                }),
+            );
+            plan_id
         };
         exec.plan_id = plan_id;
         self.0.executions.append(exec).await;
+    }
+
+    pub async fn append_graph_node(&self, kind: NodeKind, payload: serde_json::Value) -> NodeId {
+        let mut session = self.0.session.write().await;
+        let branch_id = session.graph.primary_branch;
+        session.graph.append_node(branch_id, kind, payload)
     }
 
     pub async fn with_tool_executions<F, R>(&self, f: F) -> R
