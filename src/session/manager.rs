@@ -139,11 +139,87 @@ impl SessionManager {
         from_node: Option<crate::graph::NodeId>,
     ) -> SessionResult<Option<crate::graph::ReplayInput>> {
         let session = self.get(id).await?;
-        Ok(Some(
-            session
-                .graph
-                .replay_input(session.graph.primary_branch, from_node),
+        Ok(Some(crate::session::ReplayService::replay_input(
+            &session.graph,
+            from_node,
+        )))
+    }
+
+    pub async fn graph_branches(
+        &self,
+        id: &SessionId,
+    ) -> SessionResult<Vec<crate::graph::BranchSummary>> {
+        let session = self.get(id).await?;
+        Ok(crate::graph::GraphExplorer::list_branches(&session.graph))
+    }
+
+    pub async fn graph_tree(
+        &self,
+        id: &SessionId,
+        branch_id: Option<crate::graph::BranchId>,
+    ) -> SessionResult<Vec<crate::graph::TreeNodeSummary>> {
+        let session = self.get(id).await?;
+        let branch_id = branch_id.unwrap_or(session.graph.primary_branch);
+        Ok(crate::graph::GraphExplorer::tree_view(
+            &session.graph,
+            branch_id,
         ))
+    }
+
+    pub async fn graph_bookmarks(
+        &self,
+        id: &SessionId,
+        branch_id: Option<crate::graph::BranchId>,
+    ) -> SessionResult<Vec<crate::graph::Bookmark>> {
+        let session = self.get(id).await?;
+        Ok(crate::graph::GraphExplorer::bookmarks(
+            &session.graph,
+            branch_id,
+        ))
+    }
+
+    pub async fn graph_checkpoints(
+        &self,
+        id: &SessionId,
+        branch_id: Option<crate::graph::BranchId>,
+    ) -> SessionResult<Vec<crate::graph::Checkpoint>> {
+        let session = self.get(id).await?;
+        Ok(crate::graph::GraphExplorer::checkpoints(
+            &session.graph,
+            branch_id,
+        ))
+    }
+
+    pub async fn graph_node(
+        &self,
+        id: &SessionId,
+        node_id: crate::graph::NodeId,
+    ) -> SessionResult<Option<crate::graph::NodeSummary>> {
+        let session = self.get(id).await?;
+        Ok(crate::graph::GraphExplorer::node_summary(
+            &session.graph,
+            node_id,
+        ))
+    }
+
+    pub async fn graph_search(
+        &self,
+        id: &SessionId,
+        query: &crate::graph::GraphSearchQuery,
+    ) -> SessionResult<Vec<crate::graph::NodeSummary>> {
+        let session = self.get(id).await?;
+        Ok(crate::graph::GraphSearchService::search(
+            &session.graph,
+            query,
+        ))
+    }
+
+    pub async fn graph_stats(
+        &self,
+        id: &SessionId,
+    ) -> SessionResult<crate::graph::GraphSessionStats> {
+        let session = self.get(id).await?;
+        Ok(crate::graph::GraphSearchService::stats(&session.graph))
     }
 
     pub async fn export_branch_json(&self, id: &SessionId) -> SessionResult<Option<String>> {
@@ -427,6 +503,46 @@ mod tests {
             .unwrap();
         assert!(html.contains("Bookmarks"));
         assert!(html.contains("mark"));
+    }
+
+    #[tokio::test]
+    async fn test_session_manager_graph_explorer_views() {
+        let manager = SessionManager::in_memory();
+        let session = manager.create(SessionConfig::default()).await.unwrap();
+        let session_id = session.id;
+
+        manager
+            .add_message(
+                &session_id,
+                SessionMessage::user(vec![ContentBlock::text("alpha")]),
+            )
+            .await
+            .unwrap();
+        manager
+            .bookmark_current_head(&session_id, "start", None)
+            .await
+            .unwrap();
+
+        let branches = manager.graph_branches(&session_id).await.unwrap();
+        let tree = manager.graph_tree(&session_id, None).await.unwrap();
+        let bookmarks = manager.graph_bookmarks(&session_id, None).await.unwrap();
+        let stats = manager.graph_stats(&session_id).await.unwrap();
+        let matches = manager
+            .graph_search(
+                &session_id,
+                &crate::graph::GraphSearchQuery {
+                    text: Some("alpha".to_string()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(branches.len(), 1);
+        assert_eq!(tree.len(), 1);
+        assert_eq!(bookmarks.len(), 1);
+        assert_eq!(stats.node_count, 1);
+        assert_eq!(matches.len(), 1);
     }
 
     #[tokio::test]

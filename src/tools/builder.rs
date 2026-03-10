@@ -116,7 +116,10 @@ impl ToolRegistryBuilder {
             })
             .unwrap_or_else(|_| crate::security::SecurityContext::permissive());
 
-        let context = ExecutionContext::new(security);
+        let mut context = ExecutionContext::new(security);
+        if let Some(ref manager) = self.session_manager {
+            context = context.session_manager(manager.clone());
+        }
         let task_registry = self
             .task_registry
             .unwrap_or_else(|| TaskRegistry::new(Arc::new(MemoryPersistence::new())));
@@ -128,7 +131,7 @@ impl ToolRegistryBuilder {
             .unwrap_or_else(|| ToolState::new(session_id));
 
         let mut task_tool_builder = TaskTool::new(task_registry.clone());
-        if let Some(manager) = self.session_manager {
+        if let Some(manager) = self.session_manager.clone() {
             task_tool_builder = task_tool_builder.session_manager(manager);
         }
         let task_tool: Arc<dyn Tool> = match self.subagent_registry {
@@ -156,6 +159,7 @@ impl ToolRegistryBuilder {
             Arc::new(super::TodoWriteTool::new(tool_state.clone(), session_id)),
             Arc::new(super::PlanTool::new(tool_state.clone())),
             skill_tool,
+            Arc::new(super::GraphHistoryTool),
         ];
 
         let env = ToolExecutionEnv {

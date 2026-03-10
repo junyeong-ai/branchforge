@@ -162,6 +162,9 @@ impl SessionGraph {
                 }),
             },
         );
+        if let Some(branch) = self.branches.get_mut(&branch_id) {
+            branch.head = Some(checkpoint_id);
+        }
         self.events
             .push(GraphEvent::new(GraphEventBody::CheckpointCreated {
                 checkpoint_id,

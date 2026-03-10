@@ -12,12 +12,14 @@ use crate::security::guard::SecurityGuard;
 use crate::security::path::SafePath;
 use crate::security::sandbox::{DomainCheck, SandboxResult};
 use crate::security::{ResourceLimits, SecurityContext, SecurityError};
+use crate::session::SessionManager;
 
 #[derive(Clone)]
 pub struct ExecutionContext {
     security: Arc<SecurityContext>,
     hooks: Option<HookManager>,
     session_id: Option<String>,
+    session_manager: Option<SessionManager>,
 }
 
 impl ExecutionContext {
@@ -26,6 +28,7 @@ impl ExecutionContext {
             security: Arc::new(security),
             hooks: None,
             session_id: None,
+            session_manager: None,
         }
     }
 
@@ -43,6 +46,7 @@ impl ExecutionContext {
             security: Arc::new(SecurityContext::permissive()),
             hooks: None,
             session_id: None,
+            session_manager: None,
         }
     }
 
@@ -54,6 +58,15 @@ impl ExecutionContext {
 
     pub fn session_id(&self) -> Option<&str> {
         self.session_id.as_deref()
+    }
+
+    pub fn session_manager(mut self, manager: SessionManager) -> Self {
+        self.session_manager = Some(manager);
+        self
+    }
+
+    pub fn graph_manager(&self) -> Option<&SessionManager> {
+        self.session_manager.as_ref()
     }
 
     pub async fn fire_hook(&self, event: HookEvent, input: HookInput) {

@@ -1,0 +1,201 @@
+use async_trait::async_trait;
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
+
+use crate::session::SessionId;
+use crate::tools::{ExecutionContext, SchemaTool};
+use crate::types::ToolResult;
+
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum GraphHistoryAction {
+    Branches,
+    Tree,
+    Bookmarks,
+    Checkpoints,
+    Node,
+    Search,
+    Stats,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+pub struct GraphHistoryInput {
+    pub action: GraphHistoryAction,
+    pub session_id: Option<String>,
+    pub branch_id: Option<String>,
+    pub node_id: Option<String>,
+    pub query: Option<String>,
+    pub kind: Option<String>,
+    pub tag: Option<String>,
+}
+
+pub struct GraphHistoryTool;
+
+#[async_trait]
+impl SchemaTool for GraphHistoryTool {
+    type Input = GraphHistoryInput;
+
+    const NAME: &'static str = "GraphHistory";
+    const DESCRIPTION: &'static str = "Explore graph-first session history: branches, tree views, bookmarks, checkpoints, node summaries, search, and stats.";
+
+    async fn handle(&self, input: Self::Input, context: &ExecutionContext) -> ToolResult {
+        let Some(manager) = context.graph_manager() else {
+            return ToolResult::error("Graph history requires a configured SessionManager");
+        };
+
+        let session_id = match resolve_session_id(&input, context) {
+            Ok(id) => id,
+            Err(error) => return ToolResult::error(error),
+        };
+
+        let output = match input.action {
+            GraphHistoryAction::Branches => {
+                manager.graph_branches(&session_id).await.and_then(to_json)
+            }
+            GraphHistoryAction::Tree => {
+                let branch_id = match parse_optional_uuid(input.branch_id.as_deref()) {
+                    Ok(branch_id) => branch_id,
+                    Err(error) => return ToolResult::error(error),
+                };
+                manager
+                    .graph_tree(&session_id, branch_id)
+                    .await
+                    .and_then(to_json)
+            }
+            GraphHistoryAction::Bookmarks => {
+                let branch_id = match parse_optional_uuid(input.branch_id.as_deref()) {
+                    Ok(branch_id) => branch_id,
+                    Err(error) => return ToolResult::error(error),
+                };
+                manager
+                    .graph_bookmarks(&session_id, branch_id)
+                    .await
+                    .and_then(to_json)
+            }
+            GraphHistoryAction::Checkpoints => {
+                let branch_id = match parse_optional_uuid(input.branch_id.as_deref()) {
+                    Ok(branch_id) => branch_id,
+                    Err(error) => return ToolResult::error(error),
+                };
+                manager
+                    .graph_checkpoints(&session_id, branch_id)
+                    .await
+                    .and_then(to_json)
+            }
+            GraphHistoryAction::Node => {
+                let node_id = match parse_optional_uuid(input.node_id.as_deref()) {
+                    Ok(node_id) => node_id,
+                    Err(error) => return ToolResult::error(error),
+                };
+                let Some(node_id) = node_id else {
+                    return ToolResult::error("node_id is required for action=node");
+                };
+                manager
+                    .graph_node(&session_id, node_id)
+                    .await
+                    .and_then(to_json)
+            }
+            GraphHistoryAction::Search => {
+                let branch_id = match parse_optional_uuid(input.branch_id.as_deref()) {
+                    Ok(branch_id) => branch_id,
+                    Err(error) => return ToolResult::error(error),
+                };
+                let kind = match input.kind.as_deref().map(parse_node_kind).transpose() {
+                    Ok(kind) => kind,
+                    Err(error) => return ToolResult::error(error),
+                };
+                manager
+                    .graph_search(
+                        &session_id,
+                        &crate::graph::GraphSearchQuery {
+                            text: input.query.clone(),
+                            branch_id,
+                            kind,
+                            tag: input.tag.clone(),
+                        },
+                    )
+                    .await
+                    .and_then(to_json)
+            }
+            GraphHistoryAction::Stats => manager.graph_stats(&session_id).await.and_then(to_json),
+        };
+
+        match output {
+            Ok(output) => ToolResult::success(output),
+            Err(error) => ToolResult::error(error.to_string()),
+        }
+    }
+}
+
+fn resolve_session_id(
+    input: &GraphHistoryInput,
+    context: &ExecutionContext,
+) -> Result<SessionId, String> {
+    if let Some(session_id) = input.session_id.as_ref() {
+        Ok(SessionId::from(session_id.clone()))
+    } else if let Some(session_id) = context.session_id() {
+        Ok(SessionId::from(session_id.to_string()))
+    } else {
+        Err(
+            "session_id is required when no active session is bound to the tool context"
+                .to_string(),
+        )
+    }
+}
+
+fn parse_optional_uuid<T>(value: Option<&str>) -> Result<Option<T>, String>
+where
+    T: From<uuid::Uuid>,
+{
+    value
+        .map(|value| {
+            uuid::Uuid::parse_str(value)
+                .map(T::from)
+                .map_err(|e| e.to_string())
+        })
+        .transpose()
+}
+
+fn parse_node_kind(value: &str) -> Result<crate::graph::NodeKind, String> {
+    serde_json::from_str(&format!("\"{}\"", value)).map_err(|e| e.to_string())
+}
+
+fn to_json<T: Serialize>(value: T) -> crate::session::SessionResult<String> {
+    serde_json::to_string_pretty(&value).map_err(crate::session::SessionError::Serialization)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::session::{SessionConfig, SessionManager, SessionMessage};
+    use crate::tools::Tool;
+    use crate::types::ContentBlock;
+
+    #[tokio::test]
+    async fn graph_history_tool_uses_bound_session_manager() {
+        let manager = SessionManager::in_memory();
+        let session = manager.create(SessionConfig::default()).await.unwrap();
+        manager
+            .add_message(
+                &session.id,
+                SessionMessage::user(vec![ContentBlock::text("alpha")]),
+            )
+            .await
+            .unwrap();
+
+        let context = ExecutionContext::permissive().session_manager(manager);
+        let tool = GraphHistoryTool;
+        let result = tool
+            .execute(
+                serde_json::json!({
+                    "action": "search",
+                    "session_id": session.id.to_string(),
+                    "query": "alpha"
+                }),
+                &context,
+            )
+            .await;
+
+        assert!(!result.is_error());
+    }
+}

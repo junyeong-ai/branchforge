@@ -15,6 +15,8 @@ Sessions are modeled as graphs, not flat chat transcripts.
 - export current branch as structured data or HTML
 - create checkpoints for stable milestones
 - create bookmarks for reusable navigation points
+- explore branch, tree, bookmark, checkpoint, and node summaries through graph exploration APIs
+- search graph nodes and derive graph-level session statistics
 
 ## Persistence Backends
 
@@ -51,7 +53,16 @@ let export = session.export_current_branch();
 
 ## Manager API
 
-`SessionManager` provides creation, loading, replay, export, bookmarking, and branching helpers.
+`SessionManager` provides creation, loading, replay, export, bookmarking, branching, graph exploration, and graph search helpers.
+
+The graph exploration layer exposes:
+
+- branch summaries
+- tree views
+- bookmark and checkpoint listings
+- node summaries
+- graph search results
+- graph-level session statistics
 
 ## Related Guides
 

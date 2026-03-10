@@ -217,6 +217,7 @@ mod tests {
         assert!(registry.contains("TodoWrite"));
         assert!(registry.contains("Plan"));
         assert!(registry.contains("Skill"));
+        assert!(registry.contains("GraphHistory"));
     }
 
     #[test]

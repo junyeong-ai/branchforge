@@ -6,7 +6,7 @@ The runtime includes built-in tools for file operations, execution, planning, an
 
 - File: `Read`, `Write`, `Edit`, `Glob`, `Grep`
 - Execution: `Bash`, `KillShell`
-- Agent: `Task`, `TaskOutput`, `TodoWrite`, `Skill`
+- Agent: `Task`, `TaskOutput`, `TodoWrite`, `Skill`, `GraphHistory`
 - Planning: `Plan`
 
 ## Optional Server Tools
@@ -43,6 +43,17 @@ The `Skill` tool is a progressive-disclosure tool.
 - it loads full skill content only on invocation
 - inline skills return rendered instructions into the current conversation
 - forked skills delegate execution through a separate agent context
+
+## Graph History Tool
+
+The `GraphHistory` tool exposes graph-first session exploration.
+
+- branch summaries
+- tree views
+- bookmarks and checkpoints
+- node summaries
+- graph search
+- graph-level session statistics
 
 ## Related Guides
 

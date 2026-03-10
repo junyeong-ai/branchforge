@@ -10,6 +10,8 @@ pub mod persistence_jsonl;
 pub mod persistence_postgres;
 #[cfg(feature = "redis-backend")]
 pub mod persistence_redis;
+#[cfg(feature = "surrealdb-backend")]
+pub mod persistence_surreal;
 pub mod queue;
 mod replay;
 pub mod session_state;
@@ -31,6 +33,8 @@ pub use persistence_postgres::{
 };
 #[cfg(feature = "redis-backend")]
 pub use persistence_redis::{RedisConfig, RedisPersistence};
+#[cfg(feature = "surrealdb-backend")]
+pub use persistence_surreal::{SurrealConfig, SurrealPersistence, surreal_prototype};
 pub use queue::{InputQueue, MergedInput, QueueError, QueuedInput, SharedInputQueue};
 pub use replay::ReplayService;
 pub use session_state::{ExecutionGuard, ToolState};

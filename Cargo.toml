@@ -143,6 +143,7 @@ cloud-all = ["aws", "gcp", "azure"]
 jsonl = []
 postgres = ["sqlx"]
 redis-backend = ["redis"]
+surrealdb-backend = []
 persistence-all = ["jsonl", "postgres", "redis-backend"]
 
 # OpenTelemetry observability
