@@ -198,7 +198,18 @@ impl SchemaTool for GraphHistoryTool {
                 manager
                     .graph_bookmarks(&session_id, branch_id)
                     .await
-                    .and_then(to_json)
+                    .map(|bookmarks| {
+                        let enriched: Vec<_> = bookmarks
+                            .iter()
+                            .map(|bookmark| {
+                                serde_json::json!({
+                                    "bookmark": bookmark,
+                                    "digest": crate::graph::explorer::bookmark_digest(bookmark),
+                                })
+                            })
+                            .collect();
+                        serde_json::to_string_pretty(&enriched).unwrap_or_default()
+                    })
             }
             GraphHistoryAction::Checkpoints => {
                 let branch_id = match parse_optional_uuid(input.branch_id.as_deref()) {
@@ -208,7 +219,18 @@ impl SchemaTool for GraphHistoryTool {
                 manager
                     .graph_checkpoints(&session_id, branch_id)
                     .await
-                    .and_then(to_json)
+                    .map(|checkpoints| {
+                        let enriched: Vec<_> = checkpoints
+                            .iter()
+                            .map(|checkpoint| {
+                                serde_json::json!({
+                                    "checkpoint": checkpoint,
+                                    "digest": crate::graph::explorer::checkpoint_digest(checkpoint),
+                                })
+                            })
+                            .collect();
+                        serde_json::to_string_pretty(&enriched).unwrap_or_default()
+                    })
             }
             GraphHistoryAction::Node => {
                 let node_id = match parse_optional_uuid(input.node_id.as_deref()) {

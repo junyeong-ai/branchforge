@@ -143,14 +143,20 @@ impl GraphExplorer {
                 }
                 TreeRenderMode::Verbose => {
                     let preview = item.node.preview.as_deref().unwrap_or("no preview");
+                    let provenance = item.node.provenance_digest.as_deref().unwrap_or("");
                     lines.push(format!(
-                        "{}{} {}{} [{}] {}",
+                        "{}{} {}{} [{}] {}{}",
                         indent,
                         marker,
                         item.node.kind_label(),
                         head_marker,
                         item.node.id,
-                        preview
+                        preview,
+                        if provenance.is_empty() {
+                            String::new()
+                        } else {
+                            format!(" [{}]", provenance)
+                        }
                     ));
                 }
             }
@@ -238,6 +244,50 @@ fn node_marker(item: &TreeNodeSummary) -> String {
         marker.push('@');
     }
     marker
+}
+
+pub(crate) fn bookmark_digest(bookmark: &super::Bookmark) -> Option<String> {
+    let mut parts = Vec::new();
+    if let Some(actor) = bookmark.created_by_principal_id.as_ref() {
+        parts.push(format!("actor:{}", actor));
+    }
+    if let Some(task_id) = bookmark
+        .provenance
+        .as_ref()
+        .and_then(|p| p.task_id.as_ref())
+    {
+        parts.push(format!("task:{}", task_id));
+    }
+    if let Some(subagent) = bookmark
+        .provenance
+        .as_ref()
+        .and_then(|p| p.subagent_type.as_ref())
+    {
+        parts.push(format!("subagent:{}", subagent));
+    }
+    (!parts.is_empty()).then(|| parts.join(" "))
+}
+
+pub(crate) fn checkpoint_digest(checkpoint: &super::Checkpoint) -> Option<String> {
+    let mut parts = Vec::new();
+    if let Some(actor) = checkpoint.created_by_principal_id.as_ref() {
+        parts.push(format!("actor:{}", actor));
+    }
+    if let Some(task_id) = checkpoint
+        .provenance
+        .as_ref()
+        .and_then(|p| p.task_id.as_ref())
+    {
+        parts.push(format!("task:{}", task_id));
+    }
+    if let Some(subagent) = checkpoint
+        .provenance
+        .as_ref()
+        .and_then(|p| p.subagent_type.as_ref())
+    {
+        parts.push(format!("subagent:{}", subagent));
+    }
+    (!parts.is_empty()).then(|| parts.join(" "))
 }
 
 fn preview_payload(payload: &serde_json::Value) -> Option<String> {

@@ -61,6 +61,8 @@ Branch and search outputs can also include lightweight next-action hints so expl
 
 Graph search can also be filtered by principal, session type, and subagent type so provenance-aware debugging and audit workflows can stay scoped.
 
+Bookmark, checkpoint, node, and branch outputs can expose compact provenance digests so actor, task, and subagent context are visible without reading raw provenance fields directly.
+
 ## Related Guides
 
 - `permissions.md`
