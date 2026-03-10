@@ -133,6 +133,8 @@ let agent = claude_agent::Agent::builder()
 - `docs/subagents.md`
 - `docs/skills.md`
 - `docs/memory-system.md`
+- `docs/backend-selection.md`
+- `docs/audit-export.md`
 
 ## 품질 기준
 

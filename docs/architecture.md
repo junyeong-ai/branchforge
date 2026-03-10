@@ -60,3 +60,5 @@ This keeps graph history and prompt caching aligned without making tool executio
 - `architecture/surrealdb-evaluation.md`
 - `architecture/surrealdb-operations.md`
 - `session.md`
+- `backend-selection.md`
+- `audit-export.md`

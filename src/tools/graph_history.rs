@@ -69,14 +69,23 @@ impl SchemaTool for GraphHistoryTool {
         let output = match input.action {
             GraphHistoryAction::Branches => {
                 manager.graph_branches(&session_id).await.map(|branches| {
+                    let enriched: Vec<_> = branches
+                        .iter()
+                        .map(|branch| {
+                            serde_json::json!({
+                                "summary": branch,
+                                "digest": crate::graph::ProvenanceSummaryService::branch_digest(branch),
+                            })
+                        })
+                        .collect();
                     if let Some(action) = input.follow_up_action.as_deref() {
                         format!(
                             "{}\n\nnext_action_hint: {}",
-                            serde_json::to_string_pretty(&branches).unwrap_or_default(),
+                            serde_json::to_string_pretty(&enriched).unwrap_or_default(),
                             action
                         )
                     } else {
-                        serde_json::to_string_pretty(&branches).unwrap_or_default()
+                        serde_json::to_string_pretty(&enriched).unwrap_or_default()
                     }
                 })
             }

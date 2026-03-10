@@ -133,6 +133,8 @@ See `docs/tools.md` for details.
 - `docs/subagents.md`
 - `docs/skills.md`
 - `docs/memory-system.md`
+- `docs/backend-selection.md`
+- `docs/audit-export.md`
 
 ## Quality Gates
 

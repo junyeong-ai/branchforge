@@ -10,6 +10,7 @@ pub struct ExportNode {
     pub parent_id: Option<NodeId>,
     pub created_by_principal_id: Option<String>,
     pub provenance: Option<NodeProvenance>,
+    pub provenance_digest: Option<String>,
     pub created_at: chrono::DateTime<chrono::Utc>,
     pub tags: Vec<String>,
     pub payload: serde_json::Value,
@@ -33,6 +34,7 @@ pub struct ExportCheckpoint {
     pub note: Option<String>,
     pub created_by_principal_id: Option<String>,
     pub provenance: Option<NodeProvenance>,
+    pub provenance_digest: Option<String>,
     pub created_at: chrono::DateTime<chrono::Utc>,
     pub tags: Vec<String>,
 }
@@ -53,6 +55,7 @@ pub struct ExportBookmark {
     pub note: Option<String>,
     pub created_by_principal_id: Option<String>,
     pub provenance: Option<NodeProvenance>,
+    pub provenance_digest: Option<String>,
     pub created_at: chrono::DateTime<chrono::Utc>,
 }
 
@@ -68,6 +71,7 @@ impl SessionGraph {
                 parent_id: node.parent_id,
                 created_by_principal_id: node.created_by_principal_id.clone(),
                 provenance: node.provenance.clone(),
+                provenance_digest: crate::graph::ProvenanceSummaryService::render_node_digest(node),
                 created_at: node.created_at,
                 tags: node.tags.clone(),
                 payload: node.payload.clone(),
@@ -122,6 +126,24 @@ fn checkpoint_to_export(checkpoint: &Checkpoint) -> ExportCheckpoint {
         note: checkpoint.note.clone(),
         created_by_principal_id: checkpoint.created_by_principal_id.clone(),
         provenance: checkpoint.provenance.clone(),
+        provenance_digest: checkpoint
+            .provenance
+            .as_ref()
+            .map(|_| {
+                let mut parts = Vec::new();
+                if let Some(actor) = checkpoint.created_by_principal_id.as_ref() {
+                    parts.push(format!("actor:{}", actor));
+                }
+                if let Some(task_id) = checkpoint
+                    .provenance
+                    .as_ref()
+                    .and_then(|p| p.task_id.as_ref())
+                {
+                    parts.push(format!("task:{}", task_id));
+                }
+                parts.join(" ")
+            })
+            .filter(|s| !s.is_empty()),
         created_at: checkpoint.created_at,
         tags: checkpoint.tags.clone(),
     }
@@ -135,6 +157,24 @@ fn bookmark_to_export(bookmark: &Bookmark) -> ExportBookmark {
         note: bookmark.note.clone(),
         created_by_principal_id: bookmark.created_by_principal_id.clone(),
         provenance: bookmark.provenance.clone(),
+        provenance_digest: bookmark
+            .provenance
+            .as_ref()
+            .map(|_| {
+                let mut parts = Vec::new();
+                if let Some(actor) = bookmark.created_by_principal_id.as_ref() {
+                    parts.push(format!("actor:{}", actor));
+                }
+                if let Some(task_id) = bookmark
+                    .provenance
+                    .as_ref()
+                    .and_then(|p| p.task_id.as_ref())
+                {
+                    parts.push(format!("task:{}", task_id));
+                }
+                parts.join(" ")
+            })
+            .filter(|s| !s.is_empty()),
         created_at: bookmark.created_at,
     }
 }
