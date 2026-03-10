@@ -10,6 +10,7 @@ pub mod replay;
 pub mod search;
 pub mod session_graph;
 pub mod types;
+pub mod validator;
 
 pub use diff::{BranchDiffSummary, GraphDiffService};
 pub use event::{EventMetadata, GraphEvent, GraphEventBody};
@@ -26,3 +27,4 @@ pub use types::{
     Bookmark, Branch, BranchId, Checkpoint, GraphNode, NodeId, NodeKind, NodeProvenance,
     SessionGraphId,
 };
+pub use validator::{GraphValidationIssue, GraphValidationReport, GraphValidator};
