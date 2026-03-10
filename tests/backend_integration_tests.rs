@@ -378,6 +378,80 @@ async fn test_surrealdb_queue_stress() {
     assert_eq!(second.priority, 18);
 }
 
+#[cfg(feature = "surrealdb-backend")]
+#[tokio::test]
+#[ignore = "Requires local Docker SurrealDB"]
+async fn test_surrealdb_schema_version_tracking() {
+    let persistence = surreal_persistence();
+    let session = seeded_session();
+    persistence.save(&session).await.unwrap();
+
+    let response = reqwest::Client::new()
+        .post(surreal_url())
+        .basic_auth("root", Some("root"))
+        .header("surreal-ns", "main")
+        .header("surreal-db", "main")
+        .header("Accept", "application/json")
+        .body("SELECT version FROM schema_version WHERE name = 'session_store' LIMIT 1;")
+        .send()
+        .await
+        .expect("query should succeed")
+        .text()
+        .await
+        .expect("response text");
+
+    assert!(response.contains("\"version\":1"));
+}
+
+#[cfg(feature = "surrealdb-backend")]
+#[tokio::test]
+#[ignore = "Requires local Docker SurrealDB"]
+async fn test_surrealdb_backup_restore_roundtrip() {
+    let persistence = surreal_persistence();
+    let mut session = seeded_session();
+    let tenant = format!("tenant-{}", uuid::Uuid::new_v4().simple());
+    session.set_identity(Some(tenant.clone()), Some("user-1".to_string()));
+    let session_id = session.id;
+
+    persistence.save(&session).await.unwrap();
+    let loaded = persistence.load(&session_id).await.unwrap().unwrap();
+    persistence.delete(&session_id).await.unwrap();
+    assert!(persistence.load(&session_id).await.unwrap().is_none());
+    persistence.save(&loaded).await.unwrap();
+
+    let restored = persistence.load(&session_id).await.unwrap().unwrap();
+    assert_eq!(restored.tenant_id.as_deref(), Some(tenant.as_str()));
+    assert_eq!(
+        restored.current_branch_messages().len(),
+        loaded.current_branch_messages().len()
+    );
+}
+
+#[cfg(feature = "surrealdb-backend")]
+#[tokio::test]
+#[ignore = "Requires local Docker SurrealDB"]
+async fn test_surrealdb_medium_soak() {
+    let persistence = surreal_persistence();
+    let mut session = seeded_session();
+    let tenant = format!("tenant-{}", uuid::Uuid::new_v4().simple());
+    session.set_identity(Some(tenant.clone()), Some("user-1".to_string()));
+    let session_id = session.id;
+
+    for i in 0..25 {
+        session.add_message(SessionMessage::user(vec![ContentBlock::text(format!(
+            "u-{i}"
+        ))]));
+        session.add_message(SessionMessage::assistant(vec![ContentBlock::text(
+            format!("a-{i}"),
+        )]));
+        persistence.save(&session).await.unwrap();
+        let loaded = persistence.load(&session_id).await.unwrap().unwrap();
+        assert_eq!(loaded.tenant_id.as_deref(), Some(tenant.as_str()));
+        assert!(!loaded.current_branch_messages().is_empty());
+        let _ = persistence.list(Some(&tenant)).await.unwrap();
+    }
+}
+
 #[tokio::test]
 #[ignore = "Requires local Docker backend services"]
 async fn test_backend_containers_are_reachable() {

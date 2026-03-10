@@ -160,6 +160,8 @@ pub struct SurrealPersistence {
     client: Client,
 }
 
+const CURRENT_SCHEMA_VERSION: i64 = 1;
+
 impl SurrealPersistence {
     pub fn new(config: SurrealConfig) -> Self {
         Self {
@@ -463,13 +465,9 @@ impl SurrealPersistence {
 
     async fn ensure_schema(&self) -> SessionResult<()> {
         self.bootstrap_namespace_database().await?;
-        self.execute_unit(
-            "DEFINE TABLE IF NOT EXISTS session_snapshot SCHEMALESS;\n\
-             DEFINE TABLE IF NOT EXISTS graph_record SCHEMALESS;\n\
-             DEFINE TABLE IF NOT EXISTS summary_record SCHEMALESS;\n\
-             DEFINE TABLE IF NOT EXISTS queue_record SCHEMALESS;",
-        )
-        .await
+        self.bootstrap_migration_table().await?;
+        let version = self.current_schema_version().await?;
+        self.run_migrations(version).await
     }
 
     async fn bootstrap_namespace_database(&self) -> SessionResult<()> {
@@ -500,6 +498,52 @@ impl SurrealPersistence {
             });
         }
         Ok(())
+    }
+
+    async fn bootstrap_migration_table(&self) -> SessionResult<()> {
+        self.execute_unit(
+            "DEFINE TABLE IF NOT EXISTS schema_version SCHEMALESS;\n\
+             DEFINE INDEX IF NOT EXISTS idx_schema_version_name ON schema_version FIELDS name UNIQUE;",
+        )
+        .await
+    }
+
+    async fn current_schema_version(&self) -> SessionResult<i64> {
+        let rows = Self::extract_result_rows(
+            &self
+                .execute_query(
+                    "SELECT version FROM schema_version WHERE name = 'session_store' LIMIT 1;",
+                )
+                .await?,
+        )?;
+        Ok(rows
+            .into_iter()
+            .next()
+            .and_then(|row| row.get("version").and_then(serde_json::Value::as_i64))
+            .unwrap_or(0))
+    }
+
+    async fn run_migrations(&self, from_version: i64) -> SessionResult<()> {
+        if from_version >= CURRENT_SCHEMA_VERSION {
+            return Ok(());
+        }
+
+        if from_version < 1 {
+            self.execute_unit(
+                "DEFINE TABLE IF NOT EXISTS session_snapshot SCHEMALESS;\n\
+                 DEFINE TABLE IF NOT EXISTS graph_record SCHEMALESS;\n\
+                 DEFINE TABLE IF NOT EXISTS summary_record SCHEMALESS;\n\
+                 DEFINE TABLE IF NOT EXISTS queue_record SCHEMALESS;",
+            )
+            .await?;
+        }
+
+        self.execute_unit(&format!(
+            "DELETE schema_version WHERE name = 'session_store';\n\
+             CREATE schema_version CONTENT {{ name: 'session_store', version: {}, updated_at: time::now() }};",
+            CURRENT_SCHEMA_VERSION
+        ))
+        .await
     }
 
     async fn execute_unit(&self, sql: &str) -> SessionResult<()> {

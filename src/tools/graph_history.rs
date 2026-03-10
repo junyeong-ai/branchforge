@@ -40,6 +40,9 @@ pub struct GraphHistoryInput {
     pub query: Option<String>,
     pub kind: Option<String>,
     pub tag: Option<String>,
+    pub principal_id: Option<String>,
+    pub session_type: Option<String>,
+    pub subagent_type: Option<String>,
     pub tree_mode: Option<GraphTreeMode>,
     pub follow_up_action: Option<String>,
 }
@@ -228,6 +231,9 @@ impl SchemaTool for GraphHistoryTool {
                             branch_id,
                             kind,
                             tag: input.tag.clone(),
+                            principal_id: input.principal_id.clone(),
+                            session_type: input.session_type.clone(),
+                            subagent_type: input.subagent_type.clone(),
                         },
                     )
                     .await

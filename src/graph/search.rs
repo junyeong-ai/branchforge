@@ -10,6 +10,9 @@ pub struct GraphSearchQuery {
     pub branch_id: Option<BranchId>,
     pub kind: Option<NodeKind>,
     pub tag: Option<String>,
+    pub principal_id: Option<String>,
+    pub session_type: Option<String>,
+    pub subagent_type: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -50,6 +53,29 @@ impl GraphSearchService {
             })
             .filter(|node| match query.text.as_ref() {
                 Some(text) => payload_contains_text(&node.payload, text),
+                None => true,
+            })
+            .filter(|node| match query.principal_id.as_ref() {
+                Some(principal_id) => {
+                    node.created_by_principal_id.as_deref() == Some(principal_id.as_str())
+                }
+                None => true,
+            })
+            .filter(|node| match query.session_type.as_ref() {
+                Some(session_type) => node
+                    .provenance
+                    .as_ref()
+                    .map(|provenance| provenance.session_type == *session_type)
+                    .unwrap_or(false),
+                None => true,
+            })
+            .filter(|node| match query.subagent_type.as_ref() {
+                Some(subagent_type) => node
+                    .provenance
+                    .as_ref()
+                    .and_then(|provenance| provenance.subagent_type.as_ref())
+                    .map(|value| value == subagent_type)
+                    .unwrap_or(false),
                 None => true,
             })
             .cloned()

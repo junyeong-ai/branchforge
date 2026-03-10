@@ -59,6 +59,8 @@ The `GraphHistory` tool exposes graph-first session exploration.
 
 Branch and search outputs can also include lightweight next-action hints so exploration flows can lead into replay, fork, and comparison workflows more naturally.
 
+Graph search can also be filtered by principal, session type, and subagent type so provenance-aware debugging and audit workflows can stay scoped.
+
 ## Related Guides
 
 - `permissions.md`

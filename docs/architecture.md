@@ -58,4 +58,5 @@ This keeps graph history and prompt caching aligned without making tool executio
 - `architecture/runtime-boundaries.md`
 - `architecture/provider-capabilities.md`
 - `architecture/surrealdb-evaluation.md`
+- `architecture/surrealdb-operations.md`
 - `session.md`
