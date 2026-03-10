@@ -4,7 +4,11 @@
 
 use std::time::Duration;
 
-#[cfg(any(feature = "postgres", feature = "redis-backend"))]
+#[cfg(any(
+    feature = "postgres",
+    feature = "redis-backend",
+    feature = "surrealdb-backend"
+))]
 use claude_agent::session::Persistence;
 #[cfg(feature = "surrealdb-backend")]
 use claude_agent::session::SurrealPersistence;
@@ -24,14 +28,8 @@ use claude_agent::session::{Session, SessionConfig, SessionMessage};
     feature = "surrealdb-backend"
 ))]
 use claude_agent::types::ContentBlock;
-#[cfg(feature = "surrealdb-backend")]
-use reqwest::Client;
 use tokio::time::sleep;
-#[cfg(any(
-    feature = "postgres",
-    feature = "redis-backend",
-    feature = "surrealdb-backend"
-))]
+#[cfg(any(feature = "postgres", feature = "redis-backend"))]
 use uuid::Uuid;
 
 #[cfg(feature = "postgres")]
@@ -126,45 +124,30 @@ async fn test_redis_backend_roundtrip_graph_identity() {
 #[cfg(feature = "surrealdb-backend")]
 #[tokio::test]
 #[ignore = "Requires local Docker SurrealDB"]
-async fn test_surrealdb_graph_queries_and_prototype_export() {
-    let session = seeded_session();
-    let prototype = SurrealPersistence::new(Default::default());
-    let records = prototype.export_graph_records(&session);
-
-    assert!(
-        records
-            .iter()
-            .any(|record| record.principal_id.as_deref() == Some("user-1"))
-    );
-    assert!(
-        records
-            .iter()
-            .any(|record| record.tenant_id.as_deref() == Some("tenant-a"))
+async fn test_surrealdb_backend_roundtrip_graph_identity() {
+    let mut session = seeded_session();
+    let unique_tenant = format!("tenant-{}", uuid::Uuid::new_v4().simple());
+    session.set_identity(Some(unique_tenant.clone()), Some("user-1".to_string()));
+    let persistence = SurrealPersistence::new(
+        claude_agent::session::SurrealConfig::default()
+            .namespace("main")
+            .database("main")
+            .endpoint(surreal_url())
+            .credentials("root", "root"),
     );
 
-    let client = Client::new();
-    let namespace = "main";
-    let suffix = Uuid::new_v4().simple().to_string();
+    let session_id = session.id;
+    persistence.save(&session).await.unwrap();
 
-    let sql = format!(
-        "DEFINE TABLE session SCHEMALESS;\nDEFINE TABLE branch SCHEMALESS;\nDEFINE TABLE node SCHEMALESS;\nDEFINE TABLE edge_parent TYPE RELATION IN node OUT node;\nCREATE session:{suffix} SET tenant_id = 'tenant-a', principal_id = 'user-1';\nCREATE branch:{suffix}_main SET session = session:{suffix};\nCREATE branch:{suffix}_alt SET session = session:{suffix};\nCREATE node:{suffix}_root SET session = session:{suffix}, branch = branch:{suffix}_main, kind = 'user', text = 'root';\nCREATE node:{suffix}_reply SET session = session:{suffix}, branch = branch:{suffix}_main, kind = 'assistant', text = 'reply';\nCREATE node:{suffix}_alt_reply SET session = session:{suffix}, branch = branch:{suffix}_alt, kind = 'assistant', text = 'alt';\nRELATE node:{suffix}_root->edge_parent->node:{suffix}_reply;\nRELATE node:{suffix}_root->edge_parent->node:{suffix}_alt_reply;\nSELECT ->edge_parent->node AS children FROM node:{suffix}_root;\nSELECT count() AS total FROM node WHERE session = session:{suffix};"
-    );
+    let loaded = persistence.load(&session_id).await.unwrap().unwrap();
+    assert_eq!(loaded.tenant_id.as_deref(), Some(unique_tenant.as_str()));
+    assert_eq!(loaded.principal_id.as_deref(), Some("user-1"));
+    assert_eq!(loaded.current_branch_messages().len(), 2);
+    assert_eq!(loaded.graph.bookmarks.len(), 1);
+    assert_eq!(loaded.graph.checkpoints.len(), 1);
 
-    let response = client
-        .post(surreal_url())
-        .basic_auth("root", Some("root"))
-        .header("surreal-ns", namespace)
-        .header("surreal-db", "main")
-        .header("Accept", "application/json")
-        .body(sql)
-        .send()
-        .await
-        .expect("surreal request should succeed");
-
-    let body = response.text().await.expect("response body");
-    assert!(body.contains("children"));
-    assert!(body.contains("reply"));
-    assert!(body.contains("alt"));
+    let tenant_list = persistence.list(Some(&unique_tenant)).await.unwrap();
+    assert_eq!(tenant_list, vec![session_id]);
 }
 
 #[tokio::test]

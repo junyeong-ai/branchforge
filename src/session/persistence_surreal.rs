@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
+use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -14,6 +15,8 @@ pub struct SurrealConfig {
     pub namespace: String,
     pub database: String,
     pub endpoint: String,
+    pub username: String,
+    pub password: String,
 }
 
 impl Default for SurrealConfig {
@@ -21,8 +24,33 @@ impl Default for SurrealConfig {
         Self {
             namespace: "claude_agent".to_string(),
             database: "session_graph".to_string(),
-            endpoint: "mem://graph-first-prototype".to_string(),
+            endpoint: "http://127.0.0.1:58000/sql".to_string(),
+            username: "root".to_string(),
+            password: "root".to_string(),
         }
+    }
+}
+
+impl SurrealConfig {
+    pub fn endpoint(mut self, endpoint: impl Into<String>) -> Self {
+        self.endpoint = endpoint.into();
+        self
+    }
+
+    pub fn namespace(mut self, namespace: impl Into<String>) -> Self {
+        self.namespace = namespace.into();
+        self
+    }
+
+    pub fn database(mut self, database: impl Into<String>) -> Self {
+        self.database = database.into();
+        self
+    }
+
+    pub fn credentials(mut self, username: impl Into<String>, password: impl Into<String>) -> Self {
+        self.username = username.into();
+        self.password = password.into();
+        self
     }
 }
 
@@ -42,11 +70,15 @@ pub struct SurrealGraphRecord {
 
 pub struct SurrealPersistence {
     config: SurrealConfig,
+    client: Client,
 }
 
 impl SurrealPersistence {
     pub fn new(config: SurrealConfig) -> Self {
-        Self { config }
+        Self {
+            config,
+            client: Client::new(),
+        }
     }
 
     pub fn config(&self) -> &SurrealConfig {
@@ -119,7 +151,7 @@ impl SurrealPersistence {
                     id: format!("checkpoint:{}", checkpoint.id),
                     session_id: session.id,
                     tenant_id: session.tenant_id.clone(),
-                    principal_id: session.principal_id.clone(),
+                    principal_id: checkpoint.created_by_principal_id.clone(),
                     branch_id: Some(checkpoint.branch_id),
                     parent_id: Some(checkpoint.id),
                     kind: "checkpoint".to_string(),
@@ -141,7 +173,7 @@ impl SurrealPersistence {
                     id: format!("bookmark:{}", bookmark.id),
                     session_id: session.id,
                     tenant_id: session.tenant_id.clone(),
-                    principal_id: session.principal_id.clone(),
+                    principal_id: bookmark.created_by_principal_id.clone(),
                     branch_id: Some(bookmark.branch_id),
                     parent_id: Some(bookmark.node_id),
                     kind: "bookmark".to_string(),
@@ -157,83 +189,364 @@ impl SurrealPersistence {
         records.sort_by_key(|record| record.created_at);
         records
     }
+
+    async fn ensure_schema(&self) -> SessionResult<()> {
+        self.bootstrap_namespace_database().await?;
+        self.execute_unit(
+            "DEFINE TABLE IF NOT EXISTS session_snapshot SCHEMALESS;\n\
+             DEFINE TABLE IF NOT EXISTS graph_record SCHEMALESS;\n\
+             DEFINE TABLE IF NOT EXISTS summary_record SCHEMALESS;\n\
+             DEFINE TABLE IF NOT EXISTS queue_record SCHEMALESS;",
+        )
+        .await
+    }
+
+    async fn bootstrap_namespace_database(&self) -> SessionResult<()> {
+        let sql = format!(
+            "DEFINE NAMESPACE IF NOT EXISTS {};\nDEFINE DATABASE IF NOT EXISTS {};",
+            self.config.namespace, self.config.database
+        );
+
+        let response = self
+            .client
+            .post(&self.config.endpoint)
+            .basic_auth(&self.config.username, Some(&self.config.password))
+            .header("Accept", "application/json")
+            .body(sql)
+            .send()
+            .await
+            .map_err(|e| SessionError::Storage {
+                message: format!("SurrealDB bootstrap request failed: {e}"),
+            })?;
+
+        let status = response.status();
+        let body = response.text().await.map_err(|e| SessionError::Storage {
+            message: format!("SurrealDB bootstrap response read failed: {e}"),
+        })?;
+        if !status.is_success() {
+            return Err(SessionError::Storage {
+                message: format!("SurrealDB bootstrap failed with {status}: {body}"),
+            });
+        }
+        Ok(())
+    }
+
+    async fn execute_unit(&self, sql: &str) -> SessionResult<()> {
+        let response = self
+            .client
+            .post(&self.config.endpoint)
+            .basic_auth(&self.config.username, Some(&self.config.password))
+            .header("surreal-ns", &self.config.namespace)
+            .header("surreal-db", &self.config.database)
+            .header("Accept", "application/json")
+            .body(sql.to_string())
+            .send()
+            .await
+            .map_err(|e| SessionError::Storage {
+                message: format!("SurrealDB request failed: {e}"),
+            })?;
+
+        let status = response.status();
+        let body = response.text().await.map_err(|e| SessionError::Storage {
+            message: format!("SurrealDB response read failed: {e}"),
+        })?;
+        if !status.is_success() {
+            return Err(SessionError::Storage {
+                message: format!("SurrealDB request failed with {status}: {body}"),
+            });
+        }
+
+        let parsed: serde_json::Value =
+            serde_json::from_str(&body).map_err(SessionError::Serialization)?;
+        if parsed.to_string().contains("\"status\":\"ERR\"") {
+            return Err(SessionError::Storage {
+                message: format!("SurrealDB returned error response: {body}"),
+            });
+        }
+        Ok(())
+    }
+
+    async fn execute_query(&self, sql: &str) -> SessionResult<serde_json::Value> {
+        let response = self
+            .client
+            .post(&self.config.endpoint)
+            .basic_auth(&self.config.username, Some(&self.config.password))
+            .header("surreal-ns", &self.config.namespace)
+            .header("surreal-db", &self.config.database)
+            .header("Accept", "application/json")
+            .body(sql.to_string())
+            .send()
+            .await
+            .map_err(|e| SessionError::Storage {
+                message: format!("SurrealDB request failed: {e}"),
+            })?;
+
+        let status = response.status();
+        let body = response.text().await.map_err(|e| SessionError::Storage {
+            message: format!("SurrealDB response read failed: {e}"),
+        })?;
+        if !status.is_success() {
+            return Err(SessionError::Storage {
+                message: format!("SurrealDB request failed with {status}: {body}"),
+            });
+        }
+
+        serde_json::from_str(&body).map_err(SessionError::Serialization)
+    }
+
+    fn extract_result_rows(value: &serde_json::Value) -> SessionResult<Vec<serde_json::Value>> {
+        let array = value.as_array().ok_or_else(|| SessionError::Storage {
+            message: format!("Unexpected SurrealDB response shape: {value}"),
+        })?;
+        let mut rows = Vec::new();
+        for statement in array {
+            match statement.get("status").and_then(serde_json::Value::as_str) {
+                Some("OK") | None => {}
+                Some(_) => {
+                    return Err(SessionError::Storage {
+                        message: format!("SurrealDB statement failed: {statement}"),
+                    });
+                }
+            }
+            if let Some(result) = statement.get("result")
+                && let Some(result_rows) = result.as_array()
+            {
+                rows.extend(result_rows.iter().cloned());
+            }
+        }
+        Ok(rows)
+    }
 }
 
 #[async_trait::async_trait]
 impl Persistence for SurrealPersistence {
     fn name(&self) -> &str {
-        "surreal-prototype"
+        "surrealdb"
     }
 
-    async fn save(&self, _session: &Session) -> SessionResult<()> {
-        Err(SessionError::Storage {
-            message: "SurrealPersistence is an experimental prototype and is not wired to a live SurrealDB client yet".to_string(),
-        })
+    async fn save(&self, session: &Session) -> SessionResult<()> {
+        self.ensure_schema().await?;
+
+        let snapshot = serde_json::to_string(session).map_err(SessionError::Serialization)?;
+        let graph_records = serde_json::to_string(&self.export_graph_records(session))
+            .map_err(SessionError::Serialization)?;
+        let sql = format!(
+            "BEGIN TRANSACTION;\n\
+             DELETE session_snapshot WHERE session_id = {};\n\
+             CREATE session_snapshot CONTENT {{ id: {}, session_id: {}, tenant_id: {}, principal_id: {}, payload: {}, updated_at: time::now() }};\n\
+             DELETE graph_record WHERE session_id = {};\n\
+             FOR $record IN {} {{ CREATE graph_record CONTENT $record; }};\n\
+             COMMIT TRANSACTION;",
+            serde_json::to_string(&session.id.to_string()).unwrap(),
+            serde_json::to_string(&session.id.to_string()).unwrap(),
+            serde_json::to_string(&session.id.to_string()).unwrap(),
+            serde_json::to_string(&session.tenant_id).unwrap(),
+            serde_json::to_string(&session.principal_id).unwrap(),
+            snapshot,
+            serde_json::to_string(&session.id.to_string()).unwrap(),
+            graph_records,
+        );
+
+        self.execute_unit(&sql).await
     }
 
-    async fn load(&self, _id: &SessionId) -> SessionResult<Option<Session>> {
-        Err(SessionError::Storage {
-            message: "SurrealPersistence is an experimental prototype and is not wired to a live SurrealDB client yet".to_string(),
-        })
+    async fn load(&self, id: &SessionId) -> SessionResult<Option<Session>> {
+        self.ensure_schema().await?;
+        let sql = format!(
+            "SELECT payload FROM session_snapshot WHERE session_id = {} LIMIT 1;",
+            serde_json::to_string(&id.to_string()).unwrap()
+        );
+        let value = self.execute_query(&sql).await?;
+        let rows = Self::extract_result_rows(&value)?;
+        let Some(row) = rows.into_iter().next() else {
+            return Ok(None);
+        };
+        let payload = row
+            .get("payload")
+            .cloned()
+            .ok_or_else(|| SessionError::Storage {
+                message: format!("Missing SurrealDB session payload for {id}"),
+            })?;
+        let mut session: Session =
+            serde_json::from_value(payload).map_err(SessionError::Serialization)?;
+        session.refresh_message_projection();
+        Ok(Some(session))
     }
 
-    async fn delete(&self, _id: &SessionId) -> SessionResult<bool> {
-        Err(SessionError::Storage {
-            message: "SurrealPersistence is an experimental prototype and is not wired to a live SurrealDB client yet".to_string(),
-        })
+    async fn delete(&self, id: &SessionId) -> SessionResult<bool> {
+        self.ensure_schema().await?;
+        let sql = format!(
+            "BEGIN TRANSACTION;\n\
+             DELETE session_snapshot WHERE session_id = {};\n\
+             DELETE graph_record WHERE session_id = {};\n\
+             DELETE summary_record WHERE session_id = {};\n\
+             DELETE queue_record WHERE session_id = {};\n\
+             COMMIT TRANSACTION;",
+            serde_json::to_string(&id.to_string()).unwrap(),
+            serde_json::to_string(&id.to_string()).unwrap(),
+            serde_json::to_string(&id.to_string()).unwrap(),
+            serde_json::to_string(&id.to_string()).unwrap(),
+        );
+        self.execute_unit(&sql).await?;
+        Ok(true)
     }
 
-    async fn list(&self, _tenant_id: Option<&str>) -> SessionResult<Vec<SessionId>> {
-        Err(SessionError::Storage {
-            message: "SurrealPersistence is an experimental prototype and is not wired to a live SurrealDB client yet".to_string(),
-        })
+    async fn list(&self, tenant_id: Option<&str>) -> SessionResult<Vec<SessionId>> {
+        self.ensure_schema().await?;
+        let sql = match tenant_id {
+            Some(tenant_id) => format!(
+                "SELECT session_id FROM session_snapshot WHERE tenant_id = {};",
+                serde_json::to_string(tenant_id).unwrap()
+            ),
+            None => "SELECT session_id FROM session_snapshot;".to_string(),
+        };
+        let rows = Self::extract_result_rows(&self.execute_query(&sql).await?)?;
+        Ok(rows
+            .into_iter()
+            .filter_map(|row| {
+                row.get("session_id")
+                    .and_then(serde_json::Value::as_str)
+                    .map(SessionId::from)
+            })
+            .collect())
     }
 
-    async fn add_summary(&self, _snapshot: SummarySnapshot) -> SessionResult<()> {
-        Err(SessionError::Storage {
-            message: "SurrealPersistence is an experimental prototype and is not wired to a live SurrealDB client yet".to_string(),
-        })
+    async fn add_summary(&self, snapshot: SummarySnapshot) -> SessionResult<()> {
+        self.ensure_schema().await?;
+        let content = serde_json::to_string(&snapshot).map_err(SessionError::Serialization)?;
+        let sql = format!(
+            "CREATE summary_record CONTENT {{ id: {}, session_id: {}, payload: {}, created_at: time::now() }};",
+            serde_json::to_string(&Uuid::new_v4().to_string()).unwrap(),
+            serde_json::to_string(&snapshot.session_id.to_string()).unwrap(),
+            content,
+        );
+        self.execute_unit(&sql).await
     }
 
-    async fn get_summaries(&self, _session_id: &SessionId) -> SessionResult<Vec<SummarySnapshot>> {
-        Err(SessionError::Storage {
-            message: "SurrealPersistence is an experimental prototype and is not wired to a live SurrealDB client yet".to_string(),
-        })
+    async fn get_summaries(&self, session_id: &SessionId) -> SessionResult<Vec<SummarySnapshot>> {
+        self.ensure_schema().await?;
+        let sql = format!(
+            "SELECT payload FROM summary_record WHERE session_id = {} ORDER BY created_at ASC;",
+            serde_json::to_string(&session_id.to_string()).unwrap()
+        );
+        let rows = Self::extract_result_rows(&self.execute_query(&sql).await?)?;
+        rows.into_iter()
+            .map(|row| {
+                row.get("payload")
+                    .cloned()
+                    .ok_or_else(|| SessionError::Storage {
+                        message: "Missing summary payload".to_string(),
+                    })
+                    .and_then(|payload| {
+                        serde_json::from_value(payload).map_err(SessionError::Serialization)
+                    })
+            })
+            .collect()
     }
 
     async fn enqueue(
         &self,
-        _session_id: &SessionId,
-        _content: String,
-        _priority: i32,
+        session_id: &SessionId,
+        content: String,
+        priority: i32,
     ) -> SessionResult<QueueItem> {
-        Err(SessionError::Storage {
-            message: "SurrealPersistence is an experimental prototype and is not wired to a live SurrealDB client yet".to_string(),
-        })
+        self.ensure_schema().await?;
+        let item = QueueItem::enqueue(*session_id, content).priority(priority);
+        let payload = serde_json::to_string(&item).map_err(SessionError::Serialization)?;
+        let sql = format!(
+            "CREATE queue_record CONTENT {{ id: {}, session_id: {}, payload: {}, created_at: time::now() }};",
+            serde_json::to_string(&item.id.to_string()).unwrap(),
+            serde_json::to_string(&session_id.to_string()).unwrap(),
+            payload,
+        );
+        self.execute_unit(&sql).await?;
+        Ok(item)
     }
 
-    async fn dequeue(&self, _session_id: &SessionId) -> SessionResult<Option<QueueItem>> {
-        Err(SessionError::Storage {
-            message: "SurrealPersistence is an experimental prototype and is not wired to a live SurrealDB client yet".to_string(),
-        })
+    async fn dequeue(&self, session_id: &SessionId) -> SessionResult<Option<QueueItem>> {
+        self.ensure_schema().await?;
+        let sql = format!(
+            "SELECT payload FROM queue_record WHERE session_id = {} ORDER BY payload.priority DESC, created_at ASC;",
+            serde_json::to_string(&session_id.to_string()).unwrap()
+        );
+        let mut items: Vec<QueueItem> =
+            Self::extract_result_rows(&self.execute_query(&sql).await?)?
+                .into_iter()
+                .filter_map(|row| row.get("payload").cloned())
+                .map(|payload| serde_json::from_value(payload).map_err(SessionError::Serialization))
+                .collect::<SessionResult<Vec<_>>>()?;
+        let Some(pos) = items
+            .iter()
+            .position(|item| item.status == super::types::QueueStatus::Pending)
+        else {
+            return Ok(None);
+        };
+        let mut item = items.swap_remove(pos);
+        item.start_processing();
+        let payload = serde_json::to_string(&item).map_err(SessionError::Serialization)?;
+        let update_sql = format!(
+            "DELETE queue_record WHERE id = {};\nCREATE queue_record CONTENT {{ id: {}, session_id: {}, payload: {}, created_at: time::now() }};",
+            serde_json::to_string(&item.id.to_string()).unwrap(),
+            serde_json::to_string(&item.id.to_string()).unwrap(),
+            serde_json::to_string(&session_id.to_string()).unwrap(),
+            payload,
+        );
+        self.execute_unit(&update_sql).await?;
+        Ok(Some(item))
     }
 
-    async fn cancel_queued(&self, _item_id: Uuid) -> SessionResult<bool> {
-        Err(SessionError::Storage {
-            message: "SurrealPersistence is an experimental prototype and is not wired to a live SurrealDB client yet".to_string(),
-        })
+    async fn cancel_queued(&self, item_id: Uuid) -> SessionResult<bool> {
+        self.ensure_schema().await?;
+        let sql = format!(
+            "SELECT payload FROM queue_record WHERE id = {} LIMIT 1;",
+            serde_json::to_string(&item_id.to_string()).unwrap()
+        );
+        let rows = Self::extract_result_rows(&self.execute_query(&sql).await?)?;
+        let Some(row) = rows.into_iter().next() else {
+            return Ok(false);
+        };
+        let payload = row
+            .get("payload")
+            .cloned()
+            .ok_or_else(|| SessionError::Storage {
+                message: "Missing queue payload".to_string(),
+            })?;
+        let mut item: QueueItem =
+            serde_json::from_value(payload).map_err(SessionError::Serialization)?;
+        item.cancel();
+        let update_sql = format!(
+            "DELETE queue_record WHERE id = {};\nCREATE queue_record CONTENT {{ id: {}, session_id: {}, payload: {}, created_at: time::now() }};",
+            serde_json::to_string(&item.id.to_string()).unwrap(),
+            serde_json::to_string(&item.id.to_string()).unwrap(),
+            serde_json::to_string(&item.session_id.to_string()).unwrap(),
+            serde_json::to_string(&item).unwrap(),
+        );
+        self.execute_unit(&update_sql).await?;
+        Ok(true)
     }
 
-    async fn pending_queue(&self, _session_id: &SessionId) -> SessionResult<Vec<QueueItem>> {
-        Err(SessionError::Storage {
-            message: "SurrealPersistence is an experimental prototype and is not wired to a live SurrealDB client yet".to_string(),
-        })
+    async fn pending_queue(&self, session_id: &SessionId) -> SessionResult<Vec<QueueItem>> {
+        self.ensure_schema().await?;
+        let sql = format!(
+            "SELECT payload FROM queue_record WHERE session_id = {} ORDER BY created_at ASC;",
+            serde_json::to_string(&session_id.to_string()).unwrap()
+        );
+        let items = Self::extract_result_rows(&self.execute_query(&sql).await?)?
+            .into_iter()
+            .filter_map(|row| row.get("payload").cloned())
+            .map(|payload| serde_json::from_value(payload).map_err(SessionError::Serialization))
+            .collect::<SessionResult<Vec<QueueItem>>>()?;
+        Ok(items
+            .into_iter()
+            .filter(|item| item.status == super::types::QueueStatus::Pending)
+            .collect())
     }
 
     async fn cleanup_expired(&self) -> SessionResult<usize> {
-        Err(SessionError::Storage {
-            message: "SurrealPersistence is an experimental prototype and is not wired to a live SurrealDB client yet".to_string(),
-        })
+        self.ensure_schema().await?;
+        let sql = "DELETE session_snapshot WHERE expires_at != NONE AND expires_at < time::now();";
+        self.execute_unit(sql).await?;
+        Ok(0)
     }
 }
 
@@ -244,7 +557,7 @@ pub fn surreal_prototype() -> Arc<dyn Persistence> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::session::{Session, SessionConfig, SessionMessage};
+    use crate::session::{SessionConfig, SessionMessage};
     use crate::types::ContentBlock;
 
     #[test]
