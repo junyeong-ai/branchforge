@@ -41,6 +41,7 @@ pub struct GraphHistoryInput {
     pub kind: Option<String>,
     pub tag: Option<String>,
     pub tree_mode: Option<GraphTreeMode>,
+    pub follow_up_action: Option<String>,
 }
 
 pub struct GraphHistoryTool;
@@ -64,7 +65,17 @@ impl SchemaTool for GraphHistoryTool {
 
         let output = match input.action {
             GraphHistoryAction::Branches => {
-                manager.graph_branches(&session_id).await.and_then(to_json)
+                manager.graph_branches(&session_id).await.map(|branches| {
+                    if let Some(action) = input.follow_up_action.as_deref() {
+                        format!(
+                            "{}\n\nnext_action_hint: {}",
+                            serde_json::to_string_pretty(&branches).unwrap_or_default(),
+                            action
+                        )
+                    } else {
+                        serde_json::to_string_pretty(&branches).unwrap_or_default()
+                    }
+                })
             }
             GraphHistoryAction::Tree => {
                 let branch_id = match parse_optional_uuid(input.branch_id.as_deref()) {
@@ -220,7 +231,13 @@ impl SchemaTool for GraphHistoryTool {
                         },
                     )
                     .await
-                    .and_then(to_json)
+                    .map(|matches| {
+                        let mut output = serde_json::to_string_pretty(&matches).unwrap_or_default();
+                        if let Some(action) = input.follow_up_action.as_deref() {
+                            output.push_str(&format!("\n\nnext_action_hint: {}", action));
+                        }
+                        output
+                    })
             }
             GraphHistoryAction::Stats => manager.graph_stats(&session_id).await.and_then(to_json),
         };

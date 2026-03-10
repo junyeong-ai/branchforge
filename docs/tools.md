@@ -57,6 +57,8 @@ The `GraphHistory` tool exposes graph-first session exploration.
 - graph search
 - graph-level session statistics and divergence/activity metrics
 
+Branch and search outputs can also include lightweight next-action hints so exploration flows can lead into replay, fork, and comparison workflows more naturally.
+
 ## Related Guides
 
 - `permissions.md`

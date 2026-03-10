@@ -26,6 +26,11 @@ pub struct BranchSummary {
     pub node_count: usize,
     pub checkpoint_count: usize,
     pub bookmark_count: usize,
+    pub last_activity_at: Option<chrono::DateTime<chrono::Utc>>,
+    pub head_preview: Option<String>,
+    pub divergence_from_primary: Option<usize>,
+    pub summary_count: usize,
+    pub tool_activity_count: usize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -57,15 +62,35 @@ impl GraphExplorer {
                     .get(&branch_id)
                     .map(|branch| (branch_id, branch))
             })
-            .map(|(branch_id, branch)| BranchSummary {
-                id: branch_id,
-                name: branch.name.clone(),
-                forked_from: branch.forked_from,
-                head: branch.head,
-                created_at: branch.created_at,
-                node_count: graph.branch_nodes(branch_id).len(),
-                checkpoint_count: graph.checkpoints_for_branch(branch_id).len(),
-                bookmark_count: graph.bookmarks_for_branch(branch_id).len(),
+            .map(|(branch_id, branch)| {
+                let branch_nodes = graph.branch_nodes(branch_id);
+                let head_preview = branch
+                    .head
+                    .and_then(|head| graph.nodes.get(&head))
+                    .and_then(|node| preview_payload(&node.payload));
+                BranchSummary {
+                    id: branch_id,
+                    name: branch.name.clone(),
+                    forked_from: branch.forked_from,
+                    head: branch.head,
+                    created_at: branch.created_at,
+                    node_count: branch_nodes.len(),
+                    checkpoint_count: graph.checkpoints_for_branch(branch_id).len(),
+                    bookmark_count: graph.bookmarks_for_branch(branch_id).len(),
+                    last_activity_at: branch_nodes.last().map(|node| node.created_at),
+                    head_preview,
+                    divergence_from_primary: divergence_from_primary(graph, branch_id),
+                    summary_count: branch_nodes
+                        .iter()
+                        .filter(|node| node.kind == NodeKind::Summary)
+                        .count(),
+                    tool_activity_count: branch_nodes
+                        .iter()
+                        .filter(|node| {
+                            matches!(node.kind, NodeKind::ToolCall | NodeKind::ToolResult)
+                        })
+                        .count(),
+                }
             })
             .collect()
     }
@@ -235,6 +260,21 @@ fn preview_payload(payload: &serde_json::Value) -> Option<String> {
     None
 }
 
+fn divergence_from_primary(graph: &SessionGraph, branch_id: BranchId) -> Option<usize> {
+    if branch_id == graph.primary_branch {
+        return Some(0);
+    }
+
+    let primary = graph.current_branch_nodes(graph.primary_branch);
+    let branch = graph.current_branch_nodes(branch_id);
+    let shared = primary
+        .iter()
+        .zip(branch.iter())
+        .take_while(|(left, right)| left.id == right.id)
+        .count();
+    Some(branch.len().saturating_sub(shared))
+}
+
 fn truncate_preview(text: &str) -> String {
     let mut chars = text.chars();
     let preview: String = chars.by_ref().take(120).collect();
@@ -281,6 +321,7 @@ mod tests {
         let tree = GraphExplorer::tree_view(&graph, branch);
 
         assert_eq!(branches.len(), 2);
+        assert_eq!(branches[1].divergence_from_primary, Some(2));
         assert!(!tree.is_empty());
         assert!(tree.iter().any(|node| node.has_checkpoint));
     }
