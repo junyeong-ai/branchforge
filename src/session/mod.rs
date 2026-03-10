@@ -1,5 +1,6 @@
 //! Session management for stateful conversations.
 
+mod archive;
 pub mod compact;
 mod export;
 pub mod manager;
@@ -19,6 +20,10 @@ pub mod state;
 pub mod types;
 
 pub use crate::types::TokenUsage;
+pub use archive::{
+    ArchivePolicy, RestoreVerificationReport, RestoreVerifier, SessionArchiveBundle,
+    SessionArchiveService,
+};
 pub use compact::{CompactExecutor, CompactStrategy, DEFAULT_COMPACT_THRESHOLD};
 pub use export::{AuditBundle, ExportPolicy, SessionExporter};
 pub use manager::SessionManager;

@@ -406,6 +406,29 @@ impl SessionManager {
         ))
     }
 
+    pub async fn archive_bundle(
+        &self,
+        id: &SessionId,
+        export_policy: &crate::session::ExportPolicy,
+        archive_policy: &crate::session::ArchivePolicy,
+    ) -> SessionResult<Option<crate::session::SessionArchiveBundle>> {
+        let session = self.get(id).await?;
+        Ok(crate::session::SessionArchiveService::export_bundle(
+            &session,
+            export_policy,
+            archive_policy,
+        ))
+    }
+
+    pub async fn verify_restored_archive(
+        &self,
+        bundle: &crate::session::SessionArchiveBundle,
+        id: &SessionId,
+    ) -> SessionResult<crate::session::RestoreVerificationReport> {
+        let restored = self.get(id).await?;
+        Ok(crate::session::RestoreVerifier::verify(bundle, &restored))
+    }
+
     pub async fn bookmark_current_head(
         &self,
         id: &SessionId,

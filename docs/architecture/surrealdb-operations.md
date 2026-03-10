@@ -43,8 +43,8 @@ Before using SurrealDB in production-like environments, verify:
 Current recommendation:
 
 - use backend-level database backup for disaster recovery
-- use session export and audit bundles for application-level recovery and debugging
-- validate restore with session load, graph search, and replay checks after recovery
+- use session archive bundles for application-level recovery and debugging
+- validate restore with `RestoreVerifier` plus replay, graph search, and export checks after recovery
 
 ## Upgrade Policy
 

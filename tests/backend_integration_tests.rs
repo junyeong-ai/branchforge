@@ -425,6 +425,15 @@ async fn test_surrealdb_backup_restore_roundtrip() {
         restored.current_branch_messages().len(),
         loaded.current_branch_messages().len()
     );
+
+    let bundle = claude_agent::session::SessionArchiveService::export_bundle(
+        &loaded,
+        &claude_agent::session::ExportPolicy::default(),
+        &claude_agent::session::ArchivePolicy::default(),
+    )
+    .expect("archive bundle should be generated");
+    let report = claude_agent::session::RestoreVerifier::verify(&bundle, &restored);
+    assert!(report.is_valid());
 }
 
 #[cfg(feature = "surrealdb-backend")]
