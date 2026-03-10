@@ -191,7 +191,8 @@ impl Session {
         note: Option<String>,
     ) -> Option<uuid::Uuid> {
         let head = self.graph.branch_head(self.graph.primary_branch)?;
-        self.graph.create_bookmark(head, label, note)
+        self.graph
+            .create_bookmark(head, label, note, self.principal_id.clone())
     }
 
     pub fn replay_input(
@@ -231,6 +232,7 @@ impl Session {
                 "usage": message.usage,
             }),
             message.timestamp,
+            self.principal_id.clone(),
         );
     }
 

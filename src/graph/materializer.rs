@@ -56,6 +56,7 @@ impl GraphMaterializer {
                             branch_id: *branch_id,
                             kind: *kind,
                             parent_id: *parent_id,
+                            created_by_principal_id: event.metadata.actor.clone(),
                             created_at: event.metadata.occurred_at,
                             tags: tags.clone(),
                             payload: payload.clone(),
@@ -96,6 +97,7 @@ impl GraphMaterializer {
                             label: label.clone(),
                             note: note.clone(),
                             tags: tags.clone(),
+                            created_by_principal_id: event.metadata.actor.clone(),
                             created_at: event.metadata.occurred_at,
                         },
                     );
@@ -106,6 +108,7 @@ impl GraphMaterializer {
                             branch_id: *branch_id,
                             kind: NodeKind::Checkpoint,
                             parent_id: graph.branches.get(branch_id).and_then(|branch| branch.head),
+                            created_by_principal_id: event.metadata.actor.clone(),
                             created_at: event.metadata.occurred_at,
                             tags: tags.clone(),
                             payload: serde_json::json!({

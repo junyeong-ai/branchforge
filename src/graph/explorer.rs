@@ -9,6 +9,7 @@ pub struct NodeSummary {
     pub branch_id: BranchId,
     pub kind: NodeKind,
     pub parent_id: Option<NodeId>,
+    pub created_by_principal_id: Option<String>,
     pub created_at: chrono::DateTime<chrono::Utc>,
     pub tags: Vec<String>,
     pub preview: Option<String>,
@@ -114,6 +115,7 @@ fn summarize_node(node: &super::GraphNode) -> NodeSummary {
         branch_id: node.branch_id,
         kind: node.kind,
         parent_id: node.parent_id,
+        created_by_principal_id: node.created_by_principal_id.clone(),
         created_at: node.created_at,
         tags: node.tags.clone(),
         preview: preview_payload(&node.payload),
@@ -181,8 +183,8 @@ mod tests {
             NodeKind::Assistant,
             serde_json::json!({"content": [{"type": "text", "text": "world"}]}),
         );
-        graph.create_checkpoint(branch, "milestone", None, vec![]);
-        graph.create_bookmark(root, "start", None);
+        graph.create_checkpoint(branch, "milestone", None, vec![], None);
+        graph.create_bookmark(root, "start", None, None);
 
         let branches = GraphExplorer::list_branches(&graph);
         let tree = GraphExplorer::tree_view(&graph, branch);

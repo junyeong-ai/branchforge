@@ -195,6 +195,8 @@ pub struct BookmarkEntry {
     pub branch_id: String,
     pub label: String,
     pub note: Option<String>,
+    #[serde(rename = "principalId", skip_serializing_if = "Option::is_none")]
+    pub principal_id: Option<String>,
     #[serde(rename = "createdAt")]
     pub created_at: DateTime<Utc>,
 }
@@ -209,6 +211,8 @@ pub struct CheckpointEntry {
     pub label: String,
     pub note: Option<String>,
     pub tags: Vec<String>,
+    #[serde(rename = "principalId", skip_serializing_if = "Option::is_none")]
+    pub principal_id: Option<String>,
     #[serde(rename = "createdAt")]
     pub created_at: DateTime<Utc>,
 }
@@ -1098,6 +1102,7 @@ impl JsonlPersistence {
                         branch_id,
                         label: bookmark.label,
                         note: bookmark.note,
+                        created_by_principal_id: bookmark.principal_id,
                         created_at: bookmark.created_at,
                     },
                 );
@@ -1116,6 +1121,7 @@ impl JsonlPersistence {
                         label: checkpoint.label,
                         note: checkpoint.note,
                         tags: checkpoint.tags,
+                        created_by_principal_id: checkpoint.principal_id,
                         created_at: checkpoint.created_at,
                     },
                 );
@@ -1180,6 +1186,7 @@ impl Persistence for JsonlPersistence {
                     branch_id: bookmark.branch_id.to_string(),
                     label: bookmark.label.clone(),
                     note: bookmark.note.clone(),
+                    principal_id: bookmark.created_by_principal_id.clone(),
                     created_at: bookmark.created_at,
                 }));
                 new_ids.insert(bookmark_id);
@@ -1196,6 +1203,7 @@ impl Persistence for JsonlPersistence {
                     label: checkpoint.label.clone(),
                     note: checkpoint.note.clone(),
                     tags: checkpoint.tags.clone(),
+                    principal_id: checkpoint.created_by_principal_id.clone(),
                     created_at: checkpoint.created_at,
                 }));
                 new_ids.insert(checkpoint_id);
@@ -1901,6 +1909,7 @@ mod tests {
             "milestone",
             Some("saved".to_string()),
             vec!["tag".to_string()],
+            None,
         );
 
         persistence.save(&session).await.unwrap();

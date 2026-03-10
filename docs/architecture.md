@@ -22,6 +22,8 @@
 - Provider-specific behavior stays inside client adapter layers.
 - Tenant scope and principal ownership are modeled separately so storage, budgeting, and request metadata can stay consistent in multi-tenant deployments.
 
+Graph records may also carry creator principal metadata so bookmarks, checkpoints, and nodes can support future audit and ownership-aware workflows.
+
 ## Prompt Cache Segments
 
 The runtime treats prompt caching as three segments:

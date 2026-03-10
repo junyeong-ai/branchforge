@@ -516,6 +516,36 @@ pub struct SessionStats {
     pub subagent_count: usize,
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionAccessScope {
+    pub tenant_id: Option<String>,
+    pub principal_id: Option<String>,
+}
+
+impl SessionAccessScope {
+    pub fn tenant(mut self, tenant_id: impl Into<String>) -> Self {
+        self.tenant_id = Some(tenant_id.into());
+        self
+    }
+
+    pub fn principal(mut self, principal_id: impl Into<String>) -> Self {
+        self.principal_id = Some(principal_id.into());
+        self
+    }
+
+    pub fn allows(&self, tenant_id: Option<&str>, principal_id: Option<&str>) -> bool {
+        let tenant_ok = match self.tenant_id.as_deref() {
+            Some(expected) => tenant_id == Some(expected),
+            None => true,
+        };
+        let principal_ok = match self.principal_id.as_deref() {
+            Some(expected) => principal_id == Some(expected),
+            None => true,
+        };
+        tenant_ok && principal_ok
+    }
+}
+
 impl SessionStats {
     pub fn tool_success_rate(&self) -> f64 {
         if self.total_tool_calls == 0 {

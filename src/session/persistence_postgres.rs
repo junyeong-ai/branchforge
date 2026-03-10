@@ -324,6 +324,7 @@ impl PostgresSchema {
     label TEXT NOT NULL,
     note TEXT,
     tags JSONB NOT NULL DEFAULT '[]',
+    principal_id VARCHAR(255),
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     CONSTRAINT fk_{checkpoints}_session FOREIGN KEY (session_id) REFERENCES {sessions}(id) ON DELETE CASCADE
 );"#,
@@ -338,6 +339,7 @@ impl PostgresSchema {
     branch_id UUID NOT NULL,
     label TEXT NOT NULL,
     note TEXT,
+    principal_id VARCHAR(255),
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     CONSTRAINT fk_{bookmarks}_session FOREIGN KEY (session_id) REFERENCES {sessions}(id) ON DELETE CASCADE
 );"#,
@@ -883,7 +885,7 @@ impl PostgresPersistence {
     ) -> SessionResult<Vec<crate::graph::Checkpoint>> {
         let c = &self.config;
         let rows = sqlx::query(&format!(
-            "SELECT id, branch_id, label, note, tags, created_at FROM {} WHERE session_id = $1 ORDER BY created_at ASC",
+            "SELECT id, branch_id, label, note, tags, principal_id, created_at FROM {} WHERE session_id = $1 ORDER BY created_at ASC",
             c.checkpoints_table
         ))
         .bind(session_id.to_string())
@@ -909,6 +911,7 @@ impl PostgresPersistence {
                         .ok()
                         .and_then(|v| serde_json::from_value(v).ok())
                         .unwrap_or_default(),
+                    created_by_principal_id: row.try_get("principal_id").ok(),
                     created_at,
                 });
             }
@@ -922,7 +925,7 @@ impl PostgresPersistence {
     ) -> SessionResult<Vec<crate::graph::Bookmark>> {
         let c = &self.config;
         let rows = sqlx::query(&format!(
-            "SELECT id, node_id, branch_id, label, note, created_at FROM {} WHERE session_id = $1 ORDER BY created_at ASC",
+            "SELECT id, node_id, branch_id, label, note, principal_id, created_at FROM {} WHERE session_id = $1 ORDER BY created_at ASC",
             c.bookmarks_table
         ))
         .bind(session_id.to_string())
@@ -945,6 +948,7 @@ impl PostgresPersistence {
                     branch_id,
                     label,
                     note: row.try_get("note").ok(),
+                    created_by_principal_id: row.try_get("principal_id").ok(),
                     created_at,
                 });
             }
@@ -1428,7 +1432,7 @@ impl PostgresPersistence {
 
         for checkpoint in checkpoints {
             sqlx::query(&format!(
-                "INSERT INTO {} (id, session_id, branch_id, label, note, tags, created_at) VALUES ($1,$2,$3,$4,$5,$6,$7) ON CONFLICT (id) DO UPDATE SET branch_id = EXCLUDED.branch_id, label = EXCLUDED.label, note = EXCLUDED.note, tags = EXCLUDED.tags, created_at = EXCLUDED.created_at",
+                "INSERT INTO {} (id, session_id, branch_id, label, note, tags, principal_id, created_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8) ON CONFLICT (id) DO UPDATE SET branch_id = EXCLUDED.branch_id, label = EXCLUDED.label, note = EXCLUDED.note, tags = EXCLUDED.tags, principal_id = EXCLUDED.principal_id, created_at = EXCLUDED.created_at",
                 c.checkpoints_table
             ))
             .bind(checkpoint.id)
@@ -1437,6 +1441,7 @@ impl PostgresPersistence {
             .bind(&checkpoint.label)
             .bind(&checkpoint.note)
             .bind(serde_json::to_value(&checkpoint.tags).unwrap_or_else(|_| serde_json::json!([])))
+            .bind(&checkpoint.created_by_principal_id)
             .bind(checkpoint.created_at)
             .execute(&mut **tx)
             .await
@@ -1468,7 +1473,7 @@ impl PostgresPersistence {
 
         for bookmark in bookmarks {
             sqlx::query(&format!(
-                "INSERT INTO {} (id, session_id, node_id, branch_id, label, note, created_at) VALUES ($1,$2,$3,$4,$5,$6,$7) ON CONFLICT (id) DO UPDATE SET node_id = EXCLUDED.node_id, branch_id = EXCLUDED.branch_id, label = EXCLUDED.label, note = EXCLUDED.note, created_at = EXCLUDED.created_at",
+                "INSERT INTO {} (id, session_id, node_id, branch_id, label, note, principal_id, created_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8) ON CONFLICT (id) DO UPDATE SET node_id = EXCLUDED.node_id, branch_id = EXCLUDED.branch_id, label = EXCLUDED.label, note = EXCLUDED.note, principal_id = EXCLUDED.principal_id, created_at = EXCLUDED.created_at",
                 c.bookmarks_table
             ))
             .bind(bookmark.id)
@@ -1477,6 +1482,7 @@ impl PostgresPersistence {
             .bind(bookmark.branch_id)
             .bind(&bookmark.label)
             .bind(&bookmark.note)
+            .bind(&bookmark.created_by_principal_id)
             .bind(bookmark.created_at)
             .execute(&mut **tx)
             .await

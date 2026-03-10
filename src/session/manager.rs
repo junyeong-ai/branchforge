@@ -4,6 +4,7 @@ use std::sync::Arc;
 
 use super::persistence::{MemoryPersistence, Persistence};
 use super::state::{Session, SessionConfig, SessionId, SessionMessage, SessionState};
+use super::types::SessionAccessScope;
 use super::{SessionError, SessionResult};
 
 #[derive(Clone)]
@@ -52,6 +53,27 @@ impl SessionManager {
         }
 
         Ok(session)
+    }
+
+    pub async fn get_scoped(
+        &self,
+        id: &SessionId,
+        scope: &SessionAccessScope,
+    ) -> SessionResult<Session> {
+        let session = self.get(id).await?;
+        if scope.allows(
+            session.tenant_id.as_deref(),
+            session.principal_id.as_deref(),
+        ) {
+            Ok(session)
+        } else {
+            Err(SessionError::Storage {
+                message: format!(
+                    "Session {} is outside the requested tenant/principal scope",
+                    id
+                ),
+            })
+        }
     }
 
     pub async fn get_by_str(&self, id: &str) -> SessionResult<Session> {
@@ -218,11 +240,33 @@ impl SessionManager {
         ))
     }
 
+    pub async fn graph_search_scoped(
+        &self,
+        id: &SessionId,
+        scope: &SessionAccessScope,
+        query: &crate::graph::GraphSearchQuery,
+    ) -> SessionResult<Vec<crate::graph::NodeSummary>> {
+        let session = self.get_scoped(id, scope).await?;
+        Ok(crate::graph::GraphSearchService::search(
+            &session.graph,
+            query,
+        ))
+    }
+
     pub async fn graph_stats(
         &self,
         id: &SessionId,
     ) -> SessionResult<crate::graph::GraphSessionStats> {
         let session = self.get(id).await?;
+        Ok(crate::graph::GraphSearchService::stats(&session.graph))
+    }
+
+    pub async fn graph_stats_scoped(
+        &self,
+        id: &SessionId,
+        scope: &SessionAccessScope,
+    ) -> SessionResult<crate::graph::GraphSessionStats> {
+        let session = self.get_scoped(id, scope).await?;
         Ok(crate::graph::GraphSearchService::stats(&session.graph))
     }
 
@@ -543,6 +587,53 @@ mod tests {
         let forked = manager.fork(&session_id).await.unwrap();
         assert_eq!(forked.tenant_id.as_deref(), Some("tenant-a"));
         assert_eq!(forked.principal_id.as_deref(), Some("user-1"));
+    }
+
+    #[tokio::test]
+    async fn test_graph_search_scoped_enforces_identity() {
+        let manager = SessionManager::in_memory();
+        let session = manager
+            .create_with_identity(SessionConfig::default(), "tenant-a", "user-1")
+            .await
+            .unwrap();
+        let session_id = session.id;
+
+        manager
+            .add_message(
+                &session_id,
+                SessionMessage::user(vec![ContentBlock::text("alpha")]),
+            )
+            .await
+            .unwrap();
+
+        let allowed = manager
+            .graph_search_scoped(
+                &session_id,
+                &SessionAccessScope::default()
+                    .tenant("tenant-a")
+                    .principal("user-1"),
+                &crate::graph::GraphSearchQuery {
+                    text: Some("alpha".to_string()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        let denied = manager
+            .graph_search_scoped(
+                &session_id,
+                &SessionAccessScope::default()
+                    .tenant("tenant-a")
+                    .principal("user-2"),
+                &crate::graph::GraphSearchQuery {
+                    text: Some("alpha".to_string()),
+                    ..Default::default()
+                },
+            )
+            .await;
+
+        assert_eq!(allowed.len(), 1);
+        assert!(denied.is_err());
     }
 
     #[tokio::test]

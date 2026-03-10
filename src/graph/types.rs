@@ -26,6 +26,7 @@ pub struct GraphNode {
     pub branch_id: BranchId,
     pub kind: NodeKind,
     pub parent_id: Option<NodeId>,
+    pub created_by_principal_id: Option<String>,
     pub created_at: DateTime<Utc>,
     pub tags: Vec<String>,
     pub payload: serde_json::Value,
@@ -47,6 +48,7 @@ pub struct Checkpoint {
     pub label: String,
     pub note: Option<String>,
     pub tags: Vec<String>,
+    pub created_by_principal_id: Option<String>,
     pub created_at: DateTime<Utc>,
 }
 
@@ -57,5 +59,6 @@ pub struct Bookmark {
     pub branch_id: BranchId,
     pub label: String,
     pub note: Option<String>,
+    pub created_by_principal_id: Option<String>,
     pub created_at: DateTime<Utc>,
 }

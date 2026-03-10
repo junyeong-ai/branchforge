@@ -44,7 +44,8 @@ pub use state::{
 };
 pub use types::{
     CompactRecord, CompactTrigger, EnvironmentContext, Plan, PlanStatus, QueueItem, QueueOperation,
-    QueueStatus, SessionStats, SessionTree, SummarySnapshot, TodoItem, TodoStatus, ToolExecution,
+    QueueStatus, SessionAccessScope, SessionStats, SessionTree, SummarySnapshot, TodoItem,
+    TodoStatus, ToolExecution,
 };
 
 use thiserror::Error;

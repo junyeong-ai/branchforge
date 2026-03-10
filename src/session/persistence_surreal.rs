@@ -257,6 +257,7 @@ mod tests {
             "milestone",
             None,
             vec!["tag".to_string()],
+            None,
         );
 
         let persistence = SurrealPersistence::new(SurrealConfig::default());

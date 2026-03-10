@@ -58,6 +58,8 @@ let export = session.export_current_branch();
 
 For multi-tenant deployments, the manager can create sessions with explicit tenant and principal identity so session ownership, budgeting, and request metadata stay aligned.
 
+Graph exploration and graph search can also be guarded by session access scope, allowing tenant/principal-aware access checks before replay, export, search, or statistics are returned.
+
 The graph exploration layer exposes:
 
 - branch summaries
