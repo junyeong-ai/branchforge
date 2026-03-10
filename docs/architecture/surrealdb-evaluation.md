@@ -38,18 +38,28 @@ SurrealDB should only move beyond prototype status if it shows clear value in at
 ## Current Recommendation
 
 - keep PostgreSQL as the primary production-oriented relational backend
-- treat SurrealDB as an experimental graph-native backend candidate
-- validate graph exploration and graph search value first, then compare backend leverage
+- treat SurrealDB as a live optional graph-native backend and a serious production candidate
+- require stronger operational validation before considering it as the default primary backend
 
-## Prototype Scope
+## Current Scope
 
-The current repository includes a minimal `SurrealPersistence` prototype that exports graph-shaped records from a session and defines the backend surface without claiming production readiness.
+The repository now includes a live `SurrealPersistence` backend that round-trips session snapshots, graph records, summaries, and queue state through the SurrealDB SQL API.
 
-It is intentionally not wired to a live SurrealDB client yet.
+Docker-backed tests currently validate:
+
+- graph and identity round-trips
+- concurrent session writes
+- compaction round-trips
+- scoped graph search
+- queue stress behavior
+- large graph baseline behavior
+- basic failure handling for unreachable endpoints
+
+The remaining gap is operational maturity rather than basic correctness.
 
 ## Next Evaluation Steps
 
-1. implement graph exploration tools on top of the current graph model
-2. measure which queries are awkward in PostgreSQL
-3. compare those queries against a real SurrealDB implementation
-4. decide whether SurrealDB remains experimental, becomes optional, or should be dropped
+1. implement migration/version tracking and an operational runbook
+2. define backup and restore strategy
+3. run longer soak and performance validation
+4. decide whether SurrealDB should remain optional or be promoted toward a primary backend role
