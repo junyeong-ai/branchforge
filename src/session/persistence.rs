@@ -342,9 +342,11 @@ mod tests {
 
         let mut s1 = Session::new(SessionConfig::default());
         s1.tenant_id = Some("tenant-a".to_string());
+        s1.principal_id = Some("user-1".to_string());
 
         let mut s2 = Session::new(SessionConfig::default());
         s2.tenant_id = Some("tenant-b".to_string());
+        s2.principal_id = Some("user-2".to_string());
 
         persistence.save(&s1).await.unwrap();
         persistence.save(&s2).await.unwrap();

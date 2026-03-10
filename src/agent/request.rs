@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use crate::agent::config::{AgentConfig, CacheConfig, ServerToolsConfig, SystemPromptMode};
-use crate::client::messages::CreateMessageRequest;
+use crate::client::messages::{CreateMessageRequest, RequestMetadata};
 use crate::context::{McpToolMeta, StaticContext};
 use crate::output_style::{OutputStyle, SystemPromptGenerator};
 use crate::tools::ToolRegistry;
@@ -25,6 +25,7 @@ pub struct RequestBuilder {
     prepared_mcp_tools: Option<PreparedTools>,
     /// JSON schema for structured output
     output_schema: Option<serde_json::Value>,
+    metadata: Option<RequestMetadata>,
 }
 
 impl RequestBuilder {
@@ -52,11 +53,17 @@ impl RequestBuilder {
             cache_config: config.cache.clone(),
             prepared_mcp_tools: None,
             output_schema: config.prompt.output_schema.clone(),
+            metadata: None,
         }
     }
 
     pub fn prepared_tools(mut self, prepared: PreparedTools) -> Self {
         self.prepared_mcp_tools = Some(prepared);
+        self
+    }
+
+    pub fn metadata(mut self, metadata: Option<RequestMetadata>) -> Self {
+        self.metadata = metadata;
         self
     }
 
@@ -74,6 +81,10 @@ impl RequestBuilder {
 
         if !prepared_tools.tool_definitions.is_empty() {
             request = request.tools(prepared_tools.tool_definitions.clone());
+        }
+
+        if let Some(metadata) = self.metadata.clone() {
+            request = request.metadata(metadata);
         }
 
         if let Some(tool_search) = prepared_tools.tool_search {
@@ -335,5 +346,37 @@ mod tests {
             }
             _ => panic!("expected system prompt blocks"),
         }
+    }
+
+    #[test]
+    fn request_metadata_uses_session_identity() {
+        let config = test_config();
+        let tools = Arc::new(ToolRegistry::new());
+        let metadata =
+            RequestMetadata::from_identity(Some("tenant-a"), Some("user-1"), Some("session-1"));
+
+        let builder = RequestBuilder::new(&config, tools, StaticContext::new()).metadata(metadata);
+        let request = builder.build(vec![Message::user("hello")], "");
+        let metadata = request
+            .metadata
+            .expect("request metadata should be present");
+
+        assert_eq!(metadata.user_id.as_deref(), Some("user-1"));
+        assert_eq!(
+            metadata.extra.get("tenant_id"),
+            Some(&serde_json::json!("tenant-a"))
+        );
+    }
+
+    #[test]
+    fn request_metadata_is_absent_without_principal() {
+        let config = test_config();
+        let tools = Arc::new(ToolRegistry::new());
+        let builder = RequestBuilder::new(&config, tools, StaticContext::new()).metadata(
+            RequestMetadata::from_identity(Some("tenant-a"), None, Some("session-1")),
+        );
+        let request = builder.build(vec![Message::user("hello")], "");
+
+        assert!(request.metadata.is_none());
     }
 }

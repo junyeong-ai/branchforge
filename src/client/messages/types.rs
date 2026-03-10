@@ -15,27 +15,30 @@ pub struct RequestMetadata {
 }
 
 impl RequestMetadata {
-    pub fn generate() -> Self {
-        let session_id = uuid::Uuid::new_v4();
-        let user_hash = format!("{:x}", simple_hash(session_id.as_bytes()));
-        let account_uuid = uuid::Uuid::new_v4();
-        Self {
-            user_id: Some(format!(
-                "user_{}_account_{}_session_{}",
-                user_hash, account_uuid, session_id
-            )),
-            extra: HashMap::new(),
+    pub fn from_identity(
+        tenant_id: Option<&str>,
+        principal_id: Option<&str>,
+        session_id: Option<&str>,
+    ) -> Option<Self> {
+        let principal_id = principal_id?;
+        let mut extra = HashMap::new();
+        if let Some(tenant_id) = tenant_id {
+            extra.insert(
+                "tenant_id".to_string(),
+                serde_json::Value::String(tenant_id.to_string()),
+            );
         }
+        if let Some(session_id) = session_id {
+            extra.insert(
+                "session_id".to_string(),
+                serde_json::Value::String(session_id.to_string()),
+            );
+        }
+        Some(Self {
+            user_id: Some(principal_id.to_string()),
+            extra,
+        })
     }
-}
-
-fn simple_hash(data: &[u8]) -> u128 {
-    let mut hash: u128 = 0;
-    for (i, &byte) in data.iter().enumerate() {
-        hash = hash.wrapping_add((byte as u128).wrapping_mul((i as u128).wrapping_add(1)));
-        hash = hash.wrapping_mul(31);
-    }
-    hash
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -109,12 +112,18 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_request_metadata_generate() {
-        let metadata = RequestMetadata::generate();
-        assert!(metadata.user_id.is_some());
-        let user_id = metadata.user_id.unwrap();
-        assert!(user_id.starts_with("user_"));
-        assert!(user_id.contains("_account_"));
-        assert!(user_id.contains("_session_"));
+    fn test_request_metadata_from_identity() {
+        let metadata =
+            RequestMetadata::from_identity(Some("tenant-a"), Some("user-1"), Some("session-1"))
+                .unwrap();
+        assert_eq!(metadata.user_id.as_deref(), Some("user-1"));
+        assert_eq!(
+            metadata.extra.get("tenant_id"),
+            Some(&serde_json::json!("tenant-a"))
+        );
+        assert_eq!(
+            metadata.extra.get("session_id"),
+            Some(&serde_json::json!("session-1"))
+        );
     }
 }

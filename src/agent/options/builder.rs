@@ -515,7 +515,13 @@ impl AgentBuilder {
 
     /// Sets the tenant ID for multi-tenant budget tracking.
     pub fn tenant_id(mut self, id: impl Into<String>) -> Self {
-        self.config.budget.tenant_id = Some(id.into());
+        self.config.identity.tenant_id = Some(id.into());
+        self
+    }
+
+    /// Sets the principal ID for session ownership and request metadata.
+    pub fn principal_id(mut self, id: impl Into<String>) -> Self {
+        self.config.identity.principal_id = Some(id.into());
         self
     }
 

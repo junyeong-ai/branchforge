@@ -26,13 +26,15 @@ impl SessionManager {
         Ok(session)
     }
 
-    pub async fn create_with_tenant(
+    pub async fn create_with_identity(
         &self,
         config: SessionConfig,
         tenant_id: impl Into<String>,
+        principal_id: impl Into<String>,
     ) -> SessionResult<Session> {
         let mut session = Session::new(config);
         session.tenant_id = Some(tenant_id.into());
+        session.principal_id = Some(principal_id.into());
         self.persistence.save(&session).await?;
         Ok(session)
     }
@@ -86,6 +88,7 @@ impl SessionManager {
         let mut forked = Session::new(original.config.clone());
         forked.parent_id = Some(original.id);
         forked.tenant_id = original.tenant_id.clone();
+        forked.principal_id = original.principal_id.clone();
         forked.summary = original.summary.clone();
 
         // Copy messages up to current leaf
@@ -110,6 +113,7 @@ impl SessionManager {
         let mut forked = Session::new(original.config.clone());
         forked.parent_id = Some(original.id);
         forked.tenant_id = original.tenant_id.clone();
+        forked.principal_id = original.principal_id.clone();
         forked.summary = original.summary.clone();
 
         for message in replay.messages {
@@ -297,6 +301,18 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_session_manager_create_with_identity() {
+        let manager = SessionManager::in_memory();
+        let session = manager
+            .create_with_identity(SessionConfig::default(), "tenant-a", "user-1")
+            .await
+            .unwrap();
+
+        assert_eq!(session.tenant_id.as_deref(), Some("tenant-a"));
+        assert_eq!(session.principal_id.as_deref(), Some("user-1"));
+    }
+
+    #[tokio::test]
     async fn test_session_manager_get() {
         let manager = SessionManager::in_memory();
         let session = manager.create(SessionConfig::default()).await.unwrap();
@@ -350,6 +366,8 @@ mod tests {
         assert_eq!(forked_messages.len(), 2);
         assert_ne!(forked.id, session_id);
         assert_eq!(forked.parent_id, Some(session_id));
+        assert_eq!(forked.tenant_id, None);
+        assert_eq!(forked.principal_id, None);
 
         assert!(forked_messages.iter().all(|m| m.is_sidechain));
     }
@@ -506,6 +524,28 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_fork_preserves_identity() {
+        let manager = SessionManager::in_memory();
+        let session = manager
+            .create_with_identity(SessionConfig::default(), "tenant-a", "user-1")
+            .await
+            .unwrap();
+        let session_id = session.id;
+
+        manager
+            .add_message(
+                &session_id,
+                SessionMessage::user(vec![ContentBlock::text("hello")]),
+            )
+            .await
+            .unwrap();
+
+        let forked = manager.fork(&session_id).await.unwrap();
+        assert_eq!(forked.tenant_id.as_deref(), Some("tenant-a"));
+        assert_eq!(forked.principal_id.as_deref(), Some("user-1"));
+    }
+
+    #[tokio::test]
     async fn test_session_manager_graph_explorer_views() {
         let manager = SessionManager::in_memory();
         let session = manager.create(SessionConfig::default()).await.unwrap();
@@ -562,15 +602,15 @@ mod tests {
         let manager = SessionManager::in_memory();
 
         let _s1 = manager
-            .create_with_tenant(SessionConfig::default(), "tenant-a")
+            .create_with_identity(SessionConfig::default(), "tenant-a", "user-1")
             .await
             .unwrap();
         let _s2 = manager
-            .create_with_tenant(SessionConfig::default(), "tenant-a")
+            .create_with_identity(SessionConfig::default(), "tenant-a", "user-2")
             .await
             .unwrap();
         let _s3 = manager
-            .create_with_tenant(SessionConfig::default(), "tenant-b")
+            .create_with_identity(SessionConfig::default(), "tenant-b", "user-3")
             .await
             .unwrap();
 

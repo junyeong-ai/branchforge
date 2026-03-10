@@ -7,6 +7,7 @@ Sessions are modeled as graphs, not flat chat transcripts.
 - `SessionGraph` is canonical state.
 - `Session.messages` is a compatibility projection.
 - Branching, replay, export, bookmarks, and checkpoints operate on graph state.
+- Sessions can be scoped by `tenant_id` and owned by `principal_id`.
 
 ## Session Features
 
@@ -54,6 +55,8 @@ let export = session.export_current_branch();
 ## Manager API
 
 `SessionManager` provides creation, loading, replay, export, bookmarking, branching, graph exploration, and graph search helpers.
+
+For multi-tenant deployments, the manager can create sessions with explicit tenant and principal identity so session ownership, budgeting, and request metadata stay aligned.
 
 The graph exploration layer exposes:
 

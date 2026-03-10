@@ -179,8 +179,6 @@ impl SecurityConfig {
 pub struct BudgetConfig {
     /// Maximum cost in USD
     pub max_cost_usd: Option<Decimal>,
-    /// Tenant identifier for multi-tenant tracking
-    pub tenant_id: Option<String>,
     /// Model to fall back to when budget exceeded
     pub fallback_model: Option<String>,
 }
@@ -195,13 +193,29 @@ impl BudgetConfig {
         self
     }
 
+    pub fn fallback(mut self, model: impl Into<String>) -> Self {
+        self.fallback_model = Some(model.into());
+        self
+    }
+}
+
+/// Identity and ownership configuration.
+#[derive(Debug, Clone, Default)]
+pub struct IdentityConfig {
+    /// Tenant identifier for multi-tenant scoping.
+    pub tenant_id: Option<String>,
+    /// Principal identifier for the actor who owns the session.
+    pub principal_id: Option<String>,
+}
+
+impl IdentityConfig {
     pub fn tenant(mut self, tenant_id: impl Into<String>) -> Self {
         self.tenant_id = Some(tenant_id.into());
         self
     }
 
-    pub fn fallback(mut self, model: impl Into<String>) -> Self {
-        self.fallback_model = Some(model.into());
+    pub fn principal(mut self, principal_id: impl Into<String>) -> Self {
+        self.principal_id = Some(principal_id.into());
         self
     }
 }
@@ -464,6 +478,7 @@ pub struct AgentConfig {
     pub model: AgentModelConfig,
     pub execution: ExecutionConfig,
     pub security: SecurityConfig,
+    pub identity: IdentityConfig,
     pub budget: BudgetConfig,
     pub prompt: PromptConfig,
     pub cache: CacheConfig,
@@ -489,6 +504,11 @@ impl AgentConfig {
 
     pub fn security(mut self, config: SecurityConfig) -> Self {
         self.security = config;
+        self
+    }
+
+    pub fn identity(mut self, config: IdentityConfig) -> Self {
+        self.identity = config;
         self
     }
 
@@ -563,12 +583,20 @@ mod tests {
     fn test_budget_config() {
         let config = BudgetConfig::unlimited()
             .max_cost(dec!(10))
-            .tenant("org-123")
             .fallback("claude-haiku");
 
         assert_eq!(config.max_cost_usd, Some(dec!(10)));
-        assert_eq!(config.tenant_id, Some("org-123".to_string()));
         assert_eq!(config.fallback_model, Some("claude-haiku".to_string()));
+    }
+
+    #[test]
+    fn test_identity_config() {
+        let config = IdentityConfig::default()
+            .tenant("org-123")
+            .principal("user-456");
+
+        assert_eq!(config.tenant_id, Some("org-123".to_string()));
+        assert_eq!(config.principal_id, Some("user-456".to_string()));
     }
 
     #[test]

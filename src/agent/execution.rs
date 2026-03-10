@@ -164,8 +164,19 @@ impl Agent {
                 Some(orchestrator) => orchestrator.read().await.static_context().clone(),
                 None => crate::context::StaticContext::new(),
             };
+            let metadata = self
+                .state
+                .with_session(|session| {
+                    crate::client::messages::RequestMetadata::from_identity(
+                        session.tenant_id.as_deref(),
+                        session.principal_id.as_deref(),
+                        Some(&session.id.to_string()),
+                    )
+                })
+                .await;
             let builder =
-                RequestBuilder::new(&self.config, Arc::clone(&self.tools), static_context);
+                RequestBuilder::new(&self.config, Arc::clone(&self.tools), static_context)
+                    .metadata(metadata);
 
             if let Some(ref tsm) = self.tool_search_manager {
                 let prepared = tsm.prepare_tools().await;

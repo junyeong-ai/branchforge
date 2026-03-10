@@ -30,6 +30,8 @@ impl Default for SurrealConfig {
 pub struct SurrealGraphRecord {
     pub id: String,
     pub session_id: SessionId,
+    pub tenant_id: Option<String>,
+    pub principal_id: Option<String>,
     pub branch_id: Option<Uuid>,
     pub parent_id: Option<Uuid>,
     pub kind: String,
@@ -57,6 +59,8 @@ impl SurrealPersistence {
         records.push(SurrealGraphRecord {
             id: format!("session:{}", session.id),
             session_id: session.id,
+            tenant_id: session.tenant_id.clone(),
+            principal_id: session.principal_id.clone(),
             branch_id: None,
             parent_id: None,
             kind: "session".to_string(),
@@ -64,6 +68,7 @@ impl SurrealPersistence {
                 "graph_id": session.graph.id,
                 "primary_branch": session.graph.primary_branch,
                 "tenant_id": session.tenant_id,
+                "principal_id": session.principal_id,
                 "state": session.state,
             }),
             created_at: session.created_at,
@@ -78,6 +83,8 @@ impl SurrealPersistence {
                 .map(|branch| SurrealGraphRecord {
                     id: format!("branch:{}", branch.id),
                     session_id: session.id,
+                    tenant_id: session.tenant_id.clone(),
+                    principal_id: session.principal_id.clone(),
                     branch_id: Some(branch.id),
                     parent_id: branch.forked_from,
                     kind: "branch".to_string(),
@@ -93,6 +100,8 @@ impl SurrealPersistence {
         records.extend(session.graph.nodes.values().map(|node| SurrealGraphRecord {
             id: format!("node:{}", node.id),
             session_id: session.id,
+            tenant_id: session.tenant_id.clone(),
+            principal_id: session.principal_id.clone(),
             branch_id: Some(node.branch_id),
             parent_id: node.parent_id,
             kind: format!("node:{:?}", node.kind).to_lowercase(),
@@ -109,6 +118,8 @@ impl SurrealPersistence {
                 .map(|checkpoint| SurrealGraphRecord {
                     id: format!("checkpoint:{}", checkpoint.id),
                     session_id: session.id,
+                    tenant_id: session.tenant_id.clone(),
+                    principal_id: session.principal_id.clone(),
                     branch_id: Some(checkpoint.branch_id),
                     parent_id: Some(checkpoint.id),
                     kind: "checkpoint".to_string(),
@@ -129,6 +140,8 @@ impl SurrealPersistence {
                 .map(|bookmark| SurrealGraphRecord {
                     id: format!("bookmark:{}", bookmark.id),
                     session_id: session.id,
+                    tenant_id: session.tenant_id.clone(),
+                    principal_id: session.principal_id.clone(),
                     branch_id: Some(bookmark.branch_id),
                     parent_id: Some(bookmark.node_id),
                     kind: "bookmark".to_string(),

@@ -228,6 +228,11 @@ impl CreateMessageRequest {
         self.output_config = Some(config);
         self
     }
+
+    pub fn metadata(mut self, metadata: RequestMetadata) -> Self {
+        self.metadata = Some(metadata);
+        self
+    }
 }
 
 impl From<String> for SystemPrompt {

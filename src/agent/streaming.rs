@@ -51,6 +51,16 @@ impl Agent {
             Some(orchestrator) => orchestrator.read().await.static_context().clone(),
             None => crate::context::StaticContext::new(),
         };
+        let metadata = self
+            .state
+            .with_session(|session| {
+                crate::client::messages::RequestMetadata::from_identity(
+                    session.tenant_id.as_deref(),
+                    session.principal_id.as_deref(),
+                    Some(&session.id.to_string()),
+                )
+            })
+            .await;
 
         let state = StreamState::new(
             StreamStateConfig {
@@ -64,7 +74,8 @@ impl Agent {
                     &self.config,
                     Arc::clone(&self.tools),
                     static_context,
-                ),
+                )
+                .metadata(metadata),
                 orchestrator: self.orchestrator.clone(),
                 session_id: Arc::clone(&self.session_id),
                 budget_tracker: Arc::clone(&self.budget_tracker),

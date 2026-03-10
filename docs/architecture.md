@@ -20,6 +20,7 @@
 - Replay, export, bookmarks, and checkpoints operate on graph state.
 - Persistence backends rebuild projections from graph state.
 - Provider-specific behavior stays inside client adapter layers.
+- Tenant scope and principal ownership are modeled separately so storage, budgeting, and request metadata can stay consistent in multi-tenant deployments.
 
 ## Prompt Cache Segments
 

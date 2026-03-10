@@ -456,19 +456,24 @@ mod api_types_tests {
 
     #[test]
     fn test_api_metadata_generation() {
-        let metadata = RequestMetadata::generate();
-        assert!(metadata.user_id.is_some());
-        let user_id = metadata.user_id.unwrap();
-        assert!(user_id.starts_with("user_"));
-        assert!(user_id.contains("_account_"));
-        assert!(user_id.contains("_session_"));
+        let metadata =
+            RequestMetadata::from_identity(Some("tenant-a"), Some("user-1"), Some("session-1"))
+                .expect("metadata should exist");
+        assert_eq!(metadata.user_id.as_deref(), Some("user-1"));
+        assert_eq!(
+            metadata.extra.get("tenant_id"),
+            Some(&serde_json::json!("tenant-a"))
+        );
+        assert_eq!(
+            metadata.extra.get("session_id"),
+            Some(&serde_json::json!("session-1"))
+        );
     }
 
     #[test]
-    fn test_api_metadata_uniqueness() {
-        let m1 = RequestMetadata::generate();
-        let m2 = RequestMetadata::generate();
-        assert_ne!(m1.user_id, m2.user_id);
+    fn test_api_metadata_absent_without_principal() {
+        let metadata = RequestMetadata::from_identity(Some("tenant-a"), None, Some("session-1"));
+        assert!(metadata.is_none());
     }
 }
 

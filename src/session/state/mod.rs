@@ -30,6 +30,7 @@ pub struct Session {
     pub parent_id: Option<SessionId>,
     pub session_type: SessionType,
     pub tenant_id: Option<String>,
+    pub principal_id: Option<String>,
     pub state: SessionState,
     pub config: SessionConfig,
     pub permissions: SessionPermissions,
@@ -93,6 +94,7 @@ impl Session {
             parent_id,
             session_type,
             tenant_id: None,
+            principal_id: None,
             state: SessionState::Created,
             permissions: config.permissions.clone(),
             config,
@@ -175,6 +177,12 @@ impl Session {
 
     pub fn export_current_branch(&self) -> Option<crate::graph::BranchExport> {
         crate::session::SessionExporter::export_branch(&self.graph, self.graph.primary_branch)
+    }
+
+    pub fn set_identity(&mut self, tenant_id: Option<String>, principal_id: Option<String>) {
+        self.tenant_id = tenant_id;
+        self.principal_id = principal_id;
+        self.updated_at = Utc::now();
     }
 
     pub fn bookmark_current_head(

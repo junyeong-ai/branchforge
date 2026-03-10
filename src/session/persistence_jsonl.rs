@@ -359,6 +359,8 @@ pub struct SessionMetaEntry {
     pub parent_session_id: Option<String>,
     #[serde(rename = "tenantId", skip_serializing_if = "Option::is_none")]
     pub tenant_id: Option<String>,
+    #[serde(rename = "principalId", skip_serializing_if = "Option::is_none")]
+    pub principal_id: Option<String>,
     #[serde(rename = "sessionType")]
     pub session_type: serde_json::Value,
     pub mode: String,
@@ -947,6 +949,7 @@ impl JsonlPersistence {
             session_id: session.id.to_string(),
             parent_session_id: session.parent_id.map(|p| p.to_string()),
             tenant_id: session.tenant_id.clone(),
+            principal_id: session.principal_id.clone(),
             session_type: serde_json::to_value(&session.session_type)
                 .unwrap_or_else(|e| warn_serialize("session_type", e)),
             mode: "stateless".to_string(),
@@ -981,6 +984,7 @@ impl JsonlPersistence {
                 JsonlEntry::User(_) | JsonlEntry::Assistant(_) => {}
                 JsonlEntry::SessionMeta(m) => {
                     session.tenant_id = m.tenant_id;
+                    session.principal_id = m.principal_id;
                     session.parent_id = m
                         .parent_session_id
                         .as_ref()

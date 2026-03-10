@@ -477,15 +477,15 @@ async fn test_session_tenant() -> Result<(), String> {
     let manager = SessionManager::in_memory();
 
     manager
-        .create_with_tenant(SessionConfig::default(), "tenant-a")
+        .create_with_identity(SessionConfig::default(), "tenant-a", "user-1")
         .await
         .map_err(|e| e.to_string())?;
     manager
-        .create_with_tenant(SessionConfig::default(), "tenant-a")
+        .create_with_identity(SessionConfig::default(), "tenant-a", "user-2")
         .await
         .map_err(|e| e.to_string())?;
     manager
-        .create_with_tenant(SessionConfig::default(), "tenant-b")
+        .create_with_identity(SessionConfig::default(), "tenant-b", "user-3")
         .await
         .map_err(|e| e.to_string())?;
 

@@ -265,6 +265,7 @@ impl PostgresSchema {
     id VARCHAR(255) PRIMARY KEY,
     parent_id VARCHAR(255),
     tenant_id VARCHAR(255),
+    principal_id VARCHAR(255),
     session_type VARCHAR(32) NOT NULL DEFAULT 'main',
     state VARCHAR(32) NOT NULL DEFAULT 'created',
     mode VARCHAR(32) NOT NULL DEFAULT 'default',
@@ -727,7 +728,7 @@ impl PostgresPersistence {
 
         let row = sqlx::query(&format!(
             r#"
-            SELECT id, parent_id, tenant_id, session_type, state, mode,
+            SELECT id, parent_id, tenant_id, principal_id, session_type, state, mode,
                    config, permissions, summary,
                    total_input_tokens, total_output_tokens, total_cost_usd,
                    current_leaf_id, static_context_hash, error,
@@ -801,6 +802,7 @@ impl PostgresPersistence {
                 .and_then(|s| s.parse().ok()),
             session_type,
             tenant_id: row.try_get("tenant_id").ok(),
+            principal_id: row.try_get("principal_id").ok(),
             state,
             config,
             permissions,
@@ -1507,18 +1509,19 @@ impl PostgresPersistence {
         sqlx::query(&format!(
             r#"
             INSERT INTO {sessions} (
-                id, parent_id, tenant_id, session_type, state, mode,
+                id, parent_id, tenant_id, principal_id, session_type, state, mode,
                 config, permissions, summary,
                 total_input_tokens, total_output_tokens, total_cost_usd,
                 current_leaf_id, static_context_hash, error,
                 created_at, updated_at, expires_at
             ) VALUES (
-                $1, $2, $3, $4, $5, $6, $7, $8, $9,
-                $10, $11, $12, $13, $14, $15, $16, $17, $18
+                $1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
+                $11, $12, $13, $14, $15, $16, $17, $18, $19
             )
             ON CONFLICT (id) DO UPDATE SET
                 parent_id = EXCLUDED.parent_id,
                 tenant_id = EXCLUDED.tenant_id,
+                principal_id = EXCLUDED.principal_id,
                 session_type = EXCLUDED.session_type,
                 state = EXCLUDED.state,
                 mode = EXCLUDED.mode,
@@ -1539,6 +1542,7 @@ impl PostgresPersistence {
         .bind(session.id.to_string())
         .bind(session.parent_id.map(|id| id.to_string()))
         .bind(&session.tenant_id)
+        .bind(&session.principal_id)
         .bind(&session_type)
         .bind(&state)
         .bind(mode)

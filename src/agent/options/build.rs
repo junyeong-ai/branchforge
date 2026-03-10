@@ -28,10 +28,11 @@ impl AgentBuilder {
         let client = self.build_client().await?;
         let tools = self.build_tools().await;
         let orchestrator = self.build_orchestrator().await;
+        let identity = self.config.identity.clone();
 
         let tenant_budget = self.tenant_budget_manager.as_ref().and_then(|m| {
             self.config
-                .budget
+                .identity
                 .tenant_id
                 .as_ref()
                 .and_then(|id| m.get(id))
@@ -57,6 +58,14 @@ impl AgentBuilder {
         if let Some(budget) = tenant_budget {
             agent = agent.tenant_budget(budget);
         }
+
+        agent
+            .state()
+            .with_session_mut(|session| {
+                session.tenant_id = identity.tenant_id.clone();
+                session.principal_id = identity.principal_id.clone();
+            })
+            .await;
 
         if let Some(orchestrator) = agent.orchestrator() {
             let static_hash = {
