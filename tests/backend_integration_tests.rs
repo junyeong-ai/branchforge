@@ -461,6 +461,62 @@ async fn test_surrealdb_medium_soak() {
     }
 }
 
+#[cfg(feature = "surrealdb-backend")]
+#[tokio::test]
+#[ignore = "Requires local Docker SurrealDB"]
+async fn test_surrealdb_longer_soak_with_queue_and_compaction() {
+    let persistence = surreal_persistence();
+    let mut session = seeded_session();
+    let tenant = format!("tenant-{}", uuid::Uuid::new_v4().simple());
+    session.set_identity(Some(tenant.clone()), Some("user-1".to_string()));
+    let session_id = session.id;
+
+    for i in 0..40 {
+        session.add_message(SessionMessage::user(vec![ContentBlock::text(format!(
+            "u-{i}"
+        ))]));
+        session.add_message(SessionMessage::assistant(vec![ContentBlock::text(
+            format!("a-{i}"),
+        )]));
+        if i % 10 == 0 && i > 0 {
+            let executor = claude_agent::session::CompactExecutor::new(
+                claude_agent::session::CompactStrategy::default(),
+            );
+            let _ = executor.apply_compact(&mut session, format!("summary-{i}"));
+        }
+        persistence.save(&session).await.unwrap();
+        persistence
+            .enqueue(&session_id, format!("item-{i}"), i)
+            .await
+            .unwrap();
+        let _ = persistence.pending_queue(&session_id).await.unwrap();
+        let loaded = persistence.load(&session_id).await.unwrap().unwrap();
+        assert_eq!(loaded.tenant_id.as_deref(), Some(tenant.as_str()));
+    }
+}
+
+#[cfg(feature = "surrealdb-backend")]
+#[tokio::test]
+#[ignore = "Requires local Docker SurrealDB"]
+async fn test_surrealdb_failure_mode_invalid_credentials() {
+    let persistence = SurrealPersistence::new(
+        claude_agent::session::SurrealConfig::default()
+            .namespace("main")
+            .database("main")
+            .endpoint(surreal_url())
+            .credentials("root", "wrong-password"),
+    );
+
+    let session = seeded_session();
+    let error = persistence
+        .save(&session)
+        .await
+        .expect_err("save should fail");
+    let message = error.to_string();
+
+    assert!(message.contains("SurrealDB") || message.contains("401") || message.contains("403"));
+}
+
 #[tokio::test]
 #[ignore = "Requires local Docker backend services"]
 async fn test_backend_containers_are_reachable() {

@@ -28,6 +28,7 @@ pub struct AuditBundle {
     pub branch_id: uuid::Uuid,
     pub branch_name: String,
     pub stats: crate::graph::GraphSessionStats,
+    pub provenance_digest: Vec<String>,
     pub export: BranchExport,
 }
 
@@ -162,6 +163,7 @@ impl SessionExporter {
             branch_id: export.branch_id,
             branch_name: export.branch_name.clone(),
             stats,
+            provenance_digest: build_provenance_digest(&export),
             export,
         })
     }
@@ -183,12 +185,15 @@ fn apply_policy(export: &mut BranchExport, policy: &ExportPolicy) {
     if !policy.include_provenance {
         for node in &mut export.nodes {
             node.provenance = None;
+            node.provenance_digest = None;
         }
         for checkpoint in &mut export.checkpoints {
             checkpoint.provenance = None;
+            checkpoint.provenance_digest = None;
         }
         for bookmark in &mut export.bookmarks {
             bookmark.provenance = None;
+            bookmark.provenance_digest = None;
         }
     }
 
@@ -202,6 +207,43 @@ fn apply_policy(export: &mut BranchExport, policy: &ExportPolicy) {
             }
         }
     }
+}
+
+fn build_provenance_digest(export: &BranchExport) -> Vec<String> {
+    let mut lines = Vec::new();
+    let principal_count = export
+        .nodes
+        .iter()
+        .filter_map(|node| node.created_by_principal_id.as_ref())
+        .collect::<std::collections::BTreeSet<_>>()
+        .len();
+    if principal_count > 0 {
+        lines.push(format!("principals:{}", principal_count));
+    }
+
+    let subagent_count = export
+        .nodes
+        .iter()
+        .filter_map(|node| node.provenance.as_ref())
+        .filter_map(|provenance| provenance.subagent_type.as_ref())
+        .collect::<std::collections::BTreeSet<_>>()
+        .len();
+    if subagent_count > 0 {
+        lines.push(format!("subagent_types:{}", subagent_count));
+    }
+
+    let task_count = export
+        .nodes
+        .iter()
+        .filter_map(|node| node.provenance.as_ref())
+        .filter_map(|provenance| provenance.task_id.as_ref())
+        .collect::<std::collections::BTreeSet<_>>()
+        .len();
+    if task_count > 0 {
+        lines.push(format!("tasks:{}", task_count));
+    }
+
+    lines
 }
 
 fn html_escape(input: &str) -> String {

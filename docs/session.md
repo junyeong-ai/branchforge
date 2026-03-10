@@ -64,6 +64,8 @@ Graph records can also carry creator and provenance metadata so bookmarks, check
 
 Policy-aware export is also available through `SessionExporter` so identity, provenance, and tool payloads can be included or redacted explicitly depending on audit and sharing requirements.
 
+When provenance is included, export flows can also emit compact provenance digests so delegated work is easier to inspect without reading raw provenance fields everywhere.
+
 For durability and operational recovery, the session module also exposes archive and restore-validation helpers:
 
 - `SessionArchiveService` for canonical archive bundles
