@@ -10,6 +10,8 @@ pub type BranchId = Uuid;
 pub struct NodeProvenance {
     pub source_session_id: String,
     pub session_type: String,
+    pub task_id: Option<String>,
+    pub subagent_session_id: Option<String>,
     pub subagent_type: Option<String>,
     pub subagent_description: Option<String>,
 }

@@ -264,6 +264,10 @@ impl Session {
         Some(NodeProvenance {
             source_session_id: self.id.to_string(),
             session_type,
+            task_id: matches!(self.session_type, SessionType::Subagent { .. })
+                .then(|| self.id.to_string()),
+            subagent_session_id: matches!(self.session_type, SessionType::Subagent { .. })
+                .then(|| self.id.to_string()),
             subagent_type,
             subagent_description,
         })

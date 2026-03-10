@@ -395,6 +395,17 @@ impl SessionManager {
             .map(crate::session::SessionExporter::branch_to_html))
     }
 
+    pub async fn audit_bundle(
+        &self,
+        id: &SessionId,
+        policy: &crate::session::ExportPolicy,
+    ) -> SessionResult<Option<crate::session::AuditBundle>> {
+        let session = self.get(id).await?;
+        Ok(crate::session::SessionExporter::audit_bundle(
+            &session, policy,
+        ))
+    }
+
     pub async fn bookmark_current_head(
         &self,
         id: &SessionId,
@@ -714,8 +725,51 @@ mod tests {
 
         let node = subagent.current_branch_graph_nodes()[0];
         let provenance = node.provenance.clone().expect("provenance should exist");
+        let subagent_id = subagent.id.to_string();
         assert_eq!(provenance.session_type, "subagent");
         assert_eq!(provenance.subagent_type.as_deref(), Some("Explore"));
+        assert_eq!(provenance.task_id.as_deref(), Some(subagent_id.as_str()));
+    }
+
+    #[tokio::test]
+    async fn test_audit_bundle_respects_export_policy() {
+        let manager = SessionManager::in_memory();
+        let session = manager
+            .create_with_identity(SessionConfig::default(), "tenant-a", "user-1")
+            .await
+            .unwrap();
+        let session_id = session.id;
+
+        manager
+            .add_message(
+                &session_id,
+                SessionMessage::user(vec![ContentBlock::text("secret path")]),
+            )
+            .await
+            .unwrap();
+
+        let bundle = manager
+            .audit_bundle(
+                &session_id,
+                &crate::session::ExportPolicy {
+                    include_identity: false,
+                    include_provenance: false,
+                    include_tool_payloads: false,
+                },
+            )
+            .await
+            .unwrap()
+            .unwrap();
+
+        assert!(bundle.tenant_id.is_none());
+        assert!(bundle.principal_id.is_none());
+        assert!(
+            bundle
+                .export
+                .nodes
+                .iter()
+                .all(|node| node.provenance.is_none())
+        );
     }
 
     #[tokio::test]

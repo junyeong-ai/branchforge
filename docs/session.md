@@ -62,6 +62,8 @@ Graph exploration and graph search can also be guarded by session access scope, 
 
 Graph records can also carry creator and provenance metadata so bookmarks, checkpoints, and delegated subagent work remain traceable over time.
 
+Policy-aware export is also available through `SessionExporter` so identity, provenance, and tool payloads can be included or redacted explicitly depending on audit and sharing requirements.
+
 The graph exploration layer exposes:
 
 - branch summaries

@@ -77,6 +77,7 @@ impl TaskRegistry {
         let mut session = session;
         session.id = session_id;
         session.state = SessionState::Active;
+        session.principal_id = Some(id.clone());
 
         if let Err(e) = self.persistence.save(&session).await {
             warn!(session_id = %session_id, error = %e, "Failed to save task session on register");

@@ -1,4 +1,35 @@
+use serde::{Deserialize, Serialize};
+
 use crate::graph::{BranchExport, SessionGraph};
+use crate::session::Session;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExportPolicy {
+    pub include_identity: bool,
+    pub include_provenance: bool,
+    pub include_tool_payloads: bool,
+}
+
+impl Default for ExportPolicy {
+    fn default() -> Self {
+        Self {
+            include_identity: true,
+            include_provenance: true,
+            include_tool_payloads: true,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AuditBundle {
+    pub session_id: String,
+    pub tenant_id: Option<String>,
+    pub principal_id: Option<String>,
+    pub branch_id: uuid::Uuid,
+    pub branch_name: String,
+    pub stats: crate::graph::GraphSessionStats,
+    pub export: BranchExport,
+}
 
 pub struct SessionExporter;
 
@@ -8,6 +39,16 @@ impl SessionExporter {
         branch_id: crate::graph::BranchId,
     ) -> Option<BranchExport> {
         graph.export_branch(branch_id)
+    }
+
+    pub fn export_branch_with_policy(
+        graph: &SessionGraph,
+        branch_id: crate::graph::BranchId,
+        policy: &ExportPolicy,
+    ) -> Option<BranchExport> {
+        let mut export = graph.export_branch(branch_id)?;
+        apply_policy(&mut export, policy);
+        Some(export)
     }
 
     pub fn branch_to_json(export: &BranchExport) -> crate::Result<String> {
@@ -102,6 +143,64 @@ impl SessionExporter {
         }
         html.push_str("</body></html>");
         html
+    }
+
+    pub fn audit_bundle(session: &Session, policy: &ExportPolicy) -> Option<AuditBundle> {
+        let export =
+            Self::export_branch_with_policy(&session.graph, session.graph.primary_branch, policy)?;
+        let stats = crate::graph::GraphSearchService::stats(&session.graph);
+        Some(AuditBundle {
+            session_id: session.id.to_string(),
+            tenant_id: policy
+                .include_identity
+                .then(|| session.tenant_id.clone())
+                .flatten(),
+            principal_id: policy
+                .include_identity
+                .then(|| session.principal_id.clone())
+                .flatten(),
+            branch_id: export.branch_id,
+            branch_name: export.branch_name.clone(),
+            stats,
+            export,
+        })
+    }
+}
+
+fn apply_policy(export: &mut BranchExport, policy: &ExportPolicy) {
+    if !policy.include_identity {
+        for node in &mut export.nodes {
+            node.created_by_principal_id = None;
+        }
+        for checkpoint in &mut export.checkpoints {
+            checkpoint.created_by_principal_id = None;
+        }
+        for bookmark in &mut export.bookmarks {
+            bookmark.created_by_principal_id = None;
+        }
+    }
+
+    if !policy.include_provenance {
+        for node in &mut export.nodes {
+            node.provenance = None;
+        }
+        for checkpoint in &mut export.checkpoints {
+            checkpoint.provenance = None;
+        }
+        for bookmark in &mut export.bookmarks {
+            bookmark.provenance = None;
+        }
+    }
+
+    if !policy.include_tool_payloads {
+        for node in &mut export.nodes {
+            if matches!(
+                node.kind,
+                crate::graph::NodeKind::ToolCall | crate::graph::NodeKind::ToolResult
+            ) {
+                node.payload = serde_json::json!({"redacted": true});
+            }
+        }
     }
 }
 

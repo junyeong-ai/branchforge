@@ -20,7 +20,7 @@ pub mod types;
 
 pub use crate::types::TokenUsage;
 pub use compact::{CompactExecutor, CompactStrategy, DEFAULT_COMPACT_THRESHOLD};
-pub use export::SessionExporter;
+pub use export::{AuditBundle, ExportPolicy, SessionExporter};
 pub use manager::SessionManager;
 pub use persistence::{MemoryPersistence, Persistence, PersistenceFactory};
 #[cfg(feature = "jsonl")]
