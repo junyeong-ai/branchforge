@@ -5,6 +5,8 @@
 #[cfg(feature = "surrealdb-backend")]
 use std::sync::Arc;
 use std::time::Duration;
+#[cfg(feature = "surrealdb-backend")]
+use std::time::Instant;
 
 #[cfg(any(
     feature = "postgres",
@@ -270,6 +272,109 @@ async fn test_surrealdb_backend_scoped_graph_search() {
 
     assert_eq!(allowed.len(), 1);
     assert!(denied.is_err());
+}
+
+#[cfg(feature = "surrealdb-backend")]
+#[tokio::test]
+#[ignore = "Requires local Docker SurrealDB"]
+async fn test_surrealdb_large_graph_baseline() {
+    let persistence = surreal_persistence();
+    let mut session = seeded_session();
+    let unique_tenant = format!("tenant-{}", uuid::Uuid::new_v4().simple());
+    session.set_identity(Some(unique_tenant), Some("user-1".to_string()));
+
+    for i in 0..500 {
+        session.add_message(SessionMessage::user(vec![ContentBlock::text(format!(
+            "user-{i}"
+        ))]));
+        session.add_message(SessionMessage::assistant(vec![ContentBlock::text(
+            format!("assistant-{i}"),
+        )]));
+    }
+
+    let session_id = session.id;
+
+    let save_start = Instant::now();
+    persistence.save(&session).await.unwrap();
+    let save_elapsed = save_start.elapsed();
+
+    let load_start = Instant::now();
+    let loaded = persistence.load(&session_id).await.unwrap().unwrap();
+    let load_elapsed = load_start.elapsed();
+
+    let search_start = Instant::now();
+    let manager = SessionManager::new(Arc::new(persistence));
+    let matches = manager
+        .graph_search(
+            &session_id,
+            &claude_agent::graph::GraphSearchQuery {
+                text: Some("assistant-499".to_string()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    let search_elapsed = search_start.elapsed();
+
+    assert_eq!(loaded.current_branch_messages().len(), 1002);
+    assert_eq!(matches.len(), 1);
+
+    eprintln!(
+        "surreal baseline: save={:?} load={:?} search={:?}",
+        save_elapsed, load_elapsed, search_elapsed
+    );
+}
+
+#[cfg(feature = "surrealdb-backend")]
+#[tokio::test]
+#[ignore = "Requires local Docker SurrealDB"]
+async fn test_surrealdb_failure_mode_invalid_endpoint() {
+    let persistence = SurrealPersistence::new(
+        claude_agent::session::SurrealConfig::default()
+            .namespace("main")
+            .database("main")
+            .endpoint("http://127.0.0.1:59999/sql")
+            .credentials("root", "root"),
+    );
+
+    let session = seeded_session();
+    let error = persistence
+        .save(&session)
+        .await
+        .expect_err("save should fail");
+    let message = error.to_string();
+
+    assert!(
+        message.contains("SurrealDB")
+            || message.contains("Connection")
+            || message.contains("request failed")
+    );
+}
+
+#[cfg(feature = "surrealdb-backend")]
+#[tokio::test]
+#[ignore = "Requires local Docker SurrealDB"]
+async fn test_surrealdb_queue_stress() {
+    let persistence = surreal_persistence();
+    let session = seeded_session();
+    let session_id = session.id;
+    persistence.save(&session).await.unwrap();
+
+    for i in 0..20 {
+        persistence
+            .enqueue(&session_id, format!("item-{i}"), i)
+            .await
+            .unwrap();
+    }
+
+    let pending = persistence.pending_queue(&session_id).await.unwrap();
+    assert_eq!(pending.len(), 20);
+
+    let first = persistence.dequeue(&session_id).await.unwrap().unwrap();
+    assert_eq!(first.priority, 19);
+
+    let second = persistence.dequeue(&session_id).await.unwrap().unwrap();
+    assert_eq!(second.priority, 18);
 }
 
 #[tokio::test]
