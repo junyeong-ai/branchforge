@@ -420,6 +420,15 @@ impl SessionManager {
         ))
     }
 
+    pub async fn import_archive_bundle(
+        &self,
+        bundle: &crate::session::SessionArchiveBundle,
+    ) -> SessionResult<Session> {
+        let session = crate::session::SessionArchiveService::import_bundle(bundle);
+        self.persistence.save(&session).await?;
+        Ok(session)
+    }
+
     pub async fn verify_restored_archive(
         &self,
         bundle: &crate::session::SessionArchiveBundle,

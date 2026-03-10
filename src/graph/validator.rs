@@ -66,13 +66,34 @@ impl GraphValidator {
                     ),
                 ));
             }
+            if let Some(node) = graph.nodes.get(&bookmark.node_id)
+                && node.branch_id != bookmark.branch_id
+            {
+                issues.push(issue(
+                    "bookmark_branch_mismatch",
+                    format!(
+                        "Bookmark {} branch {} does not match target node branch {}",
+                        bookmark_id, bookmark.branch_id, node.branch_id
+                    ),
+                ));
+            }
         }
 
-        for checkpoint_id in graph.checkpoints.keys() {
+        for (checkpoint_id, checkpoint) in &graph.checkpoints {
             if !graph.nodes.contains_key(checkpoint_id) {
                 issues.push(issue(
                     "checkpoint_node_missing",
                     format!("Checkpoint {} is missing its graph node", checkpoint_id),
+                ));
+            } else if let Some(node) = graph.nodes.get(checkpoint_id)
+                && node.branch_id != checkpoint.branch_id
+            {
+                issues.push(issue(
+                    "checkpoint_branch_mismatch",
+                    format!(
+                        "Checkpoint {} branch {} does not match node branch {}",
+                        checkpoint_id, checkpoint.branch_id, node.branch_id
+                    ),
                 ));
             }
         }

@@ -205,6 +205,10 @@ impl SchemaTool for GraphHistoryTool {
                                 serde_json::json!({
                                     "bookmark": bookmark,
                                     "digest": crate::graph::explorer::bookmark_digest(bookmark),
+                                    "actions": {
+                                        "replay": format!("replay_bookmark:{}", bookmark.label),
+                                        "fork": format!("fork_bookmark:{}", bookmark.label),
+                                    }
                                 })
                             })
                             .collect();
@@ -226,6 +230,10 @@ impl SchemaTool for GraphHistoryTool {
                                 serde_json::json!({
                                     "checkpoint": checkpoint,
                                     "digest": crate::graph::explorer::checkpoint_digest(checkpoint),
+                                    "actions": {
+                                        "replay": format!("replay_checkpoint:{}", checkpoint.label),
+                                        "fork": format!("fork_checkpoint:{}", checkpoint.label),
+                                    }
                                 })
                             })
                             .collect();
@@ -243,7 +251,16 @@ impl SchemaTool for GraphHistoryTool {
                 manager
                     .graph_node(&session_id, node_id)
                     .await
-                    .and_then(to_json)
+                    .map(|node| {
+                        serde_json::to_string_pretty(&serde_json::json!({
+                            "node": node,
+                            "actions": {
+                                "replay_from_node": node_id.to_string(),
+                                "fork_from_node": node_id.to_string(),
+                            }
+                        }))
+                        .unwrap_or_default()
+                    })
             }
             GraphHistoryAction::Search => {
                 let branch_id = match parse_optional_uuid(input.branch_id.as_deref()) {

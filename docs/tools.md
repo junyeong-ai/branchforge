@@ -63,6 +63,8 @@ Graph search can also be filtered by principal, session type, and subagent type 
 
 Bookmark, checkpoint, node, and branch outputs can expose compact provenance digests so actor, task, and subagent context are visible without reading raw provenance fields directly.
 
+Bookmark, checkpoint, and node responses can also include lightweight action hints so replay and fork workflows are easier to trigger from exploration results.
+
 ## Related Guides
 
 - `permissions.md`
