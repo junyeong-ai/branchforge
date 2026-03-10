@@ -32,25 +32,6 @@ Recommended role:
 - support backend
 - cache or queue oriented backend
 
-## SurrealDB
-
-Choose SurrealDB when graph-native storage is a priority and you want a live optional backend with strong graph affinity.
-
-Strengths:
-
-- graph-native fit for branch, replay, bookmark, checkpoint, and search workflows
-- live round-trip validation
-- concurrent write, compaction, scoped search, queue stress, and soak validation in this repository
-
-Current caveat:
-
-- still behind PostgreSQL in operational maturity
-
-Recommended role:
-
-- optional graph-native backend
-- strong production candidate, but not the default production backend yet
-
 ## JSONL
 
 Choose JSONL when you want local, portable, inspectable persistence.
@@ -70,5 +51,4 @@ Recommended role:
 
 - production default: PostgreSQL
 - support/cache backend: Redis
-- optional graph-native backend: SurrealDB
 - local/dev backend: JSONL

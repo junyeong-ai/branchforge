@@ -1,38 +1,18 @@
-//! Backend integration tests for Dockerized PostgreSQL, Redis, and SurrealDB.
+//! Backend integration tests for Dockerized PostgreSQL and Redis.
 //!
 //! These tests are ignored by default because they require local Docker-backed services.
 
-#[cfg(feature = "surrealdb-backend")]
-use std::sync::Arc;
 use std::time::Duration;
-#[cfg(feature = "surrealdb-backend")]
-use std::time::Instant;
 
-#[cfg(any(
-    feature = "postgres",
-    feature = "redis-backend",
-    feature = "surrealdb-backend"
-))]
+#[cfg(any(feature = "postgres", feature = "redis-backend"))]
 use claude_agent::session::Persistence;
-#[cfg(feature = "surrealdb-backend")]
-use claude_agent::session::SurrealPersistence;
 #[cfg(feature = "postgres")]
 use claude_agent::session::{PostgresConfig, PostgresPersistence};
 #[cfg(feature = "redis-backend")]
 use claude_agent::session::{RedisConfig, RedisPersistence};
-#[cfg(any(
-    feature = "postgres",
-    feature = "redis-backend",
-    feature = "surrealdb-backend"
-))]
+#[cfg(any(feature = "postgres", feature = "redis-backend"))]
 use claude_agent::session::{Session, SessionConfig, SessionMessage};
-#[cfg(feature = "surrealdb-backend")]
-use claude_agent::session::{SessionAccessScope, SessionManager};
-#[cfg(any(
-    feature = "postgres",
-    feature = "redis-backend",
-    feature = "surrealdb-backend"
-))]
+#[cfg(any(feature = "postgres", feature = "redis-backend"))]
 use claude_agent::types::ContentBlock;
 use tokio::time::sleep;
 #[cfg(any(feature = "postgres", feature = "redis-backend"))]
@@ -51,28 +31,7 @@ fn redis_url() -> String {
         .unwrap_or_else(|_| "redis://127.0.0.1:56379/".to_string())
 }
 
-#[cfg(feature = "surrealdb-backend")]
-fn surreal_url() -> String {
-    std::env::var("CLAUDE_AGENT_TEST_SURREAL_URL")
-        .unwrap_or_else(|_| "http://127.0.0.1:58000/sql".to_string())
-}
-
-#[cfg(feature = "surrealdb-backend")]
-fn surreal_persistence() -> SurrealPersistence {
-    SurrealPersistence::new(
-        claude_agent::session::SurrealConfig::default()
-            .namespace("main")
-            .database("main")
-            .endpoint(surreal_url())
-            .credentials("root", "root"),
-    )
-}
-
-#[cfg(any(
-    feature = "postgres",
-    feature = "redis-backend",
-    feature = "surrealdb-backend"
-))]
+#[cfg(any(feature = "postgres", feature = "redis-backend"))]
 fn seeded_session() -> Session {
     let mut session = Session::new(SessionConfig::default());
     session.set_identity(Some("tenant-a".to_string()), Some("user-1".to_string()));
@@ -139,402 +98,25 @@ async fn test_redis_backend_roundtrip_graph_identity() {
     assert_eq!(tenant_list, vec![session_id]);
 }
 
-#[cfg(feature = "surrealdb-backend")]
-#[tokio::test]
-#[ignore = "Requires local Docker SurrealDB"]
-async fn test_surrealdb_backend_roundtrip_graph_identity() {
-    let mut session = seeded_session();
-    let unique_tenant = format!("tenant-{}", uuid::Uuid::new_v4().simple());
-    session.set_identity(Some(unique_tenant.clone()), Some("user-1".to_string()));
-    let persistence = surreal_persistence();
-
-    let session_id = session.id;
-    persistence.save(&session).await.unwrap();
-
-    let loaded = persistence.load(&session_id).await.unwrap().unwrap();
-    assert_eq!(loaded.tenant_id.as_deref(), Some(unique_tenant.as_str()));
-    assert_eq!(loaded.principal_id.as_deref(), Some("user-1"));
-    assert_eq!(loaded.current_branch_messages().len(), 2);
-    assert_eq!(loaded.graph.bookmarks.len(), 1);
-    assert_eq!(loaded.graph.checkpoints.len(), 1);
-
-    let tenant_list = persistence.list(Some(&unique_tenant)).await.unwrap();
-    assert_eq!(tenant_list, vec![session_id]);
-}
-
-#[cfg(feature = "surrealdb-backend")]
-#[tokio::test]
-#[ignore = "Requires local Docker SurrealDB"]
-async fn test_surrealdb_backend_concurrent_session_writes() {
-    let mut base = seeded_session();
-    let unique_tenant = format!("tenant-{}", uuid::Uuid::new_v4().simple());
-    base.set_identity(Some(unique_tenant.clone()), Some("user-1".to_string()));
-    let session_id = base.id;
-
-    let persistence = Arc::new(surreal_persistence());
-    persistence.save(&base).await.unwrap();
-
-    let mut left = base.clone();
-    left.add_message(SessionMessage::assistant(vec![ContentBlock::text("left")]));
-    let mut right = base;
-    right.add_message(SessionMessage::assistant(vec![ContentBlock::text("right")]));
-
-    let p1 = persistence.clone();
-    let p2 = persistence.clone();
-    let t1 = tokio::spawn(async move { p1.save(&left).await });
-    let t2 = tokio::spawn(async move { p2.save(&right).await });
-
-    t1.await.unwrap().unwrap();
-    t2.await.unwrap().unwrap();
-
-    let loaded = persistence.load(&session_id).await.unwrap().unwrap();
-    let messages = loaded.current_branch_messages();
-    let text = messages
-        .last()
-        .and_then(|message| message.content.first())
-        .and_then(|block| block.as_text())
-        .unwrap_or_default();
-
-    assert!(text == "left" || text == "right");
-    assert_eq!(loaded.tenant_id.as_deref(), Some(unique_tenant.as_str()));
-}
-
-#[cfg(feature = "surrealdb-backend")]
-#[tokio::test]
-#[ignore = "Requires local Docker SurrealDB"]
-async fn test_surrealdb_backend_compaction_roundtrip() {
-    let mut session = seeded_session();
-    let unique_tenant = format!("tenant-{}", uuid::Uuid::new_v4().simple());
-    session.set_identity(Some(unique_tenant.clone()), Some("user-1".to_string()));
-    let session_id = session.id;
-
-    let executor = claude_agent::session::CompactExecutor::new(
-        claude_agent::session::CompactStrategy::default(),
-    );
-    let result = executor.apply_compact(&mut session, "summarized context".to_string());
-    assert!(matches!(
-        result,
-        claude_agent::types::CompactResult::Compacted { .. }
-    ));
-
-    let persistence = surreal_persistence();
-    persistence.save(&session).await.unwrap();
-
-    let loaded = persistence.load(&session_id).await.unwrap().unwrap();
-    assert_eq!(loaded.graph.checkpoints.len(), 2);
-    assert_eq!(loaded.current_branch_messages().len(), 1);
-    assert!(loaded.current_branch_messages()[0].is_compact_summary);
-}
-
-#[cfg(feature = "surrealdb-backend")]
-#[tokio::test]
-#[ignore = "Requires local Docker SurrealDB"]
-async fn test_surrealdb_backend_scoped_graph_search() {
-    let persistence = Arc::new(surreal_persistence());
-    let manager = SessionManager::new(persistence.clone());
-
-    let session = manager
-        .create_with_identity(SessionConfig::default(), "tenant-surreal", "user-1")
-        .await
-        .unwrap();
-    manager
-        .add_message(
-            &session.id,
-            SessionMessage::user(vec![ContentBlock::text("alpha")]),
-        )
-        .await
-        .unwrap();
-
-    let allowed = manager
-        .graph_search_scoped(
-            &session.id,
-            &SessionAccessScope::default()
-                .tenant("tenant-surreal")
-                .principal("user-1"),
-            &claude_agent::graph::GraphSearchQuery {
-                text: Some("alpha".to_string()),
-                ..Default::default()
-            },
-        )
-        .await
-        .unwrap();
-    let denied = manager
-        .graph_search_scoped(
-            &session.id,
-            &SessionAccessScope::default()
-                .tenant("tenant-surreal")
-                .principal("user-2"),
-            &claude_agent::graph::GraphSearchQuery {
-                text: Some("alpha".to_string()),
-                ..Default::default()
-            },
-        )
-        .await;
-
-    assert_eq!(allowed.len(), 1);
-    assert!(denied.is_err());
-}
-
-#[cfg(feature = "surrealdb-backend")]
-#[tokio::test]
-#[ignore = "Requires local Docker SurrealDB"]
-async fn test_surrealdb_large_graph_baseline() {
-    let persistence = surreal_persistence();
-    let mut session = seeded_session();
-    let unique_tenant = format!("tenant-{}", uuid::Uuid::new_v4().simple());
-    session.set_identity(Some(unique_tenant), Some("user-1".to_string()));
-
-    for i in 0..500 {
-        session.add_message(SessionMessage::user(vec![ContentBlock::text(format!(
-            "user-{i}"
-        ))]));
-        session.add_message(SessionMessage::assistant(vec![ContentBlock::text(
-            format!("assistant-{i}"),
-        )]));
-    }
-
-    let session_id = session.id;
-
-    let save_start = Instant::now();
-    persistence.save(&session).await.unwrap();
-    let save_elapsed = save_start.elapsed();
-
-    let load_start = Instant::now();
-    let loaded = persistence.load(&session_id).await.unwrap().unwrap();
-    let load_elapsed = load_start.elapsed();
-
-    let search_start = Instant::now();
-    let manager = SessionManager::new(Arc::new(persistence));
-    let matches = manager
-        .graph_search(
-            &session_id,
-            &claude_agent::graph::GraphSearchQuery {
-                text: Some("assistant-499".to_string()),
-                ..Default::default()
-            },
-        )
-        .await
-        .unwrap();
-    let search_elapsed = search_start.elapsed();
-
-    assert_eq!(loaded.current_branch_messages().len(), 1002);
-    assert_eq!(matches.len(), 1);
-
-    eprintln!(
-        "surreal baseline: save={:?} load={:?} search={:?}",
-        save_elapsed, load_elapsed, search_elapsed
-    );
-}
-
-#[cfg(feature = "surrealdb-backend")]
-#[tokio::test]
-#[ignore = "Requires local Docker SurrealDB"]
-async fn test_surrealdb_failure_mode_invalid_endpoint() {
-    let persistence = SurrealPersistence::new(
-        claude_agent::session::SurrealConfig::default()
-            .namespace("main")
-            .database("main")
-            .endpoint("http://127.0.0.1:59999/sql")
-            .credentials("root", "root"),
-    );
-
-    let session = seeded_session();
-    let error = persistence
-        .save(&session)
-        .await
-        .expect_err("save should fail");
-    let message = error.to_string();
-
-    assert!(
-        message.contains("SurrealDB")
-            || message.contains("Connection")
-            || message.contains("request failed")
-    );
-}
-
-#[cfg(feature = "surrealdb-backend")]
-#[tokio::test]
-#[ignore = "Requires local Docker SurrealDB"]
-async fn test_surrealdb_queue_stress() {
-    let persistence = surreal_persistence();
-    let session = seeded_session();
-    let session_id = session.id;
-    persistence.save(&session).await.unwrap();
-
-    for i in 0..20 {
-        persistence
-            .enqueue(&session_id, format!("item-{i}"), i)
-            .await
-            .unwrap();
-    }
-
-    let pending = persistence.pending_queue(&session_id).await.unwrap();
-    assert_eq!(pending.len(), 20);
-
-    let first = persistence.dequeue(&session_id).await.unwrap().unwrap();
-    assert_eq!(first.priority, 19);
-
-    let second = persistence.dequeue(&session_id).await.unwrap().unwrap();
-    assert_eq!(second.priority, 18);
-}
-
-#[cfg(feature = "surrealdb-backend")]
-#[tokio::test]
-#[ignore = "Requires local Docker SurrealDB"]
-async fn test_surrealdb_schema_version_tracking() {
-    let persistence = surreal_persistence();
-    let session = seeded_session();
-    persistence.save(&session).await.unwrap();
-
-    let response = reqwest::Client::new()
-        .post(surreal_url())
-        .basic_auth("root", Some("root"))
-        .header("surreal-ns", "main")
-        .header("surreal-db", "main")
-        .header("Accept", "application/json")
-        .body("SELECT version FROM schema_version WHERE name = 'session_store' LIMIT 1;")
-        .send()
-        .await
-        .expect("query should succeed")
-        .text()
-        .await
-        .expect("response text");
-
-    assert!(response.contains("\"version\":1"));
-}
-
-#[cfg(feature = "surrealdb-backend")]
-#[tokio::test]
-#[ignore = "Requires local Docker SurrealDB"]
-async fn test_surrealdb_backup_restore_roundtrip() {
-    let persistence = surreal_persistence();
-    let mut session = seeded_session();
-    let tenant = format!("tenant-{}", uuid::Uuid::new_v4().simple());
-    session.set_identity(Some(tenant.clone()), Some("user-1".to_string()));
-    let session_id = session.id;
-
-    persistence.save(&session).await.unwrap();
-    let loaded = persistence.load(&session_id).await.unwrap().unwrap();
-    persistence.delete(&session_id).await.unwrap();
-    assert!(persistence.load(&session_id).await.unwrap().is_none());
-    persistence.save(&loaded).await.unwrap();
-
-    let restored = persistence.load(&session_id).await.unwrap().unwrap();
-    assert_eq!(restored.tenant_id.as_deref(), Some(tenant.as_str()));
-    assert_eq!(
-        restored.current_branch_messages().len(),
-        loaded.current_branch_messages().len()
-    );
-
-    let bundle = claude_agent::session::SessionArchiveService::export_bundle(
-        &loaded,
-        &claude_agent::session::ExportPolicy::default(),
-        &claude_agent::session::ArchivePolicy::default(),
-    )
-    .expect("archive bundle should be generated");
-    let report = claude_agent::session::RestoreVerifier::verify(&bundle, &restored);
-    assert!(report.is_valid());
-}
-
-#[cfg(feature = "surrealdb-backend")]
-#[tokio::test]
-#[ignore = "Requires local Docker SurrealDB"]
-async fn test_surrealdb_medium_soak() {
-    let persistence = surreal_persistence();
-    let mut session = seeded_session();
-    let tenant = format!("tenant-{}", uuid::Uuid::new_v4().simple());
-    session.set_identity(Some(tenant.clone()), Some("user-1".to_string()));
-    let session_id = session.id;
-
-    for i in 0..25 {
-        session.add_message(SessionMessage::user(vec![ContentBlock::text(format!(
-            "u-{i}"
-        ))]));
-        session.add_message(SessionMessage::assistant(vec![ContentBlock::text(
-            format!("a-{i}"),
-        )]));
-        persistence.save(&session).await.unwrap();
-        let loaded = persistence.load(&session_id).await.unwrap().unwrap();
-        assert_eq!(loaded.tenant_id.as_deref(), Some(tenant.as_str()));
-        assert!(!loaded.current_branch_messages().is_empty());
-        let _ = persistence.list(Some(&tenant)).await.unwrap();
-    }
-}
-
-#[cfg(feature = "surrealdb-backend")]
-#[tokio::test]
-#[ignore = "Requires local Docker SurrealDB"]
-async fn test_surrealdb_longer_soak_with_queue_and_compaction() {
-    let persistence = surreal_persistence();
-    let mut session = seeded_session();
-    let tenant = format!("tenant-{}", uuid::Uuid::new_v4().simple());
-    session.set_identity(Some(tenant.clone()), Some("user-1".to_string()));
-    let session_id = session.id;
-
-    for i in 0..40 {
-        session.add_message(SessionMessage::user(vec![ContentBlock::text(format!(
-            "u-{i}"
-        ))]));
-        session.add_message(SessionMessage::assistant(vec![ContentBlock::text(
-            format!("a-{i}"),
-        )]));
-        if i % 10 == 0 && i > 0 {
-            let executor = claude_agent::session::CompactExecutor::new(
-                claude_agent::session::CompactStrategy::default(),
-            );
-            let _ = executor.apply_compact(&mut session, format!("summary-{i}"));
-        }
-        persistence.save(&session).await.unwrap();
-        persistence
-            .enqueue(&session_id, format!("item-{i}"), i)
-            .await
-            .unwrap();
-        let _ = persistence.pending_queue(&session_id).await.unwrap();
-        let loaded = persistence.load(&session_id).await.unwrap().unwrap();
-        assert_eq!(loaded.tenant_id.as_deref(), Some(tenant.as_str()));
-    }
-}
-
-#[cfg(feature = "surrealdb-backend")]
-#[tokio::test]
-#[ignore = "Requires local Docker SurrealDB"]
-async fn test_surrealdb_failure_mode_invalid_credentials() {
-    let persistence = SurrealPersistence::new(
-        claude_agent::session::SurrealConfig::default()
-            .namespace("main")
-            .database("main")
-            .endpoint(surreal_url())
-            .credentials("root", "wrong-password"),
-    );
-
-    let session = seeded_session();
-    let error = persistence
-        .save(&session)
-        .await
-        .expect_err("save should fail");
-    let message = error.to_string();
-
-    assert!(message.contains("SurrealDB") || message.contains("401") || message.contains("403"));
-}
-
 #[tokio::test]
 #[ignore = "Requires local Docker backend services"]
 async fn test_backend_containers_are_reachable() {
     let mut failures = Vec::new();
 
-    let postgres = tokio::net::TcpStream::connect("127.0.0.1:55432").await;
-    if postgres.is_err() {
+    #[cfg(feature = "postgres")]
+    if tokio::net::TcpStream::connect("127.0.0.1:55432")
+        .await
+        .is_err()
+    {
         failures.push("postgres:55432");
     }
 
-    let redis = tokio::net::TcpStream::connect("127.0.0.1:56379").await;
-    if redis.is_err() {
+    #[cfg(feature = "redis-backend")]
+    if tokio::net::TcpStream::connect("127.0.0.1:56379")
+        .await
+        .is_err()
+    {
         failures.push("redis:56379");
-    }
-
-    let surreal = tokio::net::TcpStream::connect("127.0.0.1:58000").await;
-    if surreal.is_err() {
-        failures.push("surrealdb:58000");
     }
 
     assert!(

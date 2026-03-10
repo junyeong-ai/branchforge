@@ -42,6 +42,8 @@ It contains:
 - graph stats
 - optional compact history
 
+Archive bundles can also be imported back into session storage, then validated with `RestoreVerifier` before the restored session is treated as trusted recovery state.
+
 ## Restore Verification
 
 Use `RestoreVerifier` after restore to validate:
@@ -62,5 +64,4 @@ Use `RestoreVerifier` after restore to validate:
 ## Related Guides
 
 - `session.md`
-- `architecture/surrealdb-operations.md`
 - `backend-selection.md`
