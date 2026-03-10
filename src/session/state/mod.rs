@@ -165,8 +165,15 @@ impl Session {
     }
 
     fn graph_projected_messages(&self) -> Vec<SessionMessage> {
-        self.current_branch_graph_nodes()
+        let branch_nodes = self.current_branch_graph_nodes();
+        let start_index = branch_nodes
+            .iter()
+            .rposition(|node| node.kind == NodeKind::Summary)
+            .unwrap_or(0);
+
+        branch_nodes
             .into_iter()
+            .skip(start_index)
             .filter_map(Self::graph_node_to_session_message)
             .collect()
     }

@@ -190,6 +190,24 @@ impl SurrealPersistence {
         records
     }
 
+    fn surreal_graph_records_payload(&self, session: &Session) -> SessionResult<String> {
+        let records = self
+            .export_graph_records(session)
+            .into_iter()
+            .map(|record| {
+                let mut value =
+                    serde_json::to_value(record).map_err(SessionError::Serialization)?;
+                if let Some(object) = value.as_object_mut()
+                    && let Some(id) = object.remove("id")
+                {
+                    object.insert("logical_id".to_string(), id);
+                }
+                Ok(value)
+            })
+            .collect::<SessionResult<Vec<_>>>()?;
+        serde_json::to_string(&records).map_err(SessionError::Serialization)
+    }
+
     async fn ensure_schema(&self) -> SessionResult<()> {
         self.bootstrap_namespace_database().await?;
         self.execute_unit(
@@ -328,17 +346,16 @@ impl Persistence for SurrealPersistence {
         self.ensure_schema().await?;
 
         let snapshot = serde_json::to_string(session).map_err(SessionError::Serialization)?;
-        let graph_records = serde_json::to_string(&self.export_graph_records(session))
-            .map_err(SessionError::Serialization)?;
+        let graph_records = self.surreal_graph_records_payload(session)?;
         let sql = format!(
             "BEGIN TRANSACTION;\n\
              DELETE session_snapshot WHERE session_id = {};\n\
-             CREATE session_snapshot CONTENT {{ id: {}, session_id: {}, tenant_id: {}, principal_id: {}, payload: {}, updated_at: time::now() }};\n\
+             CREATE session_snapshot CONTENT {{ snapshot_id: {}, session_id: {}, tenant_id: {}, principal_id: {}, payload: {}, updated_at: time::now() }};\n\
              DELETE graph_record WHERE session_id = {};\n\
              FOR $record IN {} {{ CREATE graph_record CONTENT $record; }};\n\
              COMMIT TRANSACTION;",
             serde_json::to_string(&session.id.to_string()).unwrap(),
-            serde_json::to_string(&session.id.to_string()).unwrap(),
+            serde_json::to_string(&Uuid::new_v4().to_string()).unwrap(),
             serde_json::to_string(&session.id.to_string()).unwrap(),
             serde_json::to_string(&session.tenant_id).unwrap(),
             serde_json::to_string(&session.principal_id).unwrap(),
@@ -353,7 +370,7 @@ impl Persistence for SurrealPersistence {
     async fn load(&self, id: &SessionId) -> SessionResult<Option<Session>> {
         self.ensure_schema().await?;
         let sql = format!(
-            "SELECT payload FROM session_snapshot WHERE session_id = {} LIMIT 1;",
+            "SELECT * FROM session_snapshot WHERE session_id = {} ORDER BY updated_at DESC LIMIT 1;",
             serde_json::to_string(&id.to_string()).unwrap()
         );
         let value = self.execute_query(&sql).await?;
@@ -415,7 +432,7 @@ impl Persistence for SurrealPersistence {
         self.ensure_schema().await?;
         let content = serde_json::to_string(&snapshot).map_err(SessionError::Serialization)?;
         let sql = format!(
-            "CREATE summary_record CONTENT {{ id: {}, session_id: {}, payload: {}, created_at: time::now() }};",
+            "CREATE summary_record CONTENT {{ summary_id: {}, session_id: {}, payload: {}, created_at: time::now() }};",
             serde_json::to_string(&Uuid::new_v4().to_string()).unwrap(),
             serde_json::to_string(&snapshot.session_id.to_string()).unwrap(),
             content,
@@ -454,7 +471,7 @@ impl Persistence for SurrealPersistence {
         let item = QueueItem::enqueue(*session_id, content).priority(priority);
         let payload = serde_json::to_string(&item).map_err(SessionError::Serialization)?;
         let sql = format!(
-            "CREATE queue_record CONTENT {{ id: {}, session_id: {}, payload: {}, created_at: time::now() }};",
+            "CREATE queue_record CONTENT {{ item_id: {}, session_id: {}, payload: {}, created_at: time::now() }};",
             serde_json::to_string(&item.id.to_string()).unwrap(),
             serde_json::to_string(&session_id.to_string()).unwrap(),
             payload,
@@ -485,7 +502,7 @@ impl Persistence for SurrealPersistence {
         item.start_processing();
         let payload = serde_json::to_string(&item).map_err(SessionError::Serialization)?;
         let update_sql = format!(
-            "DELETE queue_record WHERE id = {};\nCREATE queue_record CONTENT {{ id: {}, session_id: {}, payload: {}, created_at: time::now() }};",
+            "DELETE queue_record WHERE item_id = {};\nCREATE queue_record CONTENT {{ item_id: {}, session_id: {}, payload: {}, created_at: time::now() }};",
             serde_json::to_string(&item.id.to_string()).unwrap(),
             serde_json::to_string(&item.id.to_string()).unwrap(),
             serde_json::to_string(&session_id.to_string()).unwrap(),
@@ -498,7 +515,7 @@ impl Persistence for SurrealPersistence {
     async fn cancel_queued(&self, item_id: Uuid) -> SessionResult<bool> {
         self.ensure_schema().await?;
         let sql = format!(
-            "SELECT payload FROM queue_record WHERE id = {} LIMIT 1;",
+            "SELECT payload FROM queue_record WHERE item_id = {} LIMIT 1;",
             serde_json::to_string(&item_id.to_string()).unwrap()
         );
         let rows = Self::extract_result_rows(&self.execute_query(&sql).await?)?;
@@ -515,7 +532,7 @@ impl Persistence for SurrealPersistence {
             serde_json::from_value(payload).map_err(SessionError::Serialization)?;
         item.cancel();
         let update_sql = format!(
-            "DELETE queue_record WHERE id = {};\nCREATE queue_record CONTENT {{ id: {}, session_id: {}, payload: {}, created_at: time::now() }};",
+            "DELETE queue_record WHERE item_id = {};\nCREATE queue_record CONTENT {{ item_id: {}, session_id: {}, payload: {}, created_at: time::now() }};",
             serde_json::to_string(&item.id.to_string()).unwrap(),
             serde_json::to_string(&item.id.to_string()).unwrap(),
             serde_json::to_string(&item.session_id.to_string()).unwrap(),
