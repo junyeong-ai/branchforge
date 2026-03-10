@@ -49,11 +49,13 @@ The `Skill` tool is a progressive-disclosure tool.
 The `GraphHistory` tool exposes graph-first session exploration.
 
 - branch summaries
-- tree views
+- branch diff summaries
+- bookmark/checkpoint replay and fork workflows
+- tree views in compact or verbose mode
 - bookmarks and checkpoints
 - node summaries
 - graph search
-- graph-level session statistics
+- graph-level session statistics and divergence/activity metrics
 
 ## Related Guides
 

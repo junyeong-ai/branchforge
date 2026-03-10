@@ -192,6 +192,21 @@ impl SessionManager {
         ))
     }
 
+    pub async fn graph_tree_rendered(
+        &self,
+        id: &SessionId,
+        branch_id: Option<crate::graph::BranchId>,
+        mode: crate::graph::TreeRenderMode,
+    ) -> SessionResult<String> {
+        let session = self.get(id).await?;
+        let branch_id = branch_id.unwrap_or(session.graph.primary_branch);
+        Ok(crate::graph::GraphExplorer::render_tree(
+            &session.graph,
+            branch_id,
+            mode,
+        ))
+    }
+
     pub async fn graph_bookmarks(
         &self,
         id: &SessionId,
@@ -268,6 +283,98 @@ impl SessionManager {
     ) -> SessionResult<crate::graph::GraphSessionStats> {
         let session = self.get_scoped(id, scope).await?;
         Ok(crate::graph::GraphSearchService::stats(&session.graph))
+    }
+
+    pub async fn graph_branch_diff(
+        &self,
+        id: &SessionId,
+        left: crate::graph::BranchId,
+        right: crate::graph::BranchId,
+    ) -> SessionResult<Option<crate::graph::BranchDiffSummary>> {
+        let session = self.get(id).await?;
+        Ok(crate::graph::GraphDiffService::branch_diff(
+            &session.graph,
+            left,
+            right,
+        ))
+    }
+
+    pub async fn replay_from_bookmark(
+        &self,
+        id: &SessionId,
+        label: &str,
+        branch_id: Option<crate::graph::BranchId>,
+    ) -> SessionResult<crate::graph::ReplayInput> {
+        let session = self.get(id).await?;
+        let reference = crate::graph::GraphReferenceResolver::bookmark_by_label(
+            &session.graph,
+            label,
+            branch_id,
+        )
+        .map_err(|message| SessionError::Storage { message })?;
+        Ok(crate::session::ReplayService::replay_input(
+            &session.graph,
+            Some(crate::graph::GraphReferenceResolver::node_id(&reference)),
+        ))
+    }
+
+    pub async fn replay_from_checkpoint(
+        &self,
+        id: &SessionId,
+        label: &str,
+        branch_id: Option<crate::graph::BranchId>,
+    ) -> SessionResult<crate::graph::ReplayInput> {
+        let session = self.get(id).await?;
+        let reference = crate::graph::GraphReferenceResolver::checkpoint_by_label(
+            &session.graph,
+            label,
+            branch_id,
+        )
+        .map_err(|message| SessionError::Storage { message })?;
+        Ok(crate::session::ReplayService::replay_input(
+            &session.graph,
+            Some(crate::graph::GraphReferenceResolver::node_id(&reference)),
+        ))
+    }
+
+    pub async fn fork_from_bookmark(
+        &self,
+        id: &SessionId,
+        label: &str,
+        branch_id: Option<crate::graph::BranchId>,
+    ) -> SessionResult<Session> {
+        let session = self.get(id).await?;
+        let reference = crate::graph::GraphReferenceResolver::bookmark_by_label(
+            &session.graph,
+            label,
+            branch_id,
+        )
+        .map_err(|message| SessionError::Storage { message })?;
+        self.fork_from_node(
+            id,
+            crate::graph::GraphReferenceResolver::node_id(&reference),
+        )
+        .await
+    }
+
+    pub async fn fork_from_checkpoint(
+        &self,
+        id: &SessionId,
+        label: &str,
+        branch_id: Option<crate::graph::BranchId>,
+    ) -> SessionResult<Session> {
+        let session = self.get(id).await?;
+        let reference = crate::graph::GraphReferenceResolver::checkpoint_by_label(
+            &session.graph,
+            label,
+            branch_id,
+        )
+        .map_err(|message| SessionError::Storage { message })?;
+        self.fork_from_node(
+            id,
+            crate::graph::GraphReferenceResolver::node_id(&reference),
+        )
+        .await
     }
 
     pub async fn export_branch_json(&self, id: &SessionId) -> SessionResult<Option<String>> {
@@ -590,6 +697,28 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_graph_node_provenance_for_subagent_session() {
+        let manager = SessionManager::in_memory();
+        let session = manager
+            .create_with_identity(SessionConfig::default(), "tenant-a", "user-1")
+            .await
+            .unwrap();
+        let mut subagent = Session::new_subagent(
+            session.id,
+            "Explore",
+            "Inspect files",
+            SessionConfig::default(),
+        );
+        subagent.set_identity(Some("tenant-a".to_string()), Some("user-1".to_string()));
+        subagent.add_message(SessionMessage::user(vec![ContentBlock::text("alpha")]));
+
+        let node = subagent.current_branch_graph_nodes()[0];
+        let provenance = node.provenance.clone().expect("provenance should exist");
+        assert_eq!(provenance.session_type, "subagent");
+        assert_eq!(provenance.subagent_type.as_deref(), Some("Explore"));
+    }
+
+    #[tokio::test]
     async fn test_graph_search_scoped_enforces_identity() {
         let manager = SessionManager::in_memory();
         let session = manager
@@ -674,6 +803,114 @@ mod tests {
         assert_eq!(bookmarks.len(), 1);
         assert_eq!(stats.node_count, 1);
         assert_eq!(matches.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_session_manager_graph_branch_diff() {
+        let manager = SessionManager::in_memory();
+        let session = manager.create(SessionConfig::default()).await.unwrap();
+        let session_id = session.id;
+
+        manager
+            .add_message(
+                &session_id,
+                SessionMessage::user(vec![ContentBlock::text("root")]),
+            )
+            .await
+            .unwrap();
+        manager
+            .add_message(
+                &session_id,
+                SessionMessage::assistant(vec![ContentBlock::text("left")]),
+            )
+            .await
+            .unwrap();
+
+        let right_branch = {
+            let mut session = manager.get(&session_id).await.unwrap();
+            let root = session
+                .graph
+                .current_branch_nodes(session.graph.primary_branch)[0]
+                .id;
+            let branch = session.graph.fork_branch(Some(root), "right");
+            session.graph.append_node(
+                branch,
+                crate::graph::NodeKind::Assistant,
+                serde_json::json!({"content": [{"type": "text", "text": "right"}]}),
+            );
+            manager.persistence.save(&session).await.unwrap();
+            branch
+        };
+
+        let left_branch = manager.get(&session_id).await.unwrap().graph.primary_branch;
+        let diff = manager
+            .graph_branch_diff(&session_id, left_branch, right_branch)
+            .await
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(diff.left_only_count, 1);
+        assert_eq!(diff.right_only_count, 1);
+    }
+
+    #[tokio::test]
+    async fn test_session_manager_replay_and_fork_from_bookmark_and_checkpoint() {
+        let manager = SessionManager::in_memory();
+        let session = manager.create(SessionConfig::default()).await.unwrap();
+        let session_id = session.id;
+
+        manager
+            .add_message(
+                &session_id,
+                SessionMessage::user(vec![ContentBlock::text("root")]),
+            )
+            .await
+            .unwrap();
+        manager
+            .bookmark_current_head(&session_id, "start", None)
+            .await
+            .unwrap();
+        {
+            let mut session = manager.get(&session_id).await.unwrap();
+            session.graph.create_checkpoint(
+                session.graph.primary_branch,
+                "stable",
+                None,
+                vec![],
+                session.principal_id.clone(),
+                None,
+            );
+            manager.persistence.save(&session).await.unwrap();
+        }
+        manager
+            .add_message(
+                &session_id,
+                SessionMessage::assistant(vec![ContentBlock::text("after-checkpoint")]),
+            )
+            .await
+            .unwrap();
+
+        let replay = manager
+            .replay_from_bookmark(&session_id, "start", None)
+            .await
+            .unwrap();
+        let checkpoint_replay = manager
+            .replay_from_checkpoint(&session_id, "stable", None)
+            .await
+            .unwrap();
+        let bookmark_fork = manager
+            .fork_from_bookmark(&session_id, "start", None)
+            .await
+            .unwrap();
+        let checkpoint_fork = manager
+            .fork_from_checkpoint(&session_id, "stable", None)
+            .await
+            .unwrap();
+
+        assert_eq!(replay.messages.len(), 2);
+        assert_eq!(checkpoint_replay.messages.len(), 1);
+        assert_eq!(bookmark_fork.current_branch_messages().len(), 2);
+        assert_eq!(checkpoint_fork.current_branch_messages().len(), 1);
     }
 
     #[tokio::test]

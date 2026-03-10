@@ -912,6 +912,7 @@ impl PostgresPersistence {
                         .and_then(|v| serde_json::from_value(v).ok())
                         .unwrap_or_default(),
                     created_by_principal_id: row.try_get("principal_id").ok(),
+                    provenance: None,
                     created_at,
                 });
             }
@@ -949,6 +950,7 @@ impl PostgresPersistence {
                     label,
                     note: row.try_get("note").ok(),
                     created_by_principal_id: row.try_get("principal_id").ok(),
+                    provenance: None,
                     created_at,
                 });
             }

@@ -1103,6 +1103,7 @@ impl JsonlPersistence {
                         label: bookmark.label,
                         note: bookmark.note,
                         created_by_principal_id: bookmark.principal_id,
+                        provenance: None,
                         created_at: bookmark.created_at,
                     },
                 );
@@ -1122,6 +1123,7 @@ impl JsonlPersistence {
                         note: checkpoint.note,
                         tags: checkpoint.tags,
                         created_by_principal_id: checkpoint.principal_id,
+                        provenance: None,
                         created_at: checkpoint.created_at,
                     },
                 );
@@ -1909,6 +1911,7 @@ mod tests {
             "milestone",
             Some("saved".to_string()),
             vec!["tag".to_string()],
+            None,
             None,
         );
 

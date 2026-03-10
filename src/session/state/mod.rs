@@ -18,7 +18,7 @@ use chrono::{DateTime, Utc};
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 
-use crate::graph::{GraphNode, NodeKind, SessionGraph};
+use crate::graph::{GraphNode, NodeKind, NodeProvenance, SessionGraph};
 use crate::session::types::{CompactRecord, Plan, TodoItem, TodoStatus};
 use crate::types::{CacheControl, CacheTtl, ContentBlock, Message, Role, TokenUsage, Usage};
 
@@ -198,8 +198,13 @@ impl Session {
         note: Option<String>,
     ) -> Option<uuid::Uuid> {
         let head = self.graph.branch_head(self.graph.primary_branch)?;
-        self.graph
-            .create_bookmark(head, label, note, self.principal_id.clone())
+        self.graph.create_bookmark(
+            head,
+            label,
+            note,
+            self.principal_id.clone(),
+            self.graph_provenance(),
+        )
     }
 
     pub fn replay_input(
@@ -240,7 +245,28 @@ impl Session {
             }),
             message.timestamp,
             self.principal_id.clone(),
+            self.graph_provenance(),
         );
+    }
+
+    fn graph_provenance(&self) -> Option<NodeProvenance> {
+        let session_type = match &self.session_type {
+            SessionType::Main => "main".to_string(),
+            SessionType::Subagent { .. } => "subagent".to_string(),
+        };
+        let (subagent_type, subagent_description) = match &self.session_type {
+            SessionType::Subagent {
+                agent_type,
+                description,
+            } => (Some(agent_type.clone()), Some(description.clone())),
+            SessionType::Main => (None, None),
+        };
+        Some(NodeProvenance {
+            source_session_id: self.id.to_string(),
+            session_type,
+            subagent_type,
+            subagent_description,
+        })
     }
 
     fn graph_node_to_session_message(node: &GraphNode) -> Option<SessionMessage> {

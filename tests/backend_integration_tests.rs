@@ -85,6 +85,7 @@ fn seeded_session() -> Session {
         Some("saved".to_string()),
         vec!["tag".to_string()],
         session.principal_id.clone(),
+        None,
     );
     session
 }

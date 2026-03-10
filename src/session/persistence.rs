@@ -478,6 +478,7 @@ mod tests {
             Some("saved".to_string()),
             vec!["tag".to_string()],
             None,
+            None,
         );
         session.bookmark_current_head("head", Some("note".to_string()));
         session.clear_messages();

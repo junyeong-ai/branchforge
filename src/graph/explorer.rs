@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 use super::SessionGraph;
-use super::types::{BranchId, NodeId, NodeKind};
+use super::types::{BranchId, NodeId, NodeKind, NodeProvenance};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NodeSummary {
@@ -10,6 +10,7 @@ pub struct NodeSummary {
     pub kind: NodeKind,
     pub parent_id: Option<NodeId>,
     pub created_by_principal_id: Option<String>,
+    pub provenance: Option<NodeProvenance>,
     pub created_at: chrono::DateTime<chrono::Utc>,
     pub tags: Vec<String>,
     pub preview: Option<String>,
@@ -34,6 +35,13 @@ pub struct TreeNodeSummary {
     pub has_children: bool,
     pub has_checkpoint: bool,
     pub has_bookmark: bool,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum TreeRenderMode {
+    Compact,
+    Verbose,
 }
 
 pub struct GraphExplorer;
@@ -79,6 +87,51 @@ impl GraphExplorer {
             .collect()
     }
 
+    pub fn render_tree(graph: &SessionGraph, branch_id: BranchId, mode: TreeRenderMode) -> String {
+        let tree = Self::tree_view(graph, branch_id);
+        let branch = graph.branches.get(&branch_id);
+        let mut lines = Vec::new();
+        if let Some(branch) = branch {
+            lines.push(format!("branch {} ({})", branch.name, branch.id));
+        }
+        for item in tree {
+            let marker = node_marker(&item);
+            let indent = "  ".repeat(item.depth);
+            let head = branch.and_then(|branch| branch.head) == Some(item.node.id);
+            let head_marker = if head { " *" } else { "" };
+            match mode {
+                TreeRenderMode::Compact => {
+                    let preview = item.node.preview.as_deref().unwrap_or("");
+                    lines.push(format!(
+                        "{}{} {}{}{}",
+                        indent,
+                        marker,
+                        item.node.kind_label(),
+                        head_marker,
+                        if preview.is_empty() {
+                            String::new()
+                        } else {
+                            format!(": {}", preview)
+                        }
+                    ));
+                }
+                TreeRenderMode::Verbose => {
+                    let preview = item.node.preview.as_deref().unwrap_or("no preview");
+                    lines.push(format!(
+                        "{}{} {}{} [{}] {}",
+                        indent,
+                        marker,
+                        item.node.kind_label(),
+                        head_marker,
+                        item.node.id,
+                        preview
+                    ));
+                }
+            }
+        }
+        lines.join("\n")
+    }
+
     pub fn bookmarks(graph: &SessionGraph, branch_id: Option<BranchId>) -> Vec<super::Bookmark> {
         let mut bookmarks: Vec<_> = graph.bookmarks.values().cloned().collect();
         if let Some(branch_id) = branch_id {
@@ -116,10 +169,48 @@ fn summarize_node(node: &super::GraphNode) -> NodeSummary {
         kind: node.kind,
         parent_id: node.parent_id,
         created_by_principal_id: node.created_by_principal_id.clone(),
+        provenance: node.provenance.clone(),
         created_at: node.created_at,
         tags: node.tags.clone(),
         preview: preview_payload(&node.payload),
     }
+}
+
+impl NodeSummary {
+    fn kind_label(&self) -> &'static str {
+        match self.kind {
+            NodeKind::User => "user",
+            NodeKind::Assistant => "assistant",
+            NodeKind::ToolCall => "tool_call",
+            NodeKind::ToolResult => "tool_result",
+            NodeKind::Summary => "summary",
+            NodeKind::Plan => "plan",
+            NodeKind::Todo => "todo",
+            NodeKind::Checkpoint => "checkpoint",
+            NodeKind::Branch => "branch",
+        }
+    }
+}
+
+fn node_marker(item: &TreeNodeSummary) -> String {
+    let mut marker = match item.node.kind {
+        NodeKind::User => "U".to_string(),
+        NodeKind::Assistant => "A".to_string(),
+        NodeKind::ToolCall => "TC".to_string(),
+        NodeKind::ToolResult => "TR".to_string(),
+        NodeKind::Summary => "S".to_string(),
+        NodeKind::Plan => "P".to_string(),
+        NodeKind::Todo => "T".to_string(),
+        NodeKind::Checkpoint => "C".to_string(),
+        NodeKind::Branch => "B".to_string(),
+    };
+    if item.has_checkpoint && item.node.kind != NodeKind::Checkpoint {
+        marker.push('!');
+    }
+    if item.has_bookmark {
+        marker.push('@');
+    }
+    marker
 }
 
 fn preview_payload(payload: &serde_json::Value) -> Option<String> {
@@ -183,8 +274,8 @@ mod tests {
             NodeKind::Assistant,
             serde_json::json!({"content": [{"type": "text", "text": "world"}]}),
         );
-        graph.create_checkpoint(branch, "milestone", None, vec![], None);
-        graph.create_bookmark(root, "start", None, None);
+        graph.create_checkpoint(branch, "milestone", None, vec![], None, None);
+        graph.create_bookmark(root, "start", None, None, None);
 
         let branches = GraphExplorer::list_branches(&graph);
         let tree = GraphExplorer::tree_view(&graph, branch);
@@ -192,5 +283,24 @@ mod tests {
         assert_eq!(branches.len(), 2);
         assert!(!tree.is_empty());
         assert!(tree.iter().any(|node| node.has_checkpoint));
+    }
+
+    #[test]
+    fn explorer_renders_compact_and_verbose_tree() {
+        let mut graph = SessionGraph::default();
+        let root = graph.append_node(
+            graph.primary_branch,
+            NodeKind::User,
+            serde_json::json!({"content": [{"type": "text", "text": "hello world"}]}),
+        );
+        graph.create_bookmark(root, "start", None, None, None);
+
+        let compact =
+            GraphExplorer::render_tree(&graph, graph.primary_branch, TreeRenderMode::Compact);
+        let verbose =
+            GraphExplorer::render_tree(&graph, graph.primary_branch, TreeRenderMode::Verbose);
+
+        assert!(compact.contains("U@ user"));
+        assert!(verbose.contains("hello world"));
     }
 }

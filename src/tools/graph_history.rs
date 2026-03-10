@@ -8,8 +8,20 @@ use crate::types::ToolResult;
 
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
+pub enum GraphTreeMode {
+    Compact,
+    Verbose,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
 pub enum GraphHistoryAction {
     Branches,
+    Diff,
+    ReplayBookmark,
+    ReplayCheckpoint,
+    ForkBookmark,
+    ForkCheckpoint,
     Tree,
     Bookmarks,
     Checkpoints,
@@ -23,10 +35,12 @@ pub struct GraphHistoryInput {
     pub action: GraphHistoryAction,
     pub session_id: Option<String>,
     pub branch_id: Option<String>,
+    pub other_branch_id: Option<String>,
     pub node_id: Option<String>,
     pub query: Option<String>,
     pub kind: Option<String>,
     pub tag: Option<String>,
+    pub tree_mode: Option<GraphTreeMode>,
 }
 
 pub struct GraphHistoryTool;
@@ -36,7 +50,7 @@ impl SchemaTool for GraphHistoryTool {
     type Input = GraphHistoryInput;
 
     const NAME: &'static str = "GraphHistory";
-    const DESCRIPTION: &'static str = "Explore graph-first session history: branches, tree views, bookmarks, checkpoints, node summaries, search, and stats.";
+    const DESCRIPTION: &'static str = "Explore graph-first session history: branches, tree views, bookmarks, checkpoints, node summaries, search, diff, jump workflows, and graph analytics.";
 
     async fn handle(&self, input: Self::Input, context: &ExecutionContext) -> ToolResult {
         let Some(manager) = context.graph_manager() else {
@@ -57,10 +71,101 @@ impl SchemaTool for GraphHistoryTool {
                     Ok(branch_id) => branch_id,
                     Err(error) => return ToolResult::error(error),
                 };
+                let mode = match input.tree_mode.unwrap_or(GraphTreeMode::Compact) {
+                    GraphTreeMode::Compact => crate::graph::TreeRenderMode::Compact,
+                    GraphTreeMode::Verbose => crate::graph::TreeRenderMode::Verbose,
+                };
                 manager
-                    .graph_tree(&session_id, branch_id)
+                    .graph_tree_rendered(&session_id, branch_id, mode)
+                    .await
+            }
+            GraphHistoryAction::Diff => {
+                let left = match parse_optional_uuid(input.branch_id.as_deref()) {
+                    Ok(left) => left,
+                    Err(error) => return ToolResult::error(error),
+                };
+                let right = match parse_optional_uuid(input.other_branch_id.as_deref()) {
+                    Ok(right) => right,
+                    Err(error) => return ToolResult::error(error),
+                };
+                let Some(left) = left else {
+                    return ToolResult::error("branch_id is required for action=diff");
+                };
+                let Some(right) = right else {
+                    return ToolResult::error("other_branch_id is required for action=diff");
+                };
+                manager
+                    .graph_branch_diff(&session_id, left, right)
                     .await
                     .and_then(to_json)
+            }
+            GraphHistoryAction::ReplayBookmark => {
+                let label = input
+                    .query
+                    .as_deref()
+                    .ok_or_else(|| "query is required for replay_bookmark".to_string());
+                let Ok(label) = label else {
+                    return ToolResult::error(label.err().unwrap_or_default());
+                };
+                let branch_id = match parse_optional_uuid(input.branch_id.as_deref()) {
+                    Ok(branch_id) => branch_id,
+                    Err(error) => return ToolResult::error(error),
+                };
+                manager
+                    .replay_from_bookmark(&session_id, label, branch_id)
+                    .await
+                    .and_then(to_json)
+            }
+            GraphHistoryAction::ReplayCheckpoint => {
+                let label = input
+                    .query
+                    .as_deref()
+                    .ok_or_else(|| "query is required for replay_checkpoint".to_string());
+                let Ok(label) = label else {
+                    return ToolResult::error(label.err().unwrap_or_default());
+                };
+                let branch_id = match parse_optional_uuid(input.branch_id.as_deref()) {
+                    Ok(branch_id) => branch_id,
+                    Err(error) => return ToolResult::error(error),
+                };
+                manager
+                    .replay_from_checkpoint(&session_id, label, branch_id)
+                    .await
+                    .and_then(to_json)
+            }
+            GraphHistoryAction::ForkBookmark => {
+                let label = input
+                    .query
+                    .as_deref()
+                    .ok_or_else(|| "query is required for fork_bookmark".to_string());
+                let Ok(label) = label else {
+                    return ToolResult::error(label.err().unwrap_or_default());
+                };
+                let branch_id = match parse_optional_uuid(input.branch_id.as_deref()) {
+                    Ok(branch_id) => branch_id,
+                    Err(error) => return ToolResult::error(error),
+                };
+                manager
+                    .fork_from_bookmark(&session_id, label, branch_id)
+                    .await
+                    .map(|session| session.id.to_string())
+            }
+            GraphHistoryAction::ForkCheckpoint => {
+                let label = input
+                    .query
+                    .as_deref()
+                    .ok_or_else(|| "query is required for fork_checkpoint".to_string());
+                let Ok(label) = label else {
+                    return ToolResult::error(label.err().unwrap_or_default());
+                };
+                let branch_id = match parse_optional_uuid(input.branch_id.as_deref()) {
+                    Ok(branch_id) => branch_id,
+                    Err(error) => return ToolResult::error(error),
+                };
+                manager
+                    .fork_from_checkpoint(&session_id, label, branch_id)
+                    .await
+                    .map(|session| session.id.to_string())
             }
             GraphHistoryAction::Bookmarks => {
                 let branch_id = match parse_optional_uuid(input.branch_id.as_deref()) {
@@ -191,6 +296,34 @@ mod tests {
                     "action": "search",
                     "session_id": session.id.to_string(),
                     "query": "alpha"
+                }),
+                &context,
+            )
+            .await;
+
+        assert!(!result.is_error());
+    }
+
+    #[tokio::test]
+    async fn graph_history_tool_renders_compact_tree() {
+        let manager = SessionManager::in_memory();
+        let session = manager.create(SessionConfig::default()).await.unwrap();
+        manager
+            .add_message(
+                &session.id,
+                SessionMessage::user(vec![ContentBlock::text("alpha")]),
+            )
+            .await
+            .unwrap();
+
+        let context = ExecutionContext::permissive().session_manager(manager);
+        let tool = GraphHistoryTool;
+        let result = tool
+            .execute(
+                serde_json::json!({
+                    "action": "tree",
+                    "session_id": session.id.to_string(),
+                    "tree_mode": "compact"
                 }),
                 &context,
             )

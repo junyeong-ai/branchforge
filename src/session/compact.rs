@@ -200,6 +200,7 @@ impl CompactExecutor {
             Some("Context compaction summary appended".to_string()),
             vec!["compaction".to_string()],
             session.principal_id.clone(),
+            None,
         );
 
         // Projection replacement only; graph history remains intact.

@@ -6,6 +6,14 @@ pub type SessionGraphId = Uuid;
 pub type NodeId = Uuid;
 pub type BranchId = Uuid;
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NodeProvenance {
+    pub source_session_id: String,
+    pub session_type: String,
+    pub subagent_type: Option<String>,
+    pub subagent_description: Option<String>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum NodeKind {
@@ -27,6 +35,7 @@ pub struct GraphNode {
     pub kind: NodeKind,
     pub parent_id: Option<NodeId>,
     pub created_by_principal_id: Option<String>,
+    pub provenance: Option<NodeProvenance>,
     pub created_at: DateTime<Utc>,
     pub tags: Vec<String>,
     pub payload: serde_json::Value,
@@ -49,6 +58,7 @@ pub struct Checkpoint {
     pub note: Option<String>,
     pub tags: Vec<String>,
     pub created_by_principal_id: Option<String>,
+    pub provenance: Option<NodeProvenance>,
     pub created_at: DateTime<Utc>,
 }
 
@@ -60,5 +70,6 @@ pub struct Bookmark {
     pub label: String,
     pub note: Option<String>,
     pub created_by_principal_id: Option<String>,
+    pub provenance: Option<NodeProvenance>,
     pub created_at: DateTime<Utc>,
 }

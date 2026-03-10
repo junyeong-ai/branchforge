@@ -6,7 +6,8 @@ use uuid::Uuid;
 
 use super::event::{GraphEvent, GraphEventBody};
 use super::types::{
-    Bookmark, Branch, BranchId, Checkpoint, GraphNode, NodeId, NodeKind, SessionGraphId,
+    Bookmark, Branch, BranchId, Checkpoint, GraphNode, NodeId, NodeKind, NodeProvenance,
+    SessionGraphId,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -57,7 +58,7 @@ impl SessionGraph {
         kind: NodeKind,
         payload: serde_json::Value,
     ) -> NodeId {
-        self.append_node_with_actor(branch_id, kind, payload, None)
+        self.append_node_with_actor(branch_id, kind, payload, None, None)
     }
 
     pub fn append_node_with_actor(
@@ -66,6 +67,7 @@ impl SessionGraph {
         kind: NodeKind,
         payload: serde_json::Value,
         created_by_principal_id: Option<String>,
+        provenance: Option<NodeProvenance>,
     ) -> NodeId {
         let node_id = Uuid::new_v4();
         let parent_id = self.branches.get(&branch_id).and_then(|branch| branch.head);
@@ -78,6 +80,7 @@ impl SessionGraph {
             payload,
             Utc::now(),
             created_by_principal_id,
+            provenance,
         );
         node_id
     }
@@ -92,6 +95,7 @@ impl SessionGraph {
         payload: serde_json::Value,
         created_at: chrono::DateTime<Utc>,
         created_by_principal_id: Option<String>,
+        provenance: Option<NodeProvenance>,
     ) {
         let node = GraphNode {
             id: node_id,
@@ -99,6 +103,7 @@ impl SessionGraph {
             kind,
             parent_id,
             created_by_principal_id: created_by_principal_id.clone(),
+            provenance,
             created_at,
             tags: tags.clone(),
             payload: payload.clone(),
@@ -150,6 +155,7 @@ impl SessionGraph {
         note: Option<String>,
         tags: Vec<String>,
         created_by_principal_id: Option<String>,
+        provenance: Option<NodeProvenance>,
     ) -> NodeId {
         let checkpoint_id = Uuid::new_v4();
         let checkpoint = Checkpoint {
@@ -159,6 +165,7 @@ impl SessionGraph {
             note: note.clone(),
             tags: tags.clone(),
             created_by_principal_id: created_by_principal_id.clone(),
+            provenance: provenance.clone(),
             created_at: Utc::now(),
         };
         self.checkpoints.insert(checkpoint_id, checkpoint.clone());
@@ -170,6 +177,7 @@ impl SessionGraph {
                 kind: NodeKind::Checkpoint,
                 parent_id: self.branches.get(&branch_id).and_then(|branch| branch.head),
                 created_by_principal_id,
+                provenance,
                 created_at: checkpoint.created_at,
                 tags: checkpoint.tags.clone(),
                 payload: serde_json::json!({
@@ -236,6 +244,7 @@ impl SessionGraph {
         label: impl Into<String>,
         note: Option<String>,
         created_by_principal_id: Option<String>,
+        provenance: Option<NodeProvenance>,
     ) -> Option<Uuid> {
         let node = self.nodes.get(&node_id)?;
         let bookmark_id = Uuid::new_v4();
@@ -248,6 +257,7 @@ impl SessionGraph {
                 label: label.into(),
                 note,
                 created_by_principal_id,
+                provenance,
                 created_at: Utc::now(),
             },
         );
@@ -346,7 +356,14 @@ mod tests {
         let root = graph.append_node(graph.primary_branch, NodeKind::User, serde_json::json!({}));
         let branch = graph.fork_branch(Some(root), "alt");
         let child = graph.append_node(branch, NodeKind::Assistant, serde_json::json!({}));
-        graph.create_checkpoint(branch, "milestone", None, vec!["tag".to_string()], None);
+        graph.create_checkpoint(
+            branch,
+            "milestone",
+            None,
+            vec!["tag".to_string()],
+            None,
+            None,
+        );
 
         assert_eq!(graph.children_of(root).len(), 1);
         assert_eq!(graph.branch_at(child), Some(branch));
@@ -357,7 +374,7 @@ mod tests {
     fn creates_branch_bookmark() {
         let mut graph = SessionGraph::default();
         let node = graph.append_node(graph.primary_branch, NodeKind::User, serde_json::json!({}));
-        let bookmark = graph.create_bookmark(node, "start", Some("entry".to_string()), None);
+        let bookmark = graph.create_bookmark(node, "start", Some("entry".to_string()), None, None);
 
         assert!(bookmark.is_some());
         assert_eq!(graph.bookmarks_for_branch(graph.primary_branch).len(), 1);

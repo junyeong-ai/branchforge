@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 use super::SessionGraph;
-use super::types::{Bookmark, BranchId, Checkpoint, NodeId, NodeKind};
+use super::types::{Bookmark, BranchId, Checkpoint, NodeId, NodeKind, NodeProvenance};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExportNode {
@@ -9,6 +9,7 @@ pub struct ExportNode {
     pub kind: NodeKind,
     pub parent_id: Option<NodeId>,
     pub created_by_principal_id: Option<String>,
+    pub provenance: Option<NodeProvenance>,
     pub created_at: chrono::DateTime<chrono::Utc>,
     pub tags: Vec<String>,
     pub payload: serde_json::Value,
@@ -31,6 +32,7 @@ pub struct ExportCheckpoint {
     pub label: String,
     pub note: Option<String>,
     pub created_by_principal_id: Option<String>,
+    pub provenance: Option<NodeProvenance>,
     pub created_at: chrono::DateTime<chrono::Utc>,
     pub tags: Vec<String>,
 }
@@ -50,6 +52,7 @@ pub struct ExportBookmark {
     pub label: String,
     pub note: Option<String>,
     pub created_by_principal_id: Option<String>,
+    pub provenance: Option<NodeProvenance>,
     pub created_at: chrono::DateTime<chrono::Utc>,
 }
 
@@ -64,6 +67,7 @@ impl SessionGraph {
                 kind: node.kind,
                 parent_id: node.parent_id,
                 created_by_principal_id: node.created_by_principal_id.clone(),
+                provenance: node.provenance.clone(),
                 created_at: node.created_at,
                 tags: node.tags.clone(),
                 payload: node.payload.clone(),
@@ -117,6 +121,7 @@ fn checkpoint_to_export(checkpoint: &Checkpoint) -> ExportCheckpoint {
         label: checkpoint.label.clone(),
         note: checkpoint.note.clone(),
         created_by_principal_id: checkpoint.created_by_principal_id.clone(),
+        provenance: checkpoint.provenance.clone(),
         created_at: checkpoint.created_at,
         tags: checkpoint.tags.clone(),
     }
@@ -129,6 +134,7 @@ fn bookmark_to_export(bookmark: &Bookmark) -> ExportBookmark {
         label: bookmark.label.clone(),
         note: bookmark.note.clone(),
         created_by_principal_id: bookmark.created_by_principal_id.clone(),
+        provenance: bookmark.provenance.clone(),
         created_at: bookmark.created_at,
     }
 }

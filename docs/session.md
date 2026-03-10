@@ -60,6 +60,8 @@ For multi-tenant deployments, the manager can create sessions with explicit tena
 
 Graph exploration and graph search can also be guarded by session access scope, allowing tenant/principal-aware access checks before replay, export, search, or statistics are returned.
 
+Graph records can also carry creator and provenance metadata so bookmarks, checkpoints, and delegated subagent work remain traceable over time.
+
 The graph exploration layer exposes:
 
 - branch summaries

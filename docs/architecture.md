@@ -24,6 +24,8 @@
 
 Graph records may also carry creator principal metadata so bookmarks, checkpoints, and nodes can support future audit and ownership-aware workflows.
 
+Graph nodes may also include execution provenance such as source session and subagent type so replay and graph exploration can trace where delegated work originated.
+
 ## Prompt Cache Segments
 
 The runtime treats prompt caching as three segments:

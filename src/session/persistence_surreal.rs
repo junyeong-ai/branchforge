@@ -366,6 +366,7 @@ impl SurrealPersistence {
                             .map(str::to_string),
                         tags: record.tags.clone(),
                         created_by_principal_id: record.principal_id.clone(),
+                        provenance: None,
                         created_at: record.created_at,
                     };
                     graph.checkpoints.insert(checkpoint_id, checkpoint.clone());
@@ -377,6 +378,7 @@ impl SurrealPersistence {
                             kind: NodeKind::Checkpoint,
                             parent_id: record.parent_id,
                             created_by_principal_id: record.principal_id,
+                            provenance: None,
                             created_at: record.created_at,
                             tags: record.tags,
                             payload: record.payload,
@@ -409,6 +411,7 @@ impl SurrealPersistence {
                                 .and_then(serde_json::Value::as_str)
                                 .map(str::to_string),
                             created_by_principal_id: record.principal_id,
+                            provenance: None,
                             created_at: record.created_at,
                         },
                     );
@@ -427,6 +430,7 @@ impl SurrealPersistence {
                             kind: node_kind,
                             parent_id: record.parent_id,
                             created_by_principal_id: record.principal_id,
+                            provenance: None,
                             created_at: record.created_at,
                             tags: record.tags,
                             payload: record.payload,
@@ -872,6 +876,7 @@ mod tests {
             "milestone",
             None,
             vec!["tag".to_string()],
+            None,
             None,
         );
 
