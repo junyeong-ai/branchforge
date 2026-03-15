@@ -1,4 +1,5 @@
 pub mod diff;
+pub mod error;
 pub mod event;
 pub mod explorer;
 pub mod export;
@@ -13,6 +14,7 @@ pub mod types;
 pub mod validator;
 
 pub use diff::{BranchDiffSummary, GraphDiffService};
+pub use error::GraphError;
 pub use event::{EventMetadata, GraphEvent, GraphEventBody};
 pub use explorer::{BranchSummary, GraphExplorer, NodeSummary, TreeNodeSummary, TreeRenderMode};
 pub use export::{BranchExport, ExportBookmark, ExportCheckpoint, ExportNode, ExportTreeNode};

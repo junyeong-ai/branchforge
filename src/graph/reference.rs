@@ -98,9 +98,15 @@ mod tests {
     #[test]
     fn resolves_bookmark_and_checkpoint_by_label() {
         let mut graph = SessionGraph::default();
-        let root = graph.append_node(graph.primary_branch, NodeKind::User, serde_json::json!({}));
-        graph.create_bookmark(root, "start", None, None, None);
-        graph.create_checkpoint(graph.primary_branch, "mark", None, vec![], None, None);
+        let root = graph
+            .append_node(graph.primary_branch, NodeKind::User, serde_json::json!({}))
+            .unwrap();
+        graph
+            .create_bookmark(root, "start", None, None, None)
+            .unwrap();
+        graph
+            .create_checkpoint(graph.primary_branch, "mark", None, vec![], None, None)
+            .unwrap();
 
         let bookmark = GraphReferenceResolver::bookmark_by_label(&graph, "start", None).unwrap();
         let checkpoint = GraphReferenceResolver::checkpoint_by_label(&graph, "mark", None).unwrap();

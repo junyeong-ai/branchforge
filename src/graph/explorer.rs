@@ -338,13 +338,7 @@ fn truncate_preview(text: &str) -> String {
 }
 
 fn node_depth(graph: &SessionGraph, node_id: NodeId) -> usize {
-    let mut depth = 0;
-    let mut current = graph.nodes.get(&node_id).and_then(|node| node.parent_id);
-    while let Some(parent_id) = current {
-        depth += 1;
-        current = graph.nodes.get(&parent_id).and_then(|node| node.parent_id);
-    }
-    depth
+    graph.node_depth(node_id)
 }
 
 #[cfg(test)]
@@ -355,19 +349,27 @@ mod tests {
     #[test]
     fn explorer_lists_branches_and_tree() {
         let mut graph = SessionGraph::default();
-        let root = graph.append_node(
-            graph.primary_branch,
-            NodeKind::User,
-            serde_json::json!({"content": [{"type": "text", "text": "hello"}]}),
-        );
-        let branch = graph.fork_branch(Some(root), "experiment");
-        graph.append_node(
-            branch,
-            NodeKind::Assistant,
-            serde_json::json!({"content": [{"type": "text", "text": "world"}]}),
-        );
-        graph.create_checkpoint(branch, "milestone", None, vec![], None, None);
-        graph.create_bookmark(root, "start", None, None, None);
+        let root = graph
+            .append_node(
+                graph.primary_branch,
+                NodeKind::User,
+                serde_json::json!({"content": [{"type": "text", "text": "hello"}]}),
+            )
+            .unwrap();
+        let branch = graph.fork_branch(Some(root), "experiment").unwrap();
+        graph
+            .append_node(
+                branch,
+                NodeKind::Assistant,
+                serde_json::json!({"content": [{"type": "text", "text": "world"}]}),
+            )
+            .unwrap();
+        graph
+            .create_checkpoint(branch, "milestone", None, vec![], None, None)
+            .unwrap();
+        graph
+            .create_bookmark(root, "start", None, None, None)
+            .unwrap();
 
         let branches = GraphExplorer::list_branches(&graph);
         let tree = GraphExplorer::tree_view(&graph, branch);
@@ -381,12 +383,16 @@ mod tests {
     #[test]
     fn explorer_renders_compact_and_verbose_tree() {
         let mut graph = SessionGraph::default();
-        let root = graph.append_node(
-            graph.primary_branch,
-            NodeKind::User,
-            serde_json::json!({"content": [{"type": "text", "text": "hello world"}]}),
-        );
-        graph.create_bookmark(root, "start", None, None, None);
+        let root = graph
+            .append_node(
+                graph.primary_branch,
+                NodeKind::User,
+                serde_json::json!({"content": [{"type": "text", "text": "hello world"}]}),
+            )
+            .unwrap();
+        graph
+            .create_bookmark(root, "start", None, None, None)
+            .unwrap();
 
         let compact =
             GraphExplorer::render_tree(&graph, graph.primary_branch, TreeRenderMode::Compact);

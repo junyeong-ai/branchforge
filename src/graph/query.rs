@@ -85,32 +85,4 @@ impl GraphQuery {
         result.reverse();
         result
     }
-
-    pub fn replay_segment(
-        &self,
-        nodes: &[GraphNode],
-        branch_id: BranchId,
-        from: Option<NodeId>,
-    ) -> ReplaySegment {
-        let mut filtered: Vec<&GraphNode> = nodes
-            .iter()
-            .filter(|node| node.branch_id == branch_id && self.filter.matches(node))
-            .collect();
-        filtered.sort_by_key(|node| node.created_at);
-
-        let node_ids = match from {
-            Some(from_id) => filtered
-                .into_iter()
-                .skip_while(|node| node.id != from_id)
-                .map(|node| node.id)
-                .collect(),
-            None => filtered.into_iter().map(|node| node.id).collect(),
-        };
-
-        ReplaySegment {
-            branch_id,
-            from_node: from,
-            node_ids,
-        }
-    }
 }

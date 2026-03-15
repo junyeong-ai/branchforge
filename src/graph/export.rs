@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 
-use super::SessionGraph;
 use super::types::{Bookmark, BranchId, Checkpoint, NodeId, NodeKind, NodeProvenance};
+use super::{GraphError, SessionGraph};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExportNode {
@@ -60,8 +60,11 @@ pub struct ExportBookmark {
 }
 
 impl SessionGraph {
-    pub fn export_branch(&self, branch_id: BranchId) -> Option<BranchExport> {
-        let branch = self.branches.get(&branch_id)?;
+    pub fn export_branch(&self, branch_id: BranchId) -> Result<BranchExport, GraphError> {
+        let branch = self
+            .branches
+            .get(&branch_id)
+            .ok_or(GraphError::ExportBranchMissing { branch_id })?;
         let branch_nodes = self.current_branch_nodes(branch_id);
         let nodes = branch_nodes
             .iter()
@@ -97,7 +100,7 @@ impl SessionGraph {
             })
             .collect();
 
-        Some(BranchExport {
+        Ok(BranchExport {
             branch_id,
             branch_name: branch.name.clone(),
             head: branch.head,
@@ -106,16 +109,6 @@ impl SessionGraph {
             tree,
             nodes,
         })
-    }
-
-    fn node_depth(&self, node_id: NodeId) -> usize {
-        let mut depth = 0;
-        let mut current = self.nodes.get(&node_id).and_then(|node| node.parent_id);
-        while let Some(parent_id) = current {
-            depth += 1;
-            current = self.nodes.get(&parent_id).and_then(|node| node.parent_id);
-        }
-        depth
     }
 }
 

@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 
+use super::GraphError;
 use super::SessionGraph;
 use super::explorer::{BranchSummary, NodeSummary, node_summary_from_graph_node};
 use super::types::{BranchId, NodeId};
@@ -22,10 +23,18 @@ impl GraphDiffService {
         graph: &SessionGraph,
         left: BranchId,
         right: BranchId,
-    ) -> Option<BranchDiffSummary> {
+    ) -> Result<BranchDiffSummary, GraphError> {
         let branches = super::GraphExplorer::list_branches(graph);
-        let left_summary = branches.iter().find(|branch| branch.id == left)?.clone();
-        let right_summary = branches.iter().find(|branch| branch.id == right)?.clone();
+        let left_summary = branches
+            .iter()
+            .find(|branch| branch.id == left)
+            .cloned()
+            .ok_or(GraphError::MissingBranch { branch_id: left })?;
+        let right_summary = branches
+            .iter()
+            .find(|branch| branch.id == right)
+            .cloned()
+            .ok_or(GraphError::MissingBranch { branch_id: right })?;
 
         let left_nodes = graph.current_branch_nodes(left);
         let right_nodes = graph.current_branch_nodes(right);
@@ -46,7 +55,7 @@ impl GraphDiffService {
         let left_only: Vec<_> = left_nodes.into_iter().skip(shared_len).collect();
         let right_only: Vec<_> = right_nodes.into_iter().skip(shared_len).collect();
 
-        Some(BranchDiffSummary {
+        Ok(BranchDiffSummary {
             left: left_summary,
             right: right_summary,
             common_ancestor,
@@ -76,27 +85,46 @@ mod tests {
     #[test]
     fn branch_diff_finds_common_ancestor_and_divergence() {
         let mut graph = SessionGraph::default();
-        let root = graph.append_node(
-            graph.primary_branch,
-            NodeKind::User,
-            serde_json::json!({"content": [{"type": "text", "text": "root"}]}),
-        );
-        graph.append_node(
-            graph.primary_branch,
-            NodeKind::Assistant,
-            serde_json::json!({"content": [{"type": "text", "text": "left"}]}),
-        );
-        let right_branch = graph.fork_branch(Some(root), "right");
-        graph.append_node(
-            right_branch,
-            NodeKind::Assistant,
-            serde_json::json!({"content": [{"type": "text", "text": "right"}]}),
-        );
+        let root = graph
+            .append_node(
+                graph.primary_branch,
+                NodeKind::User,
+                serde_json::json!({"content": [{"type": "text", "text": "root"}]}),
+            )
+            .unwrap();
+        graph
+            .append_node(
+                graph.primary_branch,
+                NodeKind::Assistant,
+                serde_json::json!({"content": [{"type": "text", "text": "left"}]}),
+            )
+            .unwrap();
+        let right_branch = graph.fork_branch(Some(root), "right").unwrap();
+        graph
+            .append_node(
+                right_branch,
+                NodeKind::Assistant,
+                serde_json::json!({"content": [{"type": "text", "text": "right"}]}),
+            )
+            .unwrap();
 
         let diff =
             GraphDiffService::branch_diff(&graph, graph.primary_branch, right_branch).unwrap();
         assert_eq!(diff.common_ancestor, Some(root));
         assert_eq!(diff.left_only_count, 1);
         assert_eq!(diff.right_only_count, 1);
+    }
+
+    #[test]
+    fn branch_diff_errors_for_missing_branch() {
+        let graph = SessionGraph::default();
+        let missing = uuid::Uuid::new_v4();
+
+        let error =
+            GraphDiffService::branch_diff(&graph, graph.primary_branch, missing).unwrap_err();
+        assert!(matches!(
+            error,
+            GraphError::MissingBranch { branch_id } if branch_id == missing
+        ));
     }
 }

@@ -159,13 +159,7 @@ fn payload_contains_text(payload: &serde_json::Value, query: &str) -> bool {
 }
 
 fn node_depth(graph: &SessionGraph, node_id: crate::graph::NodeId) -> usize {
-    let mut depth = 0;
-    let mut current = graph.nodes.get(&node_id).and_then(|node| node.parent_id);
-    while let Some(parent_id) = current {
-        depth += 1;
-        current = graph.nodes.get(&parent_id).and_then(|node| node.parent_id);
-    }
-    depth
+    graph.node_depth(node_id)
 }
 
 #[cfg(test)]
@@ -176,16 +170,20 @@ mod tests {
     #[test]
     fn search_finds_matching_nodes_and_stats() {
         let mut graph = SessionGraph::default();
-        graph.append_node(
-            graph.primary_branch,
-            NodeKind::User,
-            serde_json::json!({"content": [{"type": "text", "text": "alpha"}]}),
-        );
-        graph.append_node(
-            graph.primary_branch,
-            NodeKind::ToolCall,
-            serde_json::json!({"tool_name": "Read"}),
-        );
+        graph
+            .append_node(
+                graph.primary_branch,
+                NodeKind::User,
+                serde_json::json!({"content": [{"type": "text", "text": "alpha"}]}),
+            )
+            .unwrap();
+        graph
+            .append_node(
+                graph.primary_branch,
+                NodeKind::ToolCall,
+                serde_json::json!({"tool_name": "Read"}),
+            )
+            .unwrap();
 
         let results = GraphSearchService::search(
             &graph,

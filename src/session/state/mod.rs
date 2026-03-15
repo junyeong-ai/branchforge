@@ -9,8 +9,10 @@ mod policy;
 pub use config::SessionConfig;
 pub use enums::{SessionState, SessionType};
 pub use ids::{MessageId, SessionId};
-pub use message::{MessageMetadata, SessionMessage, ThinkingMetadata, ToolResultMeta};
-pub use policy::{PermissionMode, SessionPermissions, SessionToolLimits};
+pub use message::{
+    ExecutionMetadata, MessageMetadata, SessionMessage, ThinkingMetadata, ToolResultMeta,
+};
+pub use policy::{SessionAuthorization, SessionAuthorizationMode, SessionToolLimits};
 
 use std::collections::VecDeque;
 
@@ -20,6 +22,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::graph::{GraphNode, NodeKind, NodeProvenance, SessionGraph};
 use crate::session::types::{CompactRecord, Plan, TodoItem, TodoStatus};
+use crate::session::{SessionError, SessionResult};
 use crate::types::{CacheControl, CacheTtl, ContentBlock, Message, Role, TokenUsage, Usage};
 
 const MAX_COMPACT_HISTORY_SIZE: usize = 50;
@@ -33,7 +36,7 @@ pub struct Session {
     pub principal_id: Option<String>,
     pub state: SessionState,
     pub config: SessionConfig,
-    pub permissions: SessionPermissions,
+    pub authorization: SessionAuthorization,
     pub messages: Vec<SessionMessage>,
     pub current_leaf_id: Option<MessageId>,
     pub summary: Option<String>,
@@ -71,11 +74,21 @@ impl Session {
         description: impl Into<String>,
         config: SessionConfig,
     ) -> Self {
+        Self::new_subagent_with_id(SessionId::new(), parent_id, agent_type, description, config)
+    }
+
+    pub fn new_subagent_with_id(
+        id: SessionId,
+        parent_id: SessionId,
+        agent_type: impl Into<String>,
+        description: impl Into<String>,
+        config: SessionConfig,
+    ) -> Self {
         let session_type = SessionType::Subagent {
             agent_type: agent_type.into(),
             description: description.into(),
         };
-        Self::init(SessionId::new(), Some(parent_id), session_type, config)
+        Self::init(id, Some(parent_id), session_type, config)
     }
 
     fn init(
@@ -96,7 +109,7 @@ impl Session {
             tenant_id: None,
             principal_id: None,
             state: SessionState::Created,
-            permissions: config.permissions.clone(),
+            authorization: config.authorization.clone(),
             config,
             messages: Vec::with_capacity(32),
             current_leaf_id: None,
@@ -126,34 +139,36 @@ impl Session {
     }
 
     pub fn is_running(&self) -> bool {
-        matches!(
-            self.state,
-            SessionState::Active | SessionState::WaitingForTools
-        )
+        self.state.is_running()
+    }
+
+    pub fn is_finalizing(&self) -> bool {
+        self.state.is_finalizing()
     }
 
     pub fn is_terminal(&self) -> bool {
-        matches!(
-            self.state,
-            SessionState::Completed | SessionState::Failed | SessionState::Cancelled
-        )
+        self.state.is_terminal()
     }
 
     pub fn is_expired(&self) -> bool {
         self.expires_at.is_some_and(|expires| Utc::now() > expires)
     }
 
-    pub fn add_message(&mut self, mut message: SessionMessage) {
+    pub fn add_message(&mut self, mut message: SessionMessage) -> SessionResult<()> {
         if let Some(leaf) = &self.current_leaf_id {
             message.parent_id = Some(leaf.clone());
         }
-        self.record_message_in_graph(&message);
+        self.record_message_in_graph(&message)?;
+        if message.is_compact_summary {
+            self.refresh_summary_cache();
+        }
         self.current_leaf_id = Some(message.id.clone());
         if let Some(usage) = &message.usage {
             self.total_usage.add(usage);
         }
         self.messages.push(message);
         self.updated_at = Utc::now();
+        Ok(())
     }
 
     pub fn to_graph(&self) -> crate::graph::SessionGraph {
@@ -182,7 +197,9 @@ impl Session {
         self.graph_projected_messages()
     }
 
-    pub fn export_current_branch(&self) -> Option<crate::graph::BranchExport> {
+    pub fn export_current_branch(
+        &self,
+    ) -> crate::session::SessionResult<crate::graph::BranchExport> {
         crate::session::SessionExporter::export_branch(&self.graph, self.graph.primary_branch)
     }
 
@@ -198,79 +215,80 @@ impl Session {
         note: Option<String>,
     ) -> Option<uuid::Uuid> {
         let head = self.graph.branch_head(self.graph.primary_branch)?;
-        self.graph.create_bookmark(
-            head,
-            label,
-            note,
-            self.principal_id.clone(),
-            self.graph_provenance(),
-        )
+        let bookmark = self
+            .graph
+            .create_bookmark(
+                head,
+                label,
+                note,
+                self.principal_id.clone(),
+                self.graph_provenance(),
+            )
+            .ok()?;
+        self.updated_at = Utc::now();
+        Some(bookmark)
+    }
+
+    pub fn checkpoint_current_head(
+        &mut self,
+        label: impl Into<String>,
+        note: Option<String>,
+        tags: Vec<String>,
+    ) -> uuid::Uuid {
+        let checkpoint = self
+            .graph
+            .create_checkpoint(
+                self.graph.primary_branch,
+                label,
+                note,
+                tags,
+                self.principal_id.clone(),
+                self.graph_provenance(),
+            )
+            .expect("session primary branch should exist for checkpoints");
+        self.current_leaf_id = Some(MessageId::from_string(checkpoint.to_string()));
+        self.updated_at = Utc::now();
+        checkpoint
     }
 
     pub fn replay_input(
         &self,
         from_node: Option<crate::graph::NodeId>,
-    ) -> crate::graph::ReplayInput {
+    ) -> SessionResult<crate::graph::ReplayInput> {
         crate::session::ReplayService::replay_input(&self.graph, from_node)
     }
 
-    fn record_message_in_graph(&mut self, message: &SessionMessage) {
+    fn record_message_in_graph(&mut self, message: &SessionMessage) -> SessionResult<()> {
         let branch_id = self.graph.primary_branch;
-        let node_id = uuid::Uuid::parse_str(&message.id.0).unwrap_or_else(|_| uuid::Uuid::new_v4());
+        let node_id = parse_message_node_id(&message.id, "message.id")?;
         let parent_id = message
             .parent_id
             .as_ref()
-            .and_then(|parent| uuid::Uuid::parse_str(&parent.0).ok());
-        let kind = match message.role {
-            Role::User => NodeKind::User,
-            Role::Assistant => NodeKind::Assistant,
-        };
-        let mut tags = Vec::new();
-        if message.is_sidechain {
-            tags.push("sidechain".to_string());
-        }
-        if message.is_compact_summary {
-            tags.push("compact_summary".to_string());
-        }
-        self.graph.append_existing_node(
-            branch_id,
-            node_id,
-            parent_id,
-            kind,
-            tags,
-            serde_json::json!({
-                "role": message.role,
-                "content": message.content,
-                "usage": message.usage,
-            }),
-            message.timestamp,
-            self.principal_id.clone(),
-            self.graph_provenance(),
-        );
+            .map(|parent| parse_message_node_id(parent, "message.parent_id"))
+            .transpose()?;
+        self.graph
+            .append_existing_node(
+                branch_id,
+                node_id,
+                parent_id,
+                graph_node_kind_for_message(message),
+                graph_tags_for_message(message),
+                graph_payload_for_message(message),
+                message.timestamp,
+                self.principal_id.clone(),
+                self.graph_provenance(),
+            )
+            .map_err(|error| SessionError::Storage {
+                message: format!(
+                    "Failed to append message {} to session graph: {}",
+                    message.id, error
+                ),
+            })?;
+        Ok(())
     }
 
     fn graph_provenance(&self) -> Option<NodeProvenance> {
-        let session_type = match &self.session_type {
-            SessionType::Main => "main".to_string(),
-            SessionType::Subagent { .. } => "subagent".to_string(),
-        };
-        let (subagent_type, subagent_description) = match &self.session_type {
-            SessionType::Subagent {
-                agent_type,
-                description,
-            } => (Some(agent_type.clone()), Some(description.clone())),
-            SessionType::Main => (None, None),
-        };
-        Some(NodeProvenance {
-            source_session_id: self.id.to_string(),
-            session_type,
-            task_id: matches!(self.session_type, SessionType::Subagent { .. })
-                .then(|| self.id.to_string()),
-            subagent_session_id: matches!(self.session_type, SessionType::Subagent { .. })
-                .then(|| self.id.to_string()),
-            subagent_type,
-            subagent_description,
-        })
+        build_graph_provenance(self.id, &self.session_type)
     }
 
     fn graph_node_to_session_message(node: &GraphNode) -> Option<SessionMessage> {
@@ -296,7 +314,21 @@ impl Session {
         if let Some(usage) = node.payload.get("usage").cloned() {
             message.usage = serde_json::from_value(usage).ok();
         }
+        if let Some(metadata) = node.payload.get("metadata").cloned() {
+            message.metadata = serde_json::from_value(metadata).unwrap_or_default();
+        }
+        if let Some(environment) = node.payload.get("environment").cloned() {
+            message.environment = serde_json::from_value(environment).ok();
+        }
         Some(message)
+    }
+
+    fn graph_summary(&self) -> Option<String> {
+        self.graph.latest_summary()
+    }
+
+    pub fn refresh_summary_cache(&mut self) {
+        self.summary = self.graph_summary();
     }
 
     /// Convert session messages to API format with default caching (5m TTL).
@@ -408,18 +440,42 @@ impl Session {
     }
 
     pub fn update_summary(&mut self, summary: impl Into<String>) {
-        self.summary = Some(summary.into());
+        let summary = summary.into();
+        self.graph.append_node_with_actor(
+            self.graph.primary_branch,
+            NodeKind::Summary,
+            serde_json::json!({
+                "content": [ContentBlock::text(format!("[Previous conversation summary]\n\n{}", summary))],
+                "summary": summary,
+            }),
+            self.principal_id.clone(),
+            self.graph_provenance(),
+        ).expect("session primary branch should exist when updating summary");
+        self.refresh_summary_cache();
+        self.refresh_message_projection();
         self.updated_at = Utc::now();
     }
 
     pub fn add_user_message(&mut self, content: impl Into<String>) {
         let msg = SessionMessage::user(vec![ContentBlock::text(content.into())]);
-        self.add_message(msg);
+        self.add_message(msg)
+            .expect("internally generated user messages must produce valid graph ids");
     }
 
     pub fn add_assistant_message(&mut self, content: Vec<ContentBlock>, usage: Option<Usage>) {
+        self.add_assistant_message_with_metadata(content, usage, MessageMetadata::default());
+    }
+
+    pub fn add_assistant_message_with_metadata(
+        &mut self,
+        content: Vec<ContentBlock>,
+        usage: Option<Usage>,
+        metadata: MessageMetadata,
+    ) {
         let mut msg = SessionMessage::assistant(content);
+        msg.metadata = metadata;
         if let Some(u) = usage {
+            self.current_input_tokens = u.context_usage() as u64;
             msg = msg.usage(TokenUsage {
                 input_tokens: u.input_tokens as u64,
                 output_tokens: u.output_tokens as u64,
@@ -427,14 +483,40 @@ impl Session {
                 cache_creation_input_tokens: u.cache_creation_input_tokens.unwrap_or(0) as u64,
             });
         }
-        self.add_message(msg);
+        self.add_message(msg)
+            .expect("internally generated assistant messages must produce valid graph ids");
     }
 
     pub fn add_tool_results(&mut self, results: Vec<crate::types::ToolResultBlock>) {
         let content: Vec<ContentBlock> =
             results.into_iter().map(ContentBlock::ToolResult).collect();
         let msg = SessionMessage::user(content);
-        self.add_message(msg);
+        self.add_message(msg)
+            .expect("internally generated tool result messages must produce valid graph ids");
+    }
+
+    pub fn update_latest_assistant_metadata(&mut self, metadata: MessageMetadata) -> bool {
+        let Some(node_id) = self
+            .current_branch_graph_nodes()
+            .into_iter()
+            .rev()
+            .find(|node| matches!(node.kind, NodeKind::Assistant | NodeKind::Summary))
+            .map(|node| node.id)
+        else {
+            return false;
+        };
+
+        let metadata_value = serde_json::to_value(&metadata).unwrap_or_default();
+        if !self
+            .graph
+            .patch_node_metadata(node_id, metadata_value, self.principal_id.clone())
+        {
+            return false;
+        }
+
+        self.refresh_message_projection();
+        self.updated_at = Utc::now();
+        true
     }
 
     pub fn should_compact(&self, max_tokens: u64, threshold: f32) -> bool {
@@ -469,9 +551,116 @@ impl Session {
 
     pub fn refresh_message_projection(&mut self) {
         self.messages = self.current_branch_messages();
-        self.current_leaf_id = self.messages.last().map(|message| message.id.clone());
-        self.updated_at = Utc::now();
+        self.current_leaf_id = self
+            .graph
+            .branch_head(self.graph.primary_branch)
+            .map(|node_id| MessageId::from_string(node_id.to_string()));
     }
+}
+
+pub(crate) fn graph_node_kind_for_message(message: &SessionMessage) -> NodeKind {
+    if message.is_compact_summary {
+        NodeKind::Summary
+    } else {
+        match message.role {
+            Role::User => NodeKind::User,
+            Role::Assistant => NodeKind::Assistant,
+        }
+    }
+}
+
+pub(crate) fn graph_tags_for_message(message: &SessionMessage) -> Vec<String> {
+    let mut tags = Vec::new();
+    if message.is_sidechain {
+        tags.push("sidechain".to_string());
+    }
+    if message.is_compact_summary {
+        tags.push("compact_summary".to_string());
+    }
+    tags
+}
+
+pub(crate) fn graph_payload_for_message(message: &SessionMessage) -> serde_json::Value {
+    let mut payload = serde_json::json!({
+        "role": message.role,
+        "content": message.content,
+        "usage": message.usage,
+        "metadata": message.metadata,
+        "environment": message.environment,
+    });
+    if message.is_compact_summary
+        && let Some(summary) = compact_summary_text(message)
+    {
+        payload["summary"] = serde_json::Value::String(summary);
+    }
+    payload
+}
+
+pub(crate) fn compact_summary_text(message: &SessionMessage) -> Option<String> {
+    let text = message
+        .content
+        .iter()
+        .filter_map(ContentBlock::as_text)
+        .collect::<Vec<_>>()
+        .join("\n");
+    if text.is_empty() {
+        return None;
+    }
+    Some(
+        text.strip_prefix("[Previous conversation summary]\n\n")
+            .unwrap_or(&text)
+            .to_string(),
+    )
+}
+
+pub(crate) fn graph_node_id_for_message(message: &SessionMessage) -> SessionResult<uuid::Uuid> {
+    parse_message_node_id(&message.id, "message.id")
+}
+
+pub(crate) fn graph_parent_node_id_for_message(
+    message: &SessionMessage,
+) -> SessionResult<Option<uuid::Uuid>> {
+    message
+        .parent_id
+        .as_ref()
+        .map(|parent| parse_message_node_id(parent, "message.parent_id"))
+        .transpose()
+}
+
+pub(crate) fn build_graph_provenance(
+    session_id: SessionId,
+    session_type: &SessionType,
+) -> Option<NodeProvenance> {
+    let session_type_label = match session_type {
+        SessionType::Main => "main".to_string(),
+        SessionType::Subagent { .. } => "subagent".to_string(),
+    };
+    let (subagent_type, subagent_description) = match session_type {
+        SessionType::Subagent {
+            agent_type,
+            description,
+        } => (Some(agent_type.clone()), Some(description.clone())),
+        SessionType::Main => (None, None),
+    };
+    Some(NodeProvenance {
+        source_session_id: session_id.to_string(),
+        session_type: session_type_label,
+        task_id: matches!(session_type, SessionType::Subagent { .. })
+            .then(|| session_id.to_string()),
+        subagent_session_id: matches!(session_type, SessionType::Subagent { .. })
+            .then(|| session_id.to_string()),
+        subagent_type,
+        subagent_description,
+    })
+}
+
+fn parse_message_node_id(message_id: &MessageId, field: &str) -> SessionResult<uuid::Uuid> {
+    uuid::Uuid::parse_str(&message_id.0).map_err(|error| SessionError::Storage {
+        message: format!(
+            "Session message {} '{}' is not a valid UUID: {}",
+            field, message_id, error
+        ),
+    })
 }
 
 #[cfg(test)]
@@ -494,7 +683,7 @@ mod tests {
         let mut session = Session::new(SessionConfig::default());
 
         let msg1 = SessionMessage::user(vec![ContentBlock::text("Hello")]);
-        session.add_message(msg1);
+        session.add_message(msg1).unwrap();
 
         assert_eq!(session.current_branch_messages().len(), 1);
         assert!(session.current_leaf_id.is_some());
@@ -502,13 +691,27 @@ mod tests {
     }
 
     #[test]
+    fn test_add_message_rejects_invalid_message_uuid() {
+        let mut session = Session::new(SessionConfig::default());
+        let mut message = SessionMessage::user(vec![ContentBlock::text("Hello")]);
+        message.id = MessageId::from_string("not-a-uuid");
+
+        let error = session.add_message(message).unwrap_err();
+        assert!(matches!(error, SessionError::Storage { .. }));
+    }
+
+    #[test]
     fn test_graph_tracks_message_lineage() {
         let mut session = Session::new(SessionConfig::default());
 
-        session.add_message(SessionMessage::user(vec![ContentBlock::text("Hello")]));
-        session.add_message(SessionMessage::assistant(vec![ContentBlock::text(
-            "Hi there!",
-        )]));
+        session
+            .add_message(SessionMessage::user(vec![ContentBlock::text("Hello")]))
+            .unwrap();
+        session
+            .add_message(SessionMessage::assistant(vec![ContentBlock::text(
+                "Hi there!",
+            )]))
+            .unwrap();
 
         let branch = session.current_branch_graph_nodes();
         assert_eq!(branch.len(), 2);
@@ -523,7 +726,9 @@ mod tests {
     #[test]
     fn test_refresh_message_projection_from_graph() {
         let mut session = Session::new(SessionConfig::default());
-        session.add_message(SessionMessage::user(vec![ContentBlock::text("Hello")]));
+        session
+            .add_message(SessionMessage::user(vec![ContentBlock::text("Hello")]))
+            .unwrap();
         session.clear_messages();
 
         session.refresh_message_projection();
@@ -533,14 +738,47 @@ mod tests {
     }
 
     #[test]
+    fn test_refresh_message_projection_preserves_updated_at() {
+        let mut session = Session::new(SessionConfig::default());
+        session
+            .add_message(SessionMessage::user(vec![ContentBlock::text("Hello")]))
+            .unwrap();
+        let updated_at = session.updated_at;
+        session.clear_messages();
+        session.updated_at = updated_at;
+
+        session.refresh_message_projection();
+
+        assert_eq!(session.updated_at, updated_at);
+    }
+
+    #[test]
+    fn test_compact_summary_message_round_trips_as_summary_node() {
+        let mut session = Session::new(SessionConfig::default());
+        session
+            .add_message(
+                SessionMessage::assistant(vec![ContentBlock::text(
+                    "[Previous conversation summary]\n\nSummary body",
+                )])
+                .as_compact_summary(),
+            )
+            .unwrap();
+
+        let branch = session.current_branch_graph_nodes();
+        assert_eq!(branch.len(), 1);
+        assert_eq!(branch[0].kind, crate::graph::NodeKind::Summary);
+        assert_eq!(session.summary.as_deref(), Some("Summary body"));
+    }
+
+    #[test]
     fn test_message_tree() {
         let mut session = Session::new(SessionConfig::default());
 
         let user_msg = SessionMessage::user(vec![ContentBlock::text("Hello")]);
-        session.add_message(user_msg);
+        session.add_message(user_msg).unwrap();
 
         let assistant_msg = SessionMessage::assistant(vec![ContentBlock::text("Hi there!")]);
-        session.add_message(assistant_msg);
+        session.add_message(assistant_msg).unwrap();
 
         let branch = session.current_branch_messages();
         assert_eq!(branch.len(), 2);
@@ -570,7 +808,7 @@ mod tests {
                 output_tokens: 50,
                 ..Default::default()
             });
-        session.add_message(msg1);
+        session.add_message(msg1).unwrap();
 
         let msg2 =
             SessionMessage::assistant(vec![ContentBlock::text("Response 2")]).usage(TokenUsage {
@@ -578,7 +816,7 @@ mod tests {
                 output_tokens: 75,
                 ..Default::default()
             });
-        session.add_message(msg2);
+        session.add_message(msg2).unwrap();
 
         assert_eq!(session.total_usage.input_tokens, 250);
         assert_eq!(session.total_usage.output_tokens, 125);
@@ -612,9 +850,11 @@ mod tests {
         let mut session = Session::new(SessionConfig::default());
 
         session.add_user_message("First question");
-        session.add_message(SessionMessage::assistant(vec![ContentBlock::text(
-            "First answer",
-        )]));
+        session
+            .add_message(SessionMessage::assistant(vec![ContentBlock::text(
+                "First answer",
+            )]))
+            .unwrap();
         session.add_user_message("Second question");
 
         let messages = session.to_api_messages();
@@ -648,7 +888,9 @@ mod tests {
     #[test]
     fn test_message_caching_assistant_only() {
         let mut session = Session::new(SessionConfig::default());
-        session.add_message(SessionMessage::assistant(vec![ContentBlock::text("Hi")]));
+        session
+            .add_message(SessionMessage::assistant(vec![ContentBlock::text("Hi")]))
+            .unwrap();
 
         let messages = session.to_api_messages();
 

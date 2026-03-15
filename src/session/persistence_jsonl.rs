@@ -1,13 +1,14 @@
-//! JSONL-based persistence backend compatible with Claude Code CLI.
+//! JSONL-based persistence backend for inspectable local session archives.
 //!
-//! This module provides file-based session persistence using the JSONL (JSON Lines) format,
-//! matching the Claude Code CLI's storage format for full interoperability.
+//! This module provides file-based session persistence using the JSONL (JSON Lines) format.
+//! Graph events are the canonical durable state; message projections are always rebuilt from
+//! graph state on load.
 //!
 //! # Features
 //!
-//! - **Claude Code CLI Compatible**: Uses the same file structure and format as the official CLI
-//! - **DAG Structure**: Messages form a directed acyclic graph via parent_uuid references
-//! - **Incremental Writes**: Only new entries are appended, avoiding full file rewrites
+//! - **Graph-Canonical**: Graph events are the durable source of truth
+//! - **DAG Structure**: Conversation state is reconstructed from graph events
+//! - **Incremental Writes**: Only graph and metadata entries are appended, avoiding full rewrites
 //! - **Project-Based Organization**: Sessions organized by encoded project paths
 //! - **Async I/O**: Non-blocking file operations via tokio
 //!
@@ -30,16 +31,19 @@ use std::sync::Arc;
 use chrono::{DateTime, Utc};
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
-use tokio::sync::RwLock;
+use tokio::sync::{Mutex, RwLock};
 use uuid::Uuid;
 
-use super::state::{MessageId, Session, SessionConfig, SessionId, SessionMessage, SessionType};
-use super::types::{
-    CompactRecord, Plan, QueueItem, QueueOperation, QueueStatus, SummarySnapshot, TodoItem,
+use super::archive::verify_restored_session_roundtrip;
+use super::state::{
+    MessageId, Session, SessionConfig, SessionId, SessionMessage, SessionType,
+    build_graph_provenance, graph_node_id_for_message, graph_node_kind_for_message,
+    graph_parent_node_id_for_message, graph_payload_for_message, graph_tags_for_message,
 };
+use super::types::{CompactRecord, Plan, QueueItem, QueueOperation, QueueStatus, TodoItem};
 use super::{Persistence, SessionError, SessionResult};
-use crate::graph::{GraphEvent, GraphMaterializer};
-use crate::types::{ContentBlock, Role, TokenUsage};
+use crate::graph::{GraphEvent, GraphMaterializer, GraphValidator, SessionGraph};
+use crate::types::TokenUsage;
 
 // ============================================================================
 // Enum Serialization Helpers (consistent with persistence_postgres.rs)
@@ -55,6 +59,50 @@ fn enum_to_jsonl<T: serde::Serialize>(value: &T, default: &str) -> String {
 /// Deserialize an enum from its serde string representation in JSONL storage.
 fn jsonl_to_enum<T: serde::de::DeserializeOwned>(s: &str) -> Option<T> {
     serde_json::from_str(&format!("\"{}\"", s)).ok()
+}
+
+fn project_path_from_graph_event(event: &GraphEvent) -> Option<PathBuf> {
+    match &event.body {
+        crate::graph::GraphEventBody::NodeAppended { payload, .. } => payload
+            .get("environment")
+            .and_then(|environment| environment.get("cwd"))
+            .and_then(serde_json::Value::as_str)
+            .map(PathBuf::from),
+        _ => None,
+    }
+}
+
+fn validate_graph(session_id: &SessionId, graph: &SessionGraph) -> SessionResult<()> {
+    let report = GraphValidator::validate(graph);
+    if report.is_valid() {
+        return Ok(());
+    }
+
+    let issues = report
+        .issues
+        .into_iter()
+        .map(|issue| format!("{}: {}", issue.code, issue.message))
+        .collect::<Vec<_>>()
+        .join("; ");
+    Err(SessionError::Storage {
+        message: format!("Invalid graph for session {}: {}", session_id, issues),
+    })
+}
+
+fn parse_auxiliary_uuid(session_id: &SessionId, entry_type: &str, raw_id: &str) -> Option<Uuid> {
+    match Uuid::parse_str(raw_id) {
+        Ok(id) => Some(id),
+        Err(error) => {
+            tracing::warn!(
+                session_id = %session_id,
+                entry_type,
+                raw_id,
+                error = %error,
+                "Skipping JSONL entry with invalid UUID"
+            );
+            None
+        }
+    }
 }
 
 // ============================================================================
@@ -154,23 +202,20 @@ impl JsonlConfigBuilder {
 }
 
 // ============================================================================
-// JSONL Entry Types (Claude Code CLI Compatible)
+// JSONL Entry Types
 // ============================================================================
 
-/// JSONL entry types matching Claude Code CLI format.
+/// Graph-first JSONL entry types for local session persistence.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum JsonlEntry {
-    User(UserEntry),
-    Assistant(AssistantEntry),
     GraphEvent(GraphEventEntry),
-    Bookmark(BookmarkEntry),
-    Checkpoint(CheckpointEntry),
-    System(SystemEntry),
+    QueueReset(ResetEntry),
     QueueOperation(QueueOperationEntry),
-    Summary(SummaryEntry),
     SessionMeta(SessionMetaEntry),
+    TodoReset(ResetEntry),
     Todo(TodoEntry),
+    PlanReset(ResetEntry),
     Plan(PlanEntry),
     Compact(CompactEntry),
 }
@@ -184,106 +229,7 @@ pub struct GraphEventEntry {
     pub event: GraphEvent,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct BookmarkEntry {
-    #[serde(rename = "sessionId")]
-    pub session_id: String,
-    pub id: String,
-    #[serde(rename = "nodeId")]
-    pub node_id: String,
-    #[serde(rename = "branchId")]
-    pub branch_id: String,
-    pub label: String,
-    pub note: Option<String>,
-    #[serde(rename = "principalId", skip_serializing_if = "Option::is_none")]
-    pub principal_id: Option<String>,
-    #[serde(rename = "createdAt")]
-    pub created_at: DateTime<Utc>,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct CheckpointEntry {
-    #[serde(rename = "sessionId")]
-    pub session_id: String,
-    pub id: String,
-    #[serde(rename = "branchId")]
-    pub branch_id: String,
-    pub label: String,
-    pub note: Option<String>,
-    pub tags: Vec<String>,
-    #[serde(rename = "principalId", skip_serializing_if = "Option::is_none")]
-    pub principal_id: Option<String>,
-    #[serde(rename = "createdAt")]
-    pub created_at: DateTime<Utc>,
-}
-
-/// Common fields shared by message entries.
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct EntryCommon {
-    pub uuid: String,
-    #[serde(rename = "parentUuid", skip_serializing_if = "Option::is_none")]
-    pub parent_uuid: Option<String>,
-    #[serde(rename = "sessionId")]
-    pub session_id: String,
-    pub timestamp: DateTime<Utc>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub cwd: Option<PathBuf>,
-    pub version: String,
-    #[serde(rename = "gitBranch", default)]
-    pub git_branch: String,
-    #[serde(rename = "isSidechain", default)]
-    pub is_sidechain: bool,
-}
-
-impl EntryCommon {
-    fn from_message(session_id: &SessionId, msg: &SessionMessage) -> Self {
-        Self {
-            uuid: msg.id.to_string(),
-            parent_uuid: msg.parent_id.as_ref().map(|id| id.to_string()),
-            session_id: session_id.to_string(),
-            timestamp: msg.timestamp,
-            cwd: msg.environment.as_ref().and_then(|e| e.cwd.clone()),
-            version: env!("CARGO_PKG_VERSION").to_string(),
-            git_branch: msg
-                .environment
-                .as_ref()
-                .and_then(|e| e.git_branch.clone())
-                .unwrap_or_default(),
-            is_sidechain: msg.is_sidechain,
-        }
-    }
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct UserMessageContent {
-    pub role: String,
-    pub content: serde_json::Value,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct UserEntry {
-    #[serde(flatten)]
-    pub common: EntryCommon,
-    pub message: UserMessageContent,
-    #[serde(rename = "isCompactSummary", default)]
-    pub is_compact_summary: bool,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct AssistantMessageContent {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub id: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub model: Option<String>,
-    pub role: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub stop_reason: Option<String>,
-    pub content: serde_json::Value,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub usage: Option<UsageInfo>,
-}
-
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct UsageInfo {
     pub input_tokens: u64,
     pub output_tokens: u64,
@@ -316,24 +262,6 @@ impl From<&UsageInfo> for TokenUsage {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct AssistantEntry {
-    #[serde(flatten)]
-    pub common: EntryCommon,
-    pub message: AssistantMessageContent,
-    #[serde(rename = "requestId", skip_serializing_if = "Option::is_none")]
-    pub request_id: Option<String>,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct SystemEntry {
-    #[serde(flatten)]
-    pub common: EntryCommon,
-    pub subtype: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub content: Option<String>,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct QueueOperationEntry {
     pub operation: String,
     #[serde(rename = "sessionId")]
@@ -346,19 +274,18 @@ pub struct QueueOperationEntry {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct SummaryEntry {
+pub struct ResetEntry {
     #[serde(rename = "sessionId")]
     pub session_id: String,
-    pub summary: String,
-    #[serde(rename = "leafUuid", skip_serializing_if = "Option::is_none")]
-    pub leaf_uuid: Option<String>,
     pub timestamp: DateTime<Utc>,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct SessionMetaEntry {
     #[serde(rename = "sessionId")]
     pub session_id: String,
+    #[serde(rename = "projectPath", skip_serializing_if = "Option::is_none")]
+    pub project_path: Option<PathBuf>,
     #[serde(rename = "parentSessionId", skip_serializing_if = "Option::is_none")]
     pub parent_session_id: Option<String>,
     #[serde(rename = "tenantId", skip_serializing_if = "Option::is_none")]
@@ -371,7 +298,7 @@ pub struct SessionMetaEntry {
     pub state: String,
     pub config: serde_json::Value,
     #[serde(rename = "permissionPolicy")]
-    pub permission_policy: serde_json::Value,
+    pub authorization_policy: serde_json::Value,
     #[serde(rename = "totalUsage", default)]
     pub total_usage: UsageInfo,
     #[serde(rename = "totalCostUsd", default)]
@@ -451,64 +378,13 @@ pub struct CompactEntry {
     pub created_at: DateTime<Utc>,
 }
 
-// ============================================================================
-// Conversion: SessionMessage <-> JsonlEntry
-// ============================================================================
-
 impl JsonlEntry {
-    fn from_message(session_id: &SessionId, msg: &SessionMessage) -> Self {
-        let common = EntryCommon::from_message(session_id, msg);
-
-        let serialize_content = |content: &[ContentBlock]| -> serde_json::Value {
-            serde_json::to_value(content).unwrap_or_else(|e| {
-                tracing::warn!(
-                    session_id = %session_id,
-                    error = %e,
-                    "Failed to serialize message content, using empty array"
-                );
-                serde_json::Value::Array(Vec::new())
-            })
-        };
-
-        match msg.role {
-            Role::User => JsonlEntry::User(UserEntry {
-                common,
-                message: UserMessageContent {
-                    role: "user".to_string(),
-                    content: serialize_content(&msg.content),
-                },
-                is_compact_summary: msg.is_compact_summary,
-            }),
-            Role::Assistant => JsonlEntry::Assistant(AssistantEntry {
-                common,
-                message: AssistantMessageContent {
-                    id: msg.metadata.request_id.clone(),
-                    model: msg.metadata.model.clone(),
-                    role: "assistant".to_string(),
-                    stop_reason: None,
-                    content: serialize_content(&msg.content),
-                    usage: msg.usage.as_ref().map(UsageInfo::from),
-                },
-                request_id: msg.metadata.request_id.clone(),
-            }),
-        }
-    }
-
     fn from_graph_event(session_id: &SessionId, event: &GraphEvent) -> Self {
         JsonlEntry::GraphEvent(GraphEventEntry {
             session_id: session_id.to_string(),
             event_id: event.metadata.id.to_string(),
             event: event.clone(),
         })
-    }
-
-    #[cfg(test)]
-    fn message_uuid(&self) -> Option<&str> {
-        match self {
-            JsonlEntry::User(e) => Some(&e.common.uuid),
-            JsonlEntry::Assistant(e) => Some(&e.common.uuid),
-            _ => None,
-        }
     }
 
     #[cfg(test)]
@@ -531,9 +407,12 @@ struct SessionMeta {
     tenant_id: Option<String>,
     updated_at: DateTime<Utc>,
     expires_at: Option<DateTime<Utc>>,
+    last_session_meta: Option<SessionMetaEntry>,
     persisted_ids: HashSet<String>,
     todos_hash: u64,
     plan_hash: u64,
+    current_leaf_id: Option<MessageId>,
+    primary_branch_id: Option<Uuid>,
 }
 
 #[derive(Default)]
@@ -668,6 +547,139 @@ fn append_entries_sync(path: &Path, entries: &[JsonlEntry], sync: bool) -> Sessi
     Ok(())
 }
 
+fn write_entries_to_temp_sync(
+    path: &Path,
+    entries: &[JsonlEntry],
+    sync: bool,
+) -> SessionResult<PathBuf> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| SessionError::Storage {
+            message: format!("Failed to create directory {}: {}", parent.display(), e),
+        })?;
+    }
+
+    let temp_path = path.with_file_name(format!(
+        ".{}.restore-{}",
+        path.file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("session.jsonl"),
+        Uuid::new_v4()
+    ));
+
+    let write_result = (|| -> SessionResult<PathBuf> {
+        let file = std::fs::OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(&temp_path)
+            .map_err(|e| SessionError::Storage {
+                message: format!(
+                    "Failed to open {} for atomic restore write: {}",
+                    temp_path.display(),
+                    e
+                ),
+            })?;
+
+        let mut writer = std::io::BufWriter::with_capacity(64 * 1024, file);
+        for entry in entries {
+            serde_json::to_writer(&mut writer, entry)?;
+            writeln!(writer).map_err(|e| SessionError::Storage {
+                message: format!("Write failed: {}", e),
+            })?;
+        }
+
+        writer.flush().map_err(|e| SessionError::Storage {
+            message: format!("Flush failed: {}", e),
+        })?;
+
+        let file = writer.into_inner().map_err(|e| SessionError::Storage {
+            message: format!("Buffer error: {}", e.error()),
+        })?;
+
+        if sync {
+            file.sync_all().map_err(|e| SessionError::Storage {
+                message: format!("Sync failed: {}", e),
+            })?;
+        }
+
+        Ok(temp_path.clone())
+    })();
+
+    if write_result.is_err() {
+        let _ = std::fs::remove_file(&temp_path);
+    }
+
+    write_result
+}
+
+fn publish_temp_file_no_overwrite(temp_path: &Path, path: &Path, sync: bool) -> SessionResult<()> {
+    std::fs::hard_link(temp_path, path).map_err(|e| SessionError::Storage {
+        message: format!(
+            "Failed to publish restored JSONL session {} from {} without overwrite: {}",
+            path.display(),
+            temp_path.display(),
+            e
+        ),
+    })?;
+
+    if sync && let Some(parent) = path.parent() {
+        std::fs::File::open(parent)
+            .map_err(|e| SessionError::Storage {
+                message: format!(
+                    "Failed to open parent directory {} for sync: {}",
+                    parent.display(),
+                    e
+                ),
+            })?
+            .sync_all()
+            .map_err(|e| SessionError::Storage {
+                message: format!(
+                    "Failed to sync parent directory {}: {}",
+                    parent.display(),
+                    e
+                ),
+            })?;
+    }
+
+    if let Err(error) = std::fs::remove_file(temp_path) {
+        tracing::warn!(
+            path = %temp_path.display(),
+            error = %error,
+            "Failed to remove temporary JSONL restore file"
+        );
+    }
+
+    if sync && let Some(parent) = path.parent() {
+        std::fs::File::open(parent)
+            .map_err(|e| SessionError::Storage {
+                message: format!(
+                    "Failed to open parent directory {} for sync: {}",
+                    parent.display(),
+                    e
+                ),
+            })?
+            .sync_all()
+            .map_err(|e| SessionError::Storage {
+                message: format!(
+                    "Failed to sync parent directory {}: {}",
+                    parent.display(),
+                    e
+                ),
+            })?;
+    }
+
+    Ok(())
+}
+
+#[cfg(test)]
+fn write_entries_sync_atomic(path: &Path, entries: &[JsonlEntry], sync: bool) -> SessionResult<()> {
+    let temp_path = write_entries_to_temp_sync(path, entries, sync)?;
+    let publish_result = publish_temp_file_no_overwrite(&temp_path, path, sync);
+    if publish_result.is_err() {
+        let _ = std::fs::remove_file(&temp_path);
+    }
+    publish_result
+}
+
 // ============================================================================
 // JSONL Persistence Implementation
 // ============================================================================
@@ -675,8 +687,8 @@ fn append_entries_sync(path: &Path, entries: &[JsonlEntry], sync: bool) -> Sessi
 pub struct JsonlPersistence {
     config: JsonlConfig,
     index: Arc<RwLock<SessionIndex>>,
-    summaries: Arc<RwLock<HashMap<SessionId, Vec<SummarySnapshot>>>>,
     queue: Arc<RwLock<HashMap<SessionId, Vec<QueueItem>>>>,
+    mutation_lock: Arc<Mutex<()>>,
 }
 
 impl JsonlPersistence {
@@ -690,8 +702,8 @@ impl JsonlPersistence {
         let persistence = Self {
             config,
             index: Arc::new(RwLock::new(SessionIndex::default())),
-            summaries: Arc::new(RwLock::new(HashMap::new())),
             queue: Arc::new(RwLock::new(HashMap::new())),
+            mutation_lock: Arc::new(Mutex::new(())),
         };
 
         persistence.rebuild_index().await?;
@@ -709,7 +721,6 @@ impl JsonlPersistence {
         }
 
         let mut index = self.index.write().await;
-        let mut summaries = self.summaries.write().await;
         let mut queue = self.queue.write().await;
 
         let mut entries =
@@ -770,13 +781,10 @@ impl JsonlPersistence {
                         message: format!("Task join error: {}", e),
                     })??;
 
-                let (meta, session_summaries, session_queue) =
+                let (meta, session_queue) =
                     Self::parse_file_metadata(session_id, file_path, &parsed);
 
                 index.insert(session_id, meta);
-                if !session_summaries.is_empty() {
-                    summaries.insert(session_id, session_summaries);
-                }
                 if !session_queue.is_empty() {
                     queue.insert(session_id, session_queue);
                 }
@@ -790,53 +798,41 @@ impl JsonlPersistence {
         session_id: SessionId,
         path: PathBuf,
         entries: &[JsonlEntry],
-    ) -> (SessionMeta, Vec<SummarySnapshot>, Vec<QueueItem>) {
+    ) -> (SessionMeta, Vec<QueueItem>) {
         let mut project_path: Option<PathBuf> = None;
         let mut tenant_id: Option<String> = None;
         let mut updated_at = Utc::now();
         let mut expires_at: Option<DateTime<Utc>> = None;
-        let mut summaries = Vec::new();
+        let mut last_session_meta: Option<SessionMetaEntry> = None;
         let mut queue_items: HashMap<String, QueueItem> = HashMap::new();
+        let mut queue_order: Vec<String> = Vec::new();
         let mut persisted_ids = HashSet::with_capacity(entries.len());
+        let mut todos_map: HashMap<String, TodoItem> = HashMap::new();
+        let mut latest_plan: Option<Plan> = None;
+        let mut current_leaf_id: Option<MessageId> = None;
+        let mut primary_branch_id: Option<Uuid> = None;
 
         for entry in entries {
             match entry {
-                JsonlEntry::User(e) => {
-                    if project_path.is_none() {
-                        project_path = e.common.cwd.clone();
-                    }
-                    updated_at = e.common.timestamp;
-                    persisted_ids.insert(e.common.uuid.clone());
-                }
-                JsonlEntry::Assistant(e) => {
-                    if project_path.is_none() {
-                        project_path = e.common.cwd.clone();
-                    }
-                    updated_at = e.common.timestamp;
-                    persisted_ids.insert(e.common.uuid.clone());
-                }
                 JsonlEntry::GraphEvent(e) => {
+                    if project_path.is_none() {
+                        project_path = project_path_from_graph_event(&e.event);
+                    }
+                    updated_at = updated_at.max(e.event.metadata.occurred_at);
                     persisted_ids.insert(format!("graph:{}", e.event_id));
-                }
-                JsonlEntry::Bookmark(e) => {
-                    persisted_ids.insert(format!("bookmark:{}", e.id));
-                }
-                JsonlEntry::Checkpoint(e) => {
-                    persisted_ids.insert(format!("checkpoint:{}", e.id));
+                    if primary_branch_id.is_none() {
+                        primary_branch_id = Self::primary_branch_from_event(&e.event);
+                    }
+                    if let Some(leaf_id) = Self::current_leaf_from_event(&e.event) {
+                        current_leaf_id = Some(leaf_id);
+                    }
                 }
                 JsonlEntry::SessionMeta(m) => {
+                    project_path.clone_from(&m.project_path);
                     tenant_id.clone_from(&m.tenant_id);
                     updated_at = m.updated_at;
                     expires_at = m.expires_at;
-                }
-                JsonlEntry::Summary(s) => {
-                    summaries.push(SummarySnapshot {
-                        id: Uuid::new_v4(),
-                        session_id,
-                        summary: s.summary.clone(),
-                        leaf_message_id: s.leaf_uuid.as_ref().map(MessageId::from_string),
-                        created_at: s.timestamp,
-                    });
+                    last_session_meta = Some(m.clone());
                 }
                 JsonlEntry::QueueOperation(q) => {
                     let item_id = match Uuid::parse_str(&q.item_id) {
@@ -845,6 +841,9 @@ impl JsonlPersistence {
                     };
                     match q.operation.as_str() {
                         "enqueue" => {
+                            if !queue_items.contains_key(&q.item_id) {
+                                queue_order.push(q.item_id.clone());
+                            }
                             queue_items.insert(
                                 q.item_id.clone(),
                                 QueueItem {
@@ -874,11 +873,63 @@ impl JsonlPersistence {
                         _ => {}
                     }
                 }
+                JsonlEntry::QueueReset(_) => {
+                    queue_items.clear();
+                    queue_order.clear();
+                }
+                JsonlEntry::Todo(t) => {
+                    let Some(todo_id) = parse_auxiliary_uuid(&session_id, "todo", &t.id) else {
+                        continue;
+                    };
+                    todos_map.insert(
+                        t.id.clone(),
+                        TodoItem {
+                            id: todo_id,
+                            session_id,
+                            content: t.content.clone(),
+                            active_form: t.active_form.clone(),
+                            status: jsonl_to_enum(&t.status).unwrap_or_default(),
+                            plan_id: t.plan_id.as_ref().and_then(|s| Uuid::parse_str(s).ok()),
+                            created_at: t.created_at,
+                            started_at: t.started_at,
+                            completed_at: t.completed_at,
+                        },
+                    );
+                }
+                JsonlEntry::TodoReset(_) => {
+                    todos_map.clear();
+                }
+                JsonlEntry::Plan(p) => {
+                    let Some(plan_id) = parse_auxiliary_uuid(&session_id, "plan", &p.id) else {
+                        continue;
+                    };
+                    latest_plan = Some(Plan {
+                        id: plan_id,
+                        session_id,
+                        name: p.name.clone(),
+                        content: p.content.clone(),
+                        status: jsonl_to_enum(&p.status).unwrap_or_default(),
+                        error: p.error.clone(),
+                        created_at: p.created_at,
+                        approved_at: p.approved_at,
+                        started_at: p.started_at,
+                        completed_at: p.completed_at,
+                    });
+                }
+                JsonlEntry::PlanReset(_) => {
+                    latest_plan = None;
+                }
                 _ => {}
             }
         }
 
-        let queue: Vec<QueueItem> = queue_items.into_values().collect();
+        let queue: Vec<QueueItem> = queue_order
+            .into_iter()
+            .filter_map(|item_id| queue_items.remove(&item_id))
+            .collect();
+        let todos: Vec<TodoItem> = todos_map.into_values().collect();
+        let todos_hash = Self::compute_todos_hash(&todos);
+        let plan_hash = Self::compute_plan_hash(latest_plan.as_ref());
 
         (
             SessionMeta {
@@ -887,11 +938,13 @@ impl JsonlPersistence {
                 tenant_id,
                 updated_at,
                 expires_at,
+                last_session_meta,
                 persisted_ids,
-                todos_hash: 0,
-                plan_hash: 0,
+                todos_hash,
+                plan_hash,
+                current_leaf_id,
+                primary_branch_id,
             },
-            summaries,
             queue,
         )
     }
@@ -906,10 +959,192 @@ impl JsonlPersistence {
 
     fn get_project_path(session: &Session) -> Option<PathBuf> {
         session
-            .messages
+            .current_branch_messages()
             .first()
             .and_then(|m| m.environment.as_ref())
             .and_then(|e| e.cwd.clone())
+    }
+
+    fn project_path_from_message(message: &SessionMessage) -> Option<PathBuf> {
+        message
+            .environment
+            .as_ref()
+            .and_then(|environment| environment.cwd.clone())
+    }
+
+    fn primary_branch_from_event(event: &GraphEvent) -> Option<Uuid> {
+        match &event.body {
+            crate::graph::GraphEventBody::NodeAppended { branch_id, .. }
+            | crate::graph::GraphEventBody::BranchForked { branch_id, .. }
+            | crate::graph::GraphEventBody::CheckpointCreated { branch_id, .. }
+            | crate::graph::GraphEventBody::BookmarkCreated { branch_id, .. } => Some(*branch_id),
+            crate::graph::GraphEventBody::NodeMetadataPatched { .. } => None,
+        }
+    }
+
+    fn current_leaf_from_event(event: &GraphEvent) -> Option<MessageId> {
+        match &event.body {
+            crate::graph::GraphEventBody::NodeAppended { node_id, .. } => {
+                Some(MessageId::from_string(node_id.to_string()))
+            }
+            crate::graph::GraphEventBody::CheckpointCreated { checkpoint_id, .. } => {
+                Some(MessageId::from_string(checkpoint_id.to_string()))
+            }
+            crate::graph::GraphEventBody::NodeMetadataPatched { .. } => None,
+            _ => None,
+        }
+    }
+
+    fn usage_info_with_increment(base: &UsageInfo, usage: &Option<TokenUsage>) -> UsageInfo {
+        let mut next = base.clone();
+        if let Some(usage) = usage {
+            next.input_tokens += usage.input_tokens;
+            next.output_tokens += usage.output_tokens;
+            next.cache_creation_input_tokens += usage.cache_creation_input_tokens;
+            next.cache_read_input_tokens += usage.cache_read_input_tokens;
+        }
+        next
+    }
+
+    async fn append_entries(&self, path: PathBuf, entries: Vec<JsonlEntry>) -> SessionResult<()> {
+        let sync = self.config.sync_mode == SyncMode::OnWrite;
+        tokio::task::spawn_blocking(move || append_entries_sync(&path, &entries, sync))
+            .await
+            .map_err(|e| SessionError::Storage {
+                message: format!("Task join error: {}", e),
+            })??;
+        Ok(())
+    }
+
+    fn normalized_pending_queue(session_id: SessionId, items: &[QueueItem]) -> Vec<QueueItem> {
+        items
+            .iter()
+            .cloned()
+            .map(|mut item| {
+                item.session_id = session_id;
+                item.status = QueueStatus::Pending;
+                item.processed_at = None;
+                item
+            })
+            .collect()
+    }
+
+    fn snapshot_entries(
+        session: &Session,
+        project_path: Option<PathBuf>,
+        pending_queue: &[QueueItem],
+    ) -> Vec<JsonlEntry> {
+        let mut entries = Vec::new();
+        entries.push(Self::session_to_meta_entry(session, project_path));
+        entries.extend(
+            session
+                .graph
+                .events
+                .iter()
+                .map(|event| JsonlEntry::from_graph_event(&session.id, event)),
+        );
+        entries.extend(session.todos.iter().map(|todo| {
+            JsonlEntry::Todo(TodoEntry {
+                id: todo.id.to_string(),
+                session_id: session.id.to_string(),
+                content: todo.content.clone(),
+                active_form: todo.active_form.clone(),
+                status: enum_to_jsonl(&todo.status, "pending"),
+                plan_id: todo.plan_id.map(|id| id.to_string()),
+                created_at: todo.created_at,
+                started_at: todo.started_at,
+                completed_at: todo.completed_at,
+            })
+        }));
+        if let Some(plan) = &session.current_plan {
+            entries.push(JsonlEntry::Plan(PlanEntry {
+                id: plan.id.to_string(),
+                session_id: session.id.to_string(),
+                name: plan.name.clone(),
+                content: plan.content.clone(),
+                status: enum_to_jsonl(&plan.status, "draft"),
+                error: plan.error.clone(),
+                created_at: plan.created_at,
+                approved_at: plan.approved_at,
+                started_at: plan.started_at,
+                completed_at: plan.completed_at,
+            }));
+        }
+        entries.extend(session.compact_history.iter().map(|compact| {
+            JsonlEntry::Compact(CompactEntry {
+                id: compact.id.to_string(),
+                session_id: session.id.to_string(),
+                trigger: enum_to_jsonl(&compact.trigger, "manual"),
+                pre_tokens: compact.pre_tokens,
+                post_tokens: compact.post_tokens,
+                saved_tokens: compact.saved_tokens,
+                summary: compact.summary.clone(),
+                original_count: compact.original_count,
+                new_count: compact.new_count,
+                logical_parent_id: compact.logical_parent_id.as_ref().map(|id| id.to_string()),
+                created_at: compact.created_at,
+            })
+        }));
+        if !pending_queue.is_empty() {
+            entries.push(JsonlEntry::QueueReset(ResetEntry {
+                session_id: session.id.to_string(),
+                timestamp: session.updated_at,
+            }));
+            entries.extend(pending_queue.iter().map(|item| {
+                JsonlEntry::QueueOperation(QueueOperationEntry {
+                    operation: "enqueue".to_string(),
+                    session_id: session.id.to_string(),
+                    timestamp: item.created_at,
+                    content: item.content.clone(),
+                    priority: item.priority,
+                    item_id: item.id.to_string(),
+                })
+            }));
+        }
+        entries
+    }
+
+    async fn fallback_append_graph_event(
+        &self,
+        session_id: &SessionId,
+        event: GraphEvent,
+    ) -> SessionResult<()> {
+        let mut session = self
+            .load(session_id)
+            .await?
+            .ok_or_else(|| SessionError::NotFound {
+                id: session_id.to_string(),
+            })?;
+        let graph_id = session.graph.id;
+        let created_at = session.graph.created_at;
+        let primary_branch = session.graph.primary_branch;
+        session.graph.events.push(event.clone());
+        session.graph = GraphMaterializer::from_events_with_primary(
+            &session.graph.events,
+            Some(primary_branch),
+        );
+        session.graph.id = graph_id;
+        session.graph.created_at = created_at;
+        session.refresh_summary_cache();
+        session.refresh_message_projection();
+        session.updated_at = event.metadata.occurred_at;
+
+        self.save_inner(&session).await
+    }
+
+    async fn fallback_add_message(
+        &self,
+        session_id: &SessionId,
+        message: SessionMessage,
+    ) -> SessionResult<()> {
+        let mut session = self
+            .load(session_id)
+            .await?
+            .ok_or_else(|| SessionError::NotFound {
+                id: session_id.to_string(),
+            })?;
+        session.add_message(message)?;
+        self.save_inner(&session).await
     }
 
     /// Compute a stable hash of todos for change detection.
@@ -938,7 +1173,7 @@ impl JsonlPersistence {
         hasher.finish()
     }
 
-    fn session_to_meta_entry(session: &Session) -> JsonlEntry {
+    fn session_to_meta_entry(session: &Session, project_path: Option<PathBuf>) -> JsonlEntry {
         let warn_serialize = |field: &str, e: serde_json::Error| -> serde_json::Value {
             tracing::warn!(
                 session_id = %session.id,
@@ -951,6 +1186,7 @@ impl JsonlPersistence {
 
         JsonlEntry::SessionMeta(SessionMetaEntry {
             session_id: session.id.to_string(),
+            project_path,
             parent_session_id: session.parent_id.map(|p| p.to_string()),
             tenant_id: session.tenant_id.clone(),
             principal_id: session.principal_id.clone(),
@@ -960,8 +1196,8 @@ impl JsonlPersistence {
             state: enum_to_jsonl(&session.state, "created"),
             config: serde_json::to_value(&session.config)
                 .unwrap_or_else(|e| warn_serialize("config", e)),
-            permission_policy: serde_json::to_value(&session.permissions)
-                .unwrap_or_else(|e| warn_serialize("permissions", e)),
+            authorization_policy: serde_json::to_value(&session.authorization)
+                .unwrap_or_else(|e| warn_serialize("authorization", e)),
             total_usage: UsageInfo::from(&session.total_usage),
             total_cost_usd: session.total_cost_usd,
             static_context_hash: session.static_context_hash.clone(),
@@ -972,202 +1208,39 @@ impl JsonlPersistence {
         })
     }
 
-    fn reconstruct_session(session_id: SessionId, entries: Vec<JsonlEntry>) -> Session {
-        let mut session = Session::new(SessionConfig::default());
-        session.id = session_id;
-
-        let mut todos_map: HashMap<String, TodoItem> = HashMap::new();
-        let mut latest_plan: Option<Plan> = None;
-        let mut compacts: Vec<CompactRecord> = Vec::new();
-        let mut graph_events: Vec<GraphEvent> = Vec::new();
-        let mut bookmarks: Vec<BookmarkEntry> = Vec::new();
-        let mut checkpoints: Vec<CheckpointEntry> = Vec::new();
-
-        for entry in entries {
-            match entry {
-                JsonlEntry::User(_) | JsonlEntry::Assistant(_) => {}
-                JsonlEntry::SessionMeta(m) => {
-                    session.tenant_id = m.tenant_id;
-                    session.principal_id = m.principal_id;
-                    session.parent_id = m
-                        .parent_session_id
-                        .as_ref()
-                        .and_then(|s| SessionId::parse(s));
-                    session.session_type =
-                        serde_json::from_value(m.session_type).unwrap_or(SessionType::Main);
-                    // m.mode is ignored; SessionMode was removed (always stateless)
-                    session.state = jsonl_to_enum(&m.state).unwrap_or_default();
-                    session.config = serde_json::from_value(m.config).unwrap_or_else(|e| {
-                        tracing::warn!(
-                            session_id = %session_id,
-                            error = %e,
-                            "Failed to deserialize session config, using default"
-                        );
-                        Default::default()
-                    });
-                    session.permissions = serde_json::from_value(m.permission_policy)
-                        .unwrap_or_else(|e| {
-                            tracing::warn!(
-                                session_id = %session_id,
-                                error = %e,
-                                "Failed to deserialize session permissions, using default"
-                            );
-                            Default::default()
-                        });
-                    session.total_usage = TokenUsage::from(&m.total_usage);
-                    session.total_cost_usd = m.total_cost_usd;
-                    session.static_context_hash = m.static_context_hash;
-                    session.error = m.error;
-                    session.created_at = m.created_at;
-                    session.updated_at = m.updated_at;
-                    session.expires_at = m.expires_at;
-                }
-                JsonlEntry::Summary(s) => {
-                    session.summary = Some(s.summary);
-                }
-                JsonlEntry::Todo(t) => {
-                    let todo = TodoItem {
-                        id: Uuid::parse_str(&t.id).unwrap_or_else(|_| Uuid::new_v4()),
-                        session_id,
-                        content: t.content,
-                        active_form: t.active_form,
-                        status: jsonl_to_enum(&t.status).unwrap_or_default(),
-                        plan_id: t.plan_id.and_then(|s| Uuid::parse_str(&s).ok()),
-                        created_at: t.created_at,
-                        started_at: t.started_at,
-                        completed_at: t.completed_at,
-                    };
-                    // Use map to get latest version of each todo
-                    todos_map.insert(t.id, todo);
-                }
-                JsonlEntry::Plan(p) => {
-                    let plan = Plan {
-                        id: Uuid::parse_str(&p.id).unwrap_or_else(|_| Uuid::new_v4()),
-                        session_id,
-                        name: p.name,
-                        content: p.content,
-                        status: jsonl_to_enum(&p.status).unwrap_or_default(),
-                        error: p.error,
-                        created_at: p.created_at,
-                        approved_at: p.approved_at,
-                        started_at: p.started_at,
-                        completed_at: p.completed_at,
-                    };
-                    // Keep the latest plan entry
-                    latest_plan = Some(plan);
-                }
-                JsonlEntry::Compact(c) => {
-                    compacts.push(CompactRecord {
-                        id: Uuid::parse_str(&c.id).unwrap_or_else(|_| Uuid::new_v4()),
-                        session_id,
-                        trigger: jsonl_to_enum(&c.trigger).unwrap_or_default(),
-                        pre_tokens: c.pre_tokens,
-                        post_tokens: c.post_tokens,
-                        saved_tokens: c.saved_tokens,
-                        summary: c.summary,
-                        original_count: c.original_count,
-                        new_count: c.new_count,
-                        logical_parent_id: c.logical_parent_id.as_ref().map(MessageId::from_string),
-                        created_at: c.created_at,
-                    });
-                }
-                JsonlEntry::GraphEvent(entry) => graph_events.push(entry.event),
-                JsonlEntry::Bookmark(entry) => bookmarks.push(entry),
-                JsonlEntry::Checkpoint(entry) => checkpoints.push(entry),
-                _ => {}
-            }
-        }
-
-        // Restore todos, plan, and compacts
-        session.todos = todos_map.into_values().collect();
-        session
-            .todos
-            .sort_by(|a, b| a.created_at.cmp(&b.created_at));
-        session.current_plan = latest_plan;
-        session.compact_history = VecDeque::from(compacts);
-        session.graph = GraphMaterializer::from_events(&graph_events);
-        session.graph.id = session.id.0;
-        session.graph.created_at = session.created_at;
-        for bookmark in bookmarks {
-            if let (Ok(id), Ok(node_id), Ok(branch_id)) = (
-                Uuid::parse_str(&bookmark.id),
-                Uuid::parse_str(&bookmark.node_id),
-                Uuid::parse_str(&bookmark.branch_id),
-            ) {
-                session.graph.bookmarks.insert(
-                    id,
-                    crate::graph::Bookmark {
-                        id,
-                        node_id,
-                        branch_id,
-                        label: bookmark.label,
-                        note: bookmark.note,
-                        created_by_principal_id: bookmark.principal_id,
-                        provenance: None,
-                        created_at: bookmark.created_at,
-                    },
-                );
-            }
-        }
-        for checkpoint in checkpoints {
-            if let (Ok(id), Ok(branch_id)) = (
-                Uuid::parse_str(&checkpoint.id),
-                Uuid::parse_str(&checkpoint.branch_id),
-            ) {
-                session.graph.checkpoints.insert(
-                    id,
-                    crate::graph::Checkpoint {
-                        id,
-                        branch_id,
-                        label: checkpoint.label,
-                        note: checkpoint.note,
-                        tags: checkpoint.tags,
-                        created_by_principal_id: checkpoint.principal_id,
-                        provenance: None,
-                        created_at: checkpoint.created_at,
-                    },
-                );
-            }
-        }
-        session.refresh_message_projection();
-
-        session
-    }
-}
-
-#[async_trait::async_trait]
-impl Persistence for JsonlPersistence {
-    fn name(&self) -> &str {
-        "jsonl"
-    }
-
-    async fn save(&self, session: &Session) -> SessionResult<()> {
-        let project_path = Self::get_project_path(session);
-        let file_path = self.session_file_path(&session.id, project_path.as_deref());
-
-        // Get persisted state from index (avoid re-reading file)
-        let (persisted_ids, prev_todos_hash, prev_plan_hash) = {
+    async fn save_inner(&self, session: &Session) -> SessionResult<()> {
+        validate_graph(&session.id, &session.graph)?;
+        let (project_path, persisted_ids, prev_session_meta, prev_todos_hash, prev_plan_hash) = {
             let index = self.index.read().await;
             match index.sessions.get(&session.id) {
-                Some(m) => (m.persisted_ids.clone(), m.todos_hash, m.plan_hash),
-                None => (HashSet::new(), 0, 0),
+                Some(m) => (
+                    m.project_path
+                        .clone()
+                        .or_else(|| Self::get_project_path(session)),
+                    m.persisted_ids.clone(),
+                    m.last_session_meta.clone(),
+                    m.todos_hash,
+                    m.plan_hash,
+                ),
+                None => (
+                    Self::get_project_path(session),
+                    HashSet::new(),
+                    None,
+                    Self::compute_todos_hash(&[]),
+                    Self::compute_plan_hash(None),
+                ),
             }
         };
+        let file_path = self.session_file_path(&session.id, project_path.as_deref());
 
         let mut new_entries = Vec::new();
         let mut new_ids = HashSet::new();
-
-        new_entries.push(Self::session_to_meta_entry(session));
-
-        // Only new messages (incremental)
-        let message_projection = session.current_branch_messages();
-
-        for msg in &message_projection {
-            let id = msg.id.to_string();
-            if !persisted_ids.contains(&id) {
-                new_entries.push(JsonlEntry::from_message(&session.id, msg));
-                new_ids.insert(id);
-            }
+        let session_meta_entry = match Self::session_to_meta_entry(session, project_path.clone()) {
+            JsonlEntry::SessionMeta(entry) => entry,
+            _ => unreachable!("session_to_meta_entry must return session metadata"),
+        };
+        if prev_session_meta.as_ref() != Some(&session_meta_entry) {
+            new_entries.push(JsonlEntry::SessionMeta(session_meta_entry.clone()));
         }
 
         for event in &session.graph.events {
@@ -1178,46 +1251,14 @@ impl Persistence for JsonlPersistence {
             }
         }
 
-        for bookmark in session.graph.bookmarks.values() {
-            let bookmark_id = format!("bookmark:{}", bookmark.id);
-            if !persisted_ids.contains(&bookmark_id) {
-                new_entries.push(JsonlEntry::Bookmark(BookmarkEntry {
-                    session_id: session.id.to_string(),
-                    id: bookmark.id.to_string(),
-                    node_id: bookmark.node_id.to_string(),
-                    branch_id: bookmark.branch_id.to_string(),
-                    label: bookmark.label.clone(),
-                    note: bookmark.note.clone(),
-                    principal_id: bookmark.created_by_principal_id.clone(),
-                    created_at: bookmark.created_at,
-                }));
-                new_ids.insert(bookmark_id);
-            }
-        }
-
-        for checkpoint in session.graph.checkpoints.values() {
-            let checkpoint_id = format!("checkpoint:{}", checkpoint.id);
-            if !persisted_ids.contains(&checkpoint_id) {
-                new_entries.push(JsonlEntry::Checkpoint(CheckpointEntry {
-                    session_id: session.id.to_string(),
-                    id: checkpoint.id.to_string(),
-                    branch_id: checkpoint.branch_id.to_string(),
-                    label: checkpoint.label.clone(),
-                    note: checkpoint.note.clone(),
-                    tags: checkpoint.tags.clone(),
-                    principal_id: checkpoint.created_by_principal_id.clone(),
-                    created_at: checkpoint.created_at,
-                }));
-                new_ids.insert(checkpoint_id);
-            }
-        }
-
-        // Compute current hashes
         let current_todos_hash = Self::compute_todos_hash(&session.todos);
         let current_plan_hash = Self::compute_plan_hash(session.current_plan.as_ref());
 
-        // Persist todos only if changed (including when cleared)
         if current_todos_hash != prev_todos_hash {
+            new_entries.push(JsonlEntry::TodoReset(ResetEntry {
+                session_id: session.id.to_string(),
+                timestamp: session.updated_at,
+            }));
             for todo in &session.todos {
                 new_entries.push(JsonlEntry::Todo(TodoEntry {
                     id: todo.id.to_string(),
@@ -1233,25 +1274,27 @@ impl Persistence for JsonlPersistence {
             }
         }
 
-        // Persist plan only if changed
-        if current_plan_hash != prev_plan_hash
-            && let Some(ref plan) = session.current_plan
-        {
-            new_entries.push(JsonlEntry::Plan(PlanEntry {
-                id: plan.id.to_string(),
+        if current_plan_hash != prev_plan_hash {
+            new_entries.push(JsonlEntry::PlanReset(ResetEntry {
                 session_id: session.id.to_string(),
-                name: plan.name.clone(),
-                content: plan.content.clone(),
-                status: enum_to_jsonl(&plan.status, "draft"),
-                error: plan.error.clone(),
-                created_at: plan.created_at,
-                approved_at: plan.approved_at,
-                started_at: plan.started_at,
-                completed_at: plan.completed_at,
+                timestamp: session.updated_at,
             }));
+            if let Some(ref plan) = session.current_plan {
+                new_entries.push(JsonlEntry::Plan(PlanEntry {
+                    id: plan.id.to_string(),
+                    session_id: session.id.to_string(),
+                    name: plan.name.clone(),
+                    content: plan.content.clone(),
+                    status: enum_to_jsonl(&plan.status, "draft"),
+                    error: plan.error.clone(),
+                    created_at: plan.created_at,
+                    approved_at: plan.approved_at,
+                    started_at: plan.started_at,
+                    completed_at: plan.completed_at,
+                }));
+            }
         }
 
-        // Persist compact history (incremental by ID)
         for compact in &session.compact_history {
             let compact_id = format!("compact:{}", compact.id);
             if !persisted_ids.contains(&compact_id) {
@@ -1276,7 +1319,6 @@ impl Persistence for JsonlPersistence {
             return Ok(());
         }
 
-        // Write in blocking context
         let path_clone = file_path.clone();
         let sync = self.config.sync_mode == SyncMode::OnWrite;
         tokio::task::spawn_blocking(move || append_entries_sync(&path_clone, &new_entries, sync))
@@ -1297,9 +1339,333 @@ impl Persistence for JsonlPersistence {
                 tenant_id: session.tenant_id.clone(),
                 updated_at: session.updated_at,
                 expires_at: session.expires_at,
+                last_session_meta: Some(session_meta_entry),
                 persisted_ids: persisted,
                 todos_hash: current_todos_hash,
                 plan_hash: current_plan_hash,
+                current_leaf_id: session.current_leaf_id.clone(),
+                primary_branch_id: Some(session.graph.primary_branch),
+            },
+        );
+
+        Ok(())
+    }
+
+    fn reconstruct_session(
+        session_id: SessionId,
+        entries: Vec<JsonlEntry>,
+    ) -> SessionResult<Session> {
+        let mut session = Session::new(SessionConfig::default());
+        session.id = session_id;
+
+        let mut todos_map: HashMap<String, TodoItem> = HashMap::new();
+        let mut latest_plan: Option<Plan> = None;
+        let mut compacts: Vec<CompactRecord> = Vec::new();
+        let mut graph_events: Vec<GraphEvent> = Vec::new();
+        let mut primary_branch_id: Option<Uuid> = None;
+
+        for entry in entries {
+            match entry {
+                JsonlEntry::SessionMeta(m) => {
+                    session.tenant_id = m.tenant_id;
+                    session.principal_id = m.principal_id;
+                    session.parent_id = m
+                        .parent_session_id
+                        .as_ref()
+                        .and_then(|s| SessionId::parse(s));
+                    session.session_type =
+                        serde_json::from_value(m.session_type).unwrap_or(SessionType::Main);
+                    // m.mode is ignored; SessionMode was removed (always stateless)
+                    session.state = jsonl_to_enum(&m.state).unwrap_or_default();
+                    session.config = serde_json::from_value(m.config).unwrap_or_else(|e| {
+                        tracing::warn!(
+                            session_id = %session_id,
+                            error = %e,
+                            "Failed to deserialize session config, using default"
+                        );
+                        Default::default()
+                    });
+                    session.authorization = serde_json::from_value(m.authorization_policy)
+                        .unwrap_or_else(|e| {
+                            tracing::warn!(
+                                session_id = %session_id,
+                                error = %e,
+                                "Failed to deserialize session authorization, using default"
+                            );
+                            Default::default()
+                        });
+                    session.total_usage = TokenUsage::from(&m.total_usage);
+                    session.total_cost_usd = m.total_cost_usd;
+                    session.static_context_hash = m.static_context_hash;
+                    session.error = m.error;
+                    session.created_at = m.created_at;
+                    session.updated_at = m.updated_at;
+                    session.expires_at = m.expires_at;
+                }
+                JsonlEntry::Todo(t) => {
+                    let Some(todo_id) = parse_auxiliary_uuid(&session_id, "todo", &t.id) else {
+                        continue;
+                    };
+                    let todo = TodoItem {
+                        id: todo_id,
+                        session_id,
+                        content: t.content,
+                        active_form: t.active_form,
+                        status: jsonl_to_enum(&t.status).unwrap_or_default(),
+                        plan_id: t.plan_id.and_then(|s| Uuid::parse_str(&s).ok()),
+                        created_at: t.created_at,
+                        started_at: t.started_at,
+                        completed_at: t.completed_at,
+                    };
+                    // Use map to get latest version of each todo
+                    todos_map.insert(t.id, todo);
+                }
+                JsonlEntry::TodoReset(_) => {
+                    todos_map.clear();
+                }
+                JsonlEntry::Plan(p) => {
+                    let Some(plan_id) = parse_auxiliary_uuid(&session_id, "plan", &p.id) else {
+                        continue;
+                    };
+                    let plan = Plan {
+                        id: plan_id,
+                        session_id,
+                        name: p.name,
+                        content: p.content,
+                        status: jsonl_to_enum(&p.status).unwrap_or_default(),
+                        error: p.error,
+                        created_at: p.created_at,
+                        approved_at: p.approved_at,
+                        started_at: p.started_at,
+                        completed_at: p.completed_at,
+                    };
+                    // Keep the latest plan entry
+                    latest_plan = Some(plan);
+                }
+                JsonlEntry::PlanReset(_) => {
+                    latest_plan = None;
+                }
+                JsonlEntry::Compact(c) => {
+                    let Some(compact_id) = parse_auxiliary_uuid(&session_id, "compact", &c.id)
+                    else {
+                        continue;
+                    };
+                    compacts.push(CompactRecord {
+                        id: compact_id,
+                        session_id,
+                        trigger: jsonl_to_enum(&c.trigger).unwrap_or_default(),
+                        pre_tokens: c.pre_tokens,
+                        post_tokens: c.post_tokens,
+                        saved_tokens: c.saved_tokens,
+                        summary: c.summary,
+                        original_count: c.original_count,
+                        new_count: c.new_count,
+                        logical_parent_id: c.logical_parent_id.as_ref().map(MessageId::from_string),
+                        created_at: c.created_at,
+                    });
+                }
+                JsonlEntry::GraphEvent(entry) => {
+                    if primary_branch_id.is_none() {
+                        primary_branch_id = Self::primary_branch_from_event(&entry.event);
+                    }
+                    graph_events.push(entry.event);
+                }
+                JsonlEntry::QueueReset(_) => {}
+                _ => {}
+            }
+        }
+
+        // Restore todos, plan, and compacts
+        session.todos = todos_map.into_values().collect();
+        session
+            .todos
+            .sort_by(|a, b| a.created_at.cmp(&b.created_at));
+        session.current_plan = latest_plan;
+        session.compact_history = VecDeque::from(compacts);
+        session.graph =
+            GraphMaterializer::from_events_with_primary(&graph_events, primary_branch_id);
+        session.graph.id = session.id.0;
+        session.graph.created_at = session.created_at;
+        validate_graph(&session_id, &session.graph)?;
+        session.summary = session.graph.latest_summary();
+        session.refresh_message_projection();
+
+        Ok(session)
+    }
+}
+
+#[async_trait::async_trait]
+impl Persistence for JsonlPersistence {
+    fn name(&self) -> &str {
+        "jsonl"
+    }
+
+    async fn save(&self, session: &Session) -> SessionResult<()> {
+        let _guard = self.mutation_lock.lock().await;
+        self.save_inner(session).await
+    }
+
+    async fn append_graph_event(
+        &self,
+        session_id: &SessionId,
+        event: GraphEvent,
+    ) -> SessionResult<()> {
+        let _guard = self.mutation_lock.lock().await;
+        let meta = {
+            let index = self.index.read().await;
+            index
+                .sessions
+                .get(session_id)
+                .cloned()
+                .ok_or_else(|| SessionError::NotFound {
+                    id: session_id.to_string(),
+                })?
+        };
+
+        let event_id = format!("graph:{}", event.metadata.id);
+        if meta.persisted_ids.contains(&event_id) {
+            return Ok(());
+        }
+
+        let target_project_path = meta
+            .project_path
+            .clone()
+            .or_else(|| project_path_from_graph_event(&event));
+        let target_path = self.session_file_path(session_id, target_project_path.as_deref());
+        if target_path != meta.path || meta.last_session_meta.is_none() {
+            return self.fallback_append_graph_event(session_id, event).await;
+        }
+
+        let mut session_meta_entry = meta
+            .last_session_meta
+            .clone()
+            .expect("checked above: last_session_meta exists");
+        session_meta_entry.project_path = target_project_path.clone();
+        session_meta_entry.updated_at = event.metadata.occurred_at;
+
+        self.append_entries(
+            meta.path.clone(),
+            vec![
+                JsonlEntry::from_graph_event(session_id, &event),
+                JsonlEntry::SessionMeta(session_meta_entry.clone()),
+            ],
+        )
+        .await?;
+
+        let mut persisted_ids = meta.persisted_ids;
+        persisted_ids.insert(event_id);
+
+        let mut index = self.index.write().await;
+        index.insert(
+            *session_id,
+            SessionMeta {
+                path: meta.path,
+                project_path: target_project_path,
+                tenant_id: session_meta_entry.tenant_id.clone(),
+                updated_at: session_meta_entry.updated_at,
+                expires_at: session_meta_entry.expires_at,
+                last_session_meta: Some(session_meta_entry),
+                persisted_ids,
+                todos_hash: meta.todos_hash,
+                plan_hash: meta.plan_hash,
+                current_leaf_id: Self::current_leaf_from_event(&event).or(meta.current_leaf_id),
+                primary_branch_id: meta
+                    .primary_branch_id
+                    .or_else(|| Self::primary_branch_from_event(&event)),
+            },
+        );
+
+        Ok(())
+    }
+
+    async fn add_message(
+        &self,
+        session_id: &SessionId,
+        mut message: SessionMessage,
+    ) -> SessionResult<()> {
+        let _guard = self.mutation_lock.lock().await;
+        let meta = {
+            let index = self.index.read().await;
+            index
+                .sessions
+                .get(session_id)
+                .cloned()
+                .ok_or_else(|| SessionError::NotFound {
+                    id: session_id.to_string(),
+                })?
+        };
+
+        let target_project_path = meta
+            .project_path
+            .clone()
+            .or_else(|| Self::project_path_from_message(&message));
+        let target_path = self.session_file_path(session_id, target_project_path.as_deref());
+        let Some(last_session_meta) = meta.last_session_meta.clone() else {
+            return self.fallback_add_message(session_id, message).await;
+        };
+        if target_path != meta.path {
+            return self.fallback_add_message(session_id, message).await;
+        }
+
+        if let Some(parent_id) = meta.current_leaf_id.clone() {
+            message.parent_id = Some(parent_id);
+        }
+
+        let session_type: SessionType =
+            serde_json::from_value(last_session_meta.session_type.clone()).unwrap_or_default();
+        let primary_branch_id = meta.primary_branch_id.unwrap_or_else(Uuid::new_v4);
+        let node_id = graph_node_id_for_message(&message)?;
+        let parent_id = graph_parent_node_id_for_message(&message)?;
+        let event = GraphEvent {
+            metadata: crate::graph::EventMetadata {
+                id: Uuid::new_v4(),
+                occurred_at: message.timestamp,
+                actor: last_session_meta.principal_id.clone(),
+            },
+            body: crate::graph::GraphEventBody::NodeAppended {
+                node_id,
+                branch_id: primary_branch_id,
+                parent_id,
+                kind: graph_node_kind_for_message(&message),
+                tags: graph_tags_for_message(&message),
+                payload: graph_payload_for_message(&message),
+                provenance: build_graph_provenance(*session_id, &session_type),
+            },
+        };
+
+        let mut session_meta_entry = last_session_meta.clone();
+        session_meta_entry.project_path = target_project_path.clone();
+        session_meta_entry.updated_at = message.timestamp;
+        session_meta_entry.total_usage =
+            Self::usage_info_with_increment(&session_meta_entry.total_usage, &message.usage);
+
+        self.append_entries(
+            meta.path.clone(),
+            vec![
+                JsonlEntry::from_graph_event(session_id, &event),
+                JsonlEntry::SessionMeta(session_meta_entry.clone()),
+            ],
+        )
+        .await?;
+
+        let mut persisted_ids = meta.persisted_ids;
+        persisted_ids.insert(format!("graph:{}", event.metadata.id));
+
+        let mut index = self.index.write().await;
+        index.insert(
+            *session_id,
+            SessionMeta {
+                path: meta.path,
+                project_path: target_project_path,
+                tenant_id: session_meta_entry.tenant_id.clone(),
+                updated_at: session_meta_entry.updated_at,
+                expires_at: session_meta_entry.expires_at,
+                last_session_meta: Some(session_meta_entry),
+                persisted_ids,
+                todos_hash: meta.todos_hash,
+                plan_hash: meta.plan_hash,
+                current_leaf_id: Some(message.id),
+                primary_branch_id: Some(primary_branch_id),
             },
         );
 
@@ -1325,11 +1691,12 @@ impl Persistence for JsonlPersistence {
             return Ok(None);
         }
 
-        let session = Self::reconstruct_session(*id, entries);
+        let session = Self::reconstruct_session(*id, entries)?;
         Ok(Some(session))
     }
 
     async fn delete(&self, id: &SessionId) -> SessionResult<bool> {
+        let _guard = self.mutation_lock.lock().await;
         let meta = {
             let mut index = self.index.write().await;
             index.remove(id)
@@ -1347,7 +1714,6 @@ impl Persistence for JsonlPersistence {
                 })?;
         }
 
-        self.summaries.write().await.remove(id);
         self.queue.write().await.remove(id);
         Ok(true)
     }
@@ -1360,49 +1726,21 @@ impl Persistence for JsonlPersistence {
         })
     }
 
-    async fn add_summary(&self, snapshot: SummarySnapshot) -> SessionResult<()> {
-        let path = {
-            let index = self.index.read().await;
-            index
-                .sessions
-                .get(&snapshot.session_id)
-                .map(|m| m.path.clone())
-        };
-
-        if let Some(path) = path {
-            let entry = JsonlEntry::Summary(SummaryEntry {
-                session_id: snapshot.session_id.to_string(),
-                summary: snapshot.summary.clone(),
-                leaf_uuid: snapshot.leaf_message_id.as_ref().map(|id| id.to_string()),
-                timestamp: snapshot.created_at,
-            });
-
-            let sync = self.config.sync_mode == SyncMode::OnWrite;
-            tokio::task::spawn_blocking(move || append_entries_sync(&path, &[entry], sync))
-                .await
-                .map_err(|e| SessionError::Storage {
-                    message: format!("Task join error: {}", e),
-                })??;
-        }
-
-        self.summaries
-            .write()
-            .await
-            .entry(snapshot.session_id)
-            .or_default()
-            .push(snapshot);
-
-        Ok(())
-    }
-
-    async fn get_summaries(&self, session_id: &SessionId) -> SessionResult<Vec<SummarySnapshot>> {
-        Ok(self
-            .summaries
-            .read()
-            .await
-            .get(session_id)
-            .cloned()
-            .unwrap_or_default())
+    async fn list_children(&self, parent_id: &SessionId) -> SessionResult<Vec<SessionId>> {
+        let parent_id = parent_id.to_string();
+        let index = self.index.read().await;
+        Ok(index
+            .sessions
+            .iter()
+            .filter_map(|(session_id, meta)| {
+                let is_child = meta
+                    .last_session_meta
+                    .as_ref()
+                    .and_then(|entry| entry.parent_session_id.as_deref())
+                    == Some(parent_id.as_str());
+                is_child.then_some(*session_id)
+            })
+            .collect())
     }
 
     async fn enqueue(
@@ -1411,6 +1749,7 @@ impl Persistence for JsonlPersistence {
         content: String,
         priority: i32,
     ) -> SessionResult<QueueItem> {
+        let _guard = self.mutation_lock.lock().await;
         let item = QueueItem::enqueue(*session_id, content.clone()).priority(priority);
 
         let path = {
@@ -1447,6 +1786,7 @@ impl Persistence for JsonlPersistence {
     }
 
     async fn dequeue(&self, session_id: &SessionId) -> SessionResult<Option<QueueItem>> {
+        let _guard = self.mutation_lock.lock().await;
         let dequeued = {
             let mut queue = self.queue.write().await;
             let items = match queue.get_mut(session_id) {
@@ -1496,6 +1836,7 @@ impl Persistence for JsonlPersistence {
     }
 
     async fn cancel_queued(&self, item_id: Uuid) -> SessionResult<bool> {
+        let _guard = self.mutation_lock.lock().await;
         let cancelled = {
             let mut queue = self.queue.write().await;
             let mut found = None;
@@ -1555,7 +1896,153 @@ impl Persistence for JsonlPersistence {
             .unwrap_or_default())
     }
 
+    async fn replace_pending_queue(
+        &self,
+        session_id: &SessionId,
+        items: &[QueueItem],
+    ) -> SessionResult<()> {
+        let _guard = self.mutation_lock.lock().await;
+        let path = {
+            let index = self.index.read().await;
+            index.sessions.get(session_id).map(|m| m.path.clone())
+        };
+
+        if let Some(path) = path {
+            let mut entries = Vec::with_capacity(items.len() + 1);
+            entries.push(JsonlEntry::QueueReset(ResetEntry {
+                session_id: session_id.to_string(),
+                timestamp: Utc::now(),
+            }));
+            entries.extend(items.iter().map(|item| {
+                let mut item = item.clone();
+                item.session_id = *session_id;
+                item.status = QueueStatus::Pending;
+                item.processed_at = None;
+                JsonlEntry::QueueOperation(QueueOperationEntry {
+                    operation: "enqueue".to_string(),
+                    session_id: session_id.to_string(),
+                    timestamp: item.created_at,
+                    content: item.content,
+                    priority: item.priority,
+                    item_id: item.id.to_string(),
+                })
+            }));
+
+            let sync = self.config.sync_mode == SyncMode::OnWrite;
+            tokio::task::spawn_blocking(move || append_entries_sync(&path, &entries, sync))
+                .await
+                .map_err(|e| SessionError::Storage {
+                    message: format!("Task join error: {}", e),
+                })??;
+        }
+
+        let normalized: Vec<QueueItem> = items
+            .iter()
+            .cloned()
+            .map(|mut item| {
+                item.session_id = *session_id;
+                item.status = QueueStatus::Pending;
+                item.processed_at = None;
+                item
+            })
+            .collect();
+        self.queue.write().await.insert(*session_id, normalized);
+        Ok(())
+    }
+
+    async fn restore_bundle(
+        &self,
+        session: &Session,
+        pending_queue: &[QueueItem],
+    ) -> SessionResult<()> {
+        let _guard = self.mutation_lock.lock().await;
+        let project_path = Self::get_project_path(session);
+        let file_path = self.session_file_path(&session.id, project_path.as_deref());
+        let normalized_queue = Self::normalized_pending_queue(session.id, pending_queue);
+        let entries = Self::snapshot_entries(session, project_path, &normalized_queue);
+
+        {
+            let index = self.index.read().await;
+            if index.sessions.contains_key(&session.id) || file_path.exists() {
+                return Err(SessionError::Storage {
+                    message: format!(
+                        "Archive restore refuses to overwrite existing session {}",
+                        session.id
+                    ),
+                });
+            }
+        }
+
+        let sync = self.config.sync_mode == SyncMode::OnWrite;
+        let temp_path = {
+            let path_clone = file_path.clone();
+            let entries_for_write = entries.clone();
+            tokio::task::spawn_blocking(move || {
+                write_entries_to_temp_sync(&path_clone, &entries_for_write, sync)
+            })
+            .await
+            .map_err(|e| SessionError::Storage {
+                message: format!("Task join error: {}", e),
+            })??
+        };
+
+        let parsed_entries = {
+            let temp_path_clone = temp_path.clone();
+            tokio::task::spawn_blocking(move || read_entries_sync(&temp_path_clone))
+                .await
+                .map_err(|e| SessionError::Storage {
+                    message: format!("Task join error: {}", e),
+                })??
+        };
+
+        let restored = match Self::reconstruct_session(session.id, parsed_entries.clone()) {
+            Ok(session) => session,
+            Err(error) => {
+                let _ = std::fs::remove_file(&temp_path);
+                return Err(error);
+            }
+        };
+        let (meta, restored_queue) =
+            Self::parse_file_metadata(session.id, file_path.clone(), &parsed_entries);
+        if let Err(error) = verify_restored_session_roundtrip(
+            session,
+            &normalized_queue,
+            &restored,
+            &restored_queue,
+        ) {
+            let _ = std::fs::remove_file(&temp_path);
+            return Err(error);
+        }
+
+        let mut index = self.index.write().await;
+        let mut queue = self.queue.write().await;
+
+        if index.sessions.contains_key(&session.id) || file_path.exists() {
+            let _ = std::fs::remove_file(&temp_path);
+            return Err(SessionError::Storage {
+                message: format!(
+                    "Archive restore refuses to overwrite existing session {}",
+                    session.id
+                ),
+            });
+        }
+
+        if let Err(error) = publish_temp_file_no_overwrite(&temp_path, &file_path, sync) {
+            let _ = std::fs::remove_file(&temp_path);
+            return Err(error);
+        }
+        if restored_queue.is_empty() {
+            queue.remove(&session.id);
+        } else {
+            queue.insert(session.id, restored_queue);
+        }
+        index.insert(session.id, meta);
+
+        Ok(())
+    }
+
     async fn cleanup_expired(&self) -> SessionResult<usize> {
+        let _guard = self.mutation_lock.lock().await;
         let now = Utc::now();
         let retention_cutoff = now - chrono::Duration::days(self.config.retention_days as i64);
 
@@ -1586,10 +2073,8 @@ impl Persistence for JsonlPersistence {
         let count = expired_paths.len();
 
         if !expired_ids.is_empty() {
-            let mut summaries = self.summaries.write().await;
             let mut queue = self.queue.write().await;
             for id in &expired_ids {
-                summaries.remove(id);
                 queue.remove(id);
             }
         }
@@ -1609,6 +2094,8 @@ impl Persistence for JsonlPersistence {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::session::EnvironmentContext;
+    use crate::session::{SessionMessage, TodoItem};
     use crate::types::ContentBlock;
     use tempfile::TempDir;
 
@@ -1626,10 +2113,14 @@ mod tests {
         let (persistence, _temp) = create_test_persistence().await;
 
         let mut session = Session::new(SessionConfig::default());
-        session.add_message(SessionMessage::user(vec![ContentBlock::text("Hello")]));
-        session.add_message(SessionMessage::assistant(vec![ContentBlock::text(
-            "Hi there!",
-        )]));
+        session
+            .add_message(SessionMessage::user(vec![ContentBlock::text("Hello")]))
+            .unwrap();
+        session
+            .add_message(SessionMessage::assistant(vec![ContentBlock::text(
+                "Hi there!",
+            )]))
+            .unwrap();
 
         persistence.save(&session).await.unwrap();
 
@@ -1643,12 +2134,16 @@ mod tests {
         let (persistence, _temp) = create_test_persistence().await;
 
         let mut session = Session::new(SessionConfig::default());
-        session.add_message(SessionMessage::user(vec![ContentBlock::text("First")]));
+        session
+            .add_message(SessionMessage::user(vec![ContentBlock::text("First")]))
+            .unwrap();
         persistence.save(&session).await.unwrap();
 
-        session.add_message(SessionMessage::assistant(vec![ContentBlock::text(
-            "Second",
-        )]));
+        session
+            .add_message(SessionMessage::assistant(vec![ContentBlock::text(
+                "Second",
+            )]))
+            .unwrap();
         persistence.save(&session).await.unwrap();
 
         let loaded = persistence.load(&session.id).await.unwrap().unwrap();
@@ -1699,26 +2194,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_summaries() {
-        let (persistence, _temp) = create_test_persistence().await;
-
-        let session = Session::new(SessionConfig::default());
-        persistence.save(&session).await.unwrap();
-
-        persistence
-            .add_summary(SummarySnapshot::new(session.id, "Summary 1"))
-            .await
-            .unwrap();
-        persistence
-            .add_summary(SummarySnapshot::new(session.id, "Summary 2"))
-            .await
-            .unwrap();
-
-        let summaries = persistence.get_summaries(&session.id).await.unwrap();
-        assert_eq!(summaries.len(), 2);
-    }
-
-    #[tokio::test]
     async fn test_queue_operations() {
         let (persistence, _temp) = create_test_persistence().await;
 
@@ -1739,14 +2214,51 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_replace_pending_queue_resets_previous_items() {
+        let (persistence, _temp) = create_test_persistence().await;
+
+        let session = Session::new(SessionConfig::default());
+        persistence.save(&session).await.unwrap();
+
+        persistence
+            .enqueue(&session.id, "old".to_string(), 1)
+            .await
+            .unwrap();
+
+        let replacement = vec![
+            QueueItem::enqueue(session.id, "new-high").priority(10),
+            QueueItem::enqueue(session.id, "new-low").priority(1),
+        ];
+
+        persistence
+            .replace_pending_queue(&session.id, &replacement)
+            .await
+            .unwrap();
+
+        let loaded = persistence.pending_queue(&session.id).await.unwrap();
+        assert_eq!(loaded.len(), 2);
+        assert!(loaded.iter().any(|item| item.content == "new-high"));
+        assert!(loaded.iter().any(|item| item.content == "new-low"));
+        assert!(!loaded.iter().any(|item| item.content == "old"));
+    }
+
+    #[tokio::test]
     async fn test_dag_reconstruction() {
         let (persistence, _temp) = create_test_persistence().await;
 
         let mut session = Session::new(SessionConfig::default());
-        session.add_message(SessionMessage::user(vec![ContentBlock::text("Q1")]));
-        session.add_message(SessionMessage::assistant(vec![ContentBlock::text("A1")]));
-        session.add_message(SessionMessage::user(vec![ContentBlock::text("Q2")]));
-        session.add_message(SessionMessage::assistant(vec![ContentBlock::text("A2")]));
+        session
+            .add_message(SessionMessage::user(vec![ContentBlock::text("Q1")]))
+            .unwrap();
+        session
+            .add_message(SessionMessage::assistant(vec![ContentBlock::text("A1")]))
+            .unwrap();
+        session
+            .add_message(SessionMessage::user(vec![ContentBlock::text("Q2")]))
+            .unwrap();
+        session
+            .add_message(SessionMessage::assistant(vec![ContentBlock::text("A2")]))
+            .unwrap();
 
         persistence.save(&session).await.unwrap();
 
@@ -1795,19 +2307,6 @@ mod tests {
     }
 
     #[test]
-    fn test_jsonl_entry_serialization() {
-        let msg = SessionMessage::user(vec![ContentBlock::text("Hello")]);
-        let session_id = SessionId::new();
-        let entry = JsonlEntry::from_message(&session_id, &msg);
-
-        let json = serde_json::to_string(&entry).unwrap();
-        assert!(json.contains("\"type\":\"user\""));
-
-        let parsed: JsonlEntry = serde_json::from_str(&json).unwrap();
-        assert!(matches!(parsed, JsonlEntry::User(_)));
-    }
-
-    #[test]
     fn test_graph_event_entry_serialization() {
         let session_id = SessionId::new();
         let event = GraphEvent::new(crate::graph::GraphEventBody::NodeAppended {
@@ -1817,6 +2316,7 @@ mod tests {
             kind: crate::graph::NodeKind::User,
             tags: vec!["test".to_string()],
             payload: serde_json::json!({"content": []}),
+            provenance: None,
         });
         let entry = JsonlEntry::from_graph_event(&session_id, &event);
 
@@ -1830,19 +2330,21 @@ mod tests {
         let (persistence, _temp) = create_test_persistence().await;
 
         let mut session = Session::new(SessionConfig::default());
-        session.add_message(SessionMessage::user(vec![ContentBlock::text("Hello")]));
+        session
+            .add_message(SessionMessage::user(vec![ContentBlock::text("Hello")]))
+            .unwrap();
         persistence.save(&session).await.unwrap();
         persistence.save(&session).await.unwrap(); // Save same data twice
         persistence.save(&session).await.unwrap(); // And again
 
-        // Check file has only one message entry + session meta
+        // Graph-canonical JSONL should not persist message projection entries.
         let file_path = persistence.session_file_path(&session.id, None);
         let entries = read_entries_sync(&file_path).unwrap();
-        let message_count = entries
-            .iter()
-            .filter(|e| e.message_uuid().is_some())
-            .count();
-        assert_eq!(message_count, 1, "Should not duplicate message entries");
+        assert_eq!(
+            entries.len(),
+            2,
+            "Should persist only session metadata and graph events for a simple session"
+        );
 
         let graph_event_count = entries
             .iter()
@@ -1854,13 +2356,176 @@ mod tests {
         );
     }
 
+    #[test]
+    fn test_atomic_restore_write_refuses_existing_destination() {
+        let temp_dir = TempDir::new().unwrap();
+        let target = temp_dir.path().join("session.jsonl");
+        std::fs::write(&target, "{\"type\":\"session_meta\"}\n").unwrap();
+
+        let entry = JsonlEntry::SessionMeta(SessionMetaEntry {
+            session_id: SessionId::new().to_string(),
+            project_path: None,
+            parent_session_id: None,
+            tenant_id: None,
+            principal_id: None,
+            session_type: serde_json::json!("main"),
+            mode: "stateless".to_string(),
+            state: "created".to_string(),
+            config: serde_json::json!({}),
+            authorization_policy: serde_json::json!({}),
+            total_usage: UsageInfo::default(),
+            total_cost_usd: Decimal::default(),
+            static_context_hash: None,
+            error: None,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+            expires_at: None,
+        });
+
+        let error = write_entries_sync_atomic(&target, &[entry], false).unwrap_err();
+        assert!(error.to_string().contains("without overwrite"));
+        let contents = std::fs::read_to_string(&target).unwrap();
+        assert_eq!(contents, "{\"type\":\"session_meta\"}\n");
+    }
+
+    #[tokio::test]
+    async fn test_todo_reset_removes_deleted_items() {
+        let (persistence, _temp) = create_test_persistence().await;
+
+        let mut session = Session::new(SessionConfig::default());
+        session.set_todos(vec![
+            TodoItem::new(session.id, "one", "one"),
+            TodoItem::new(session.id, "two", "two"),
+        ]);
+        persistence.save(&session).await.unwrap();
+
+        session.set_todos(vec![session.todos[0].clone()]);
+        persistence.save(&session).await.unwrap();
+
+        let loaded = persistence.load(&session.id).await.unwrap().unwrap();
+        assert_eq!(loaded.todos.len(), 1);
+        assert_eq!(loaded.todos[0].content, "one");
+    }
+
+    #[tokio::test]
+    async fn test_plan_reset_clears_removed_plan() {
+        let (persistence, _temp) = create_test_persistence().await;
+
+        let mut session = Session::new(SessionConfig::default());
+        session.enter_plan_mode(Some("demo".to_string()));
+        session.update_plan_content("ship it".to_string());
+        persistence.save(&session).await.unwrap();
+
+        session.cancel_plan();
+        persistence.save(&session).await.unwrap();
+
+        let loaded = persistence.load(&session.id).await.unwrap().unwrap();
+        assert!(loaded.current_plan.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_invalid_auxiliary_entry_ids_are_skipped() {
+        let (persistence, _temp) = create_test_persistence().await;
+
+        let session = Session::new(SessionConfig::default());
+        persistence.save(&session).await.unwrap();
+
+        let file_path = persistence.session_file_path(&session.id, None);
+        append_entries_sync(
+            &file_path,
+            &[
+                JsonlEntry::Todo(TodoEntry {
+                    id: "invalid-todo-id".to_string(),
+                    session_id: session.id.to_string(),
+                    content: "broken todo".to_string(),
+                    active_form: "broken todo".to_string(),
+                    status: "pending".to_string(),
+                    plan_id: None,
+                    created_at: Utc::now(),
+                    started_at: None,
+                    completed_at: None,
+                }),
+                JsonlEntry::Plan(PlanEntry {
+                    id: "invalid-plan-id".to_string(),
+                    session_id: session.id.to_string(),
+                    name: Some("broken plan".to_string()),
+                    content: "bad".to_string(),
+                    status: "draft".to_string(),
+                    error: None,
+                    created_at: Utc::now(),
+                    approved_at: None,
+                    started_at: None,
+                    completed_at: None,
+                }),
+                JsonlEntry::Compact(CompactEntry {
+                    id: "invalid-compact-id".to_string(),
+                    session_id: session.id.to_string(),
+                    trigger: "manual".to_string(),
+                    pre_tokens: 10,
+                    post_tokens: 5,
+                    saved_tokens: 5,
+                    summary: "broken compact".to_string(),
+                    original_count: 2,
+                    new_count: 1,
+                    logical_parent_id: None,
+                    created_at: Utc::now(),
+                }),
+            ],
+            false,
+        )
+        .unwrap();
+
+        let loaded = persistence.load(&session.id).await.unwrap().unwrap();
+        assert!(loaded.todos.is_empty());
+        assert!(loaded.current_plan.is_none());
+        assert!(loaded.compact_history.is_empty());
+
+        persistence.save(&loaded).await.unwrap();
+        let reloaded = persistence.load(&session.id).await.unwrap().unwrap();
+        assert!(reloaded.todos.is_empty());
+        assert!(reloaded.current_plan.is_none());
+        assert!(reloaded.compact_history.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_project_path_persists_after_graph_only_reload() {
+        let (persistence, _temp) = create_test_persistence().await;
+        let project_dir = tempfile::tempdir().unwrap();
+
+        let mut session = Session::new(SessionConfig::default());
+        session
+            .add_message(
+                SessionMessage::user(vec![ContentBlock::text("Hello")])
+                    .environment(EnvironmentContext::capture(Some(project_dir.path()))),
+            )
+            .unwrap();
+
+        persistence.save(&session).await.unwrap();
+
+        let expected_path = persistence.session_file_path(&session.id, Some(project_dir.path()));
+        assert!(expected_path.exists());
+
+        let mut loaded = persistence.load(&session.id).await.unwrap().unwrap();
+        loaded.clear_messages();
+        persistence.save(&loaded).await.unwrap();
+
+        assert!(expected_path.exists());
+        let default_path = persistence.session_file_path(&session.id, None);
+        assert_ne!(expected_path, default_path);
+        assert!(!default_path.exists());
+    }
+
     #[tokio::test]
     async fn test_graph_events_roundtrip() {
         let (persistence, _temp) = create_test_persistence().await;
 
         let mut session = Session::new(SessionConfig::default());
-        session.add_message(SessionMessage::user(vec![ContentBlock::text("Hello")]));
-        session.add_message(SessionMessage::assistant(vec![ContentBlock::text("Hi")]));
+        session
+            .add_message(SessionMessage::user(vec![ContentBlock::text("Hello")]))
+            .unwrap();
+        session
+            .add_message(SessionMessage::assistant(vec![ContentBlock::text("Hi")]))
+            .unwrap();
         assert_eq!(session.graph.events.len(), 2);
 
         persistence.save(&session).await.unwrap();
@@ -1891,7 +2556,9 @@ mod tests {
         let (persistence, _temp) = create_test_persistence().await;
 
         let mut session = Session::new(SessionConfig::default());
-        session.add_message(SessionMessage::user(vec![ContentBlock::text("Hello")]));
+        session
+            .add_message(SessionMessage::user(vec![ContentBlock::text("Hello")]))
+            .unwrap();
         session.bookmark_current_head("start", Some("saved".to_string()));
 
         persistence.save(&session).await.unwrap();
@@ -1905,15 +2572,20 @@ mod tests {
         let (persistence, _temp) = create_test_persistence().await;
 
         let mut session = Session::new(SessionConfig::default());
-        session.add_message(SessionMessage::user(vec![ContentBlock::text("Hello")]));
-        session.graph.create_checkpoint(
-            session.graph.primary_branch,
-            "milestone",
-            Some("saved".to_string()),
-            vec!["tag".to_string()],
-            None,
-            None,
-        );
+        session
+            .add_message(SessionMessage::user(vec![ContentBlock::text("Hello")]))
+            .unwrap();
+        session
+            .graph
+            .create_checkpoint(
+                session.graph.primary_branch,
+                "milestone",
+                Some("saved".to_string()),
+                vec!["tag".to_string()],
+                None,
+                None,
+            )
+            .unwrap();
 
         persistence.save(&session).await.unwrap();
 
@@ -1926,8 +2598,12 @@ mod tests {
         let (persistence, _temp) = create_test_persistence().await;
 
         let mut session = Session::new(SessionConfig::default());
-        session.add_message(SessionMessage::user(vec![ContentBlock::text("hello")]));
-        session.add_message(SessionMessage::assistant(vec![ContentBlock::text("world")]));
+        session
+            .add_message(SessionMessage::user(vec![ContentBlock::text("hello")]))
+            .unwrap();
+        session
+            .add_message(SessionMessage::assistant(vec![ContentBlock::text("world")]))
+            .unwrap();
         session.clear_messages();
 
         persistence.save(&session).await.unwrap();
@@ -1950,6 +2626,7 @@ mod tests {
             kind: crate::graph::NodeKind::User,
             tags: Vec::new(),
             payload: serde_json::json!({"content": []}),
+            provenance: None,
         });
 
         append_entries_sync(

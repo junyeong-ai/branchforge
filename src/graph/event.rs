@@ -2,7 +2,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use super::types::{BranchId, NodeId, NodeKind};
+use super::types::{BranchId, NodeId, NodeKind, NodeProvenance};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EventMetadata {
@@ -34,6 +34,10 @@ impl GraphEvent {
             body,
         }
     }
+
+    pub fn with_metadata(metadata: EventMetadata, body: GraphEventBody) -> Self {
+        Self { metadata, body }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -46,6 +50,11 @@ pub enum GraphEventBody {
         kind: NodeKind,
         tags: Vec<String>,
         payload: serde_json::Value,
+        provenance: Option<NodeProvenance>,
+    },
+    NodeMetadataPatched {
+        node_id: NodeId,
+        metadata: serde_json::Value,
     },
     BranchForked {
         branch_id: BranchId,
@@ -58,5 +67,14 @@ pub enum GraphEventBody {
         label: String,
         note: Option<String>,
         tags: Vec<String>,
+        provenance: Option<NodeProvenance>,
+    },
+    BookmarkCreated {
+        bookmark_id: Uuid,
+        node_id: NodeId,
+        branch_id: BranchId,
+        label: String,
+        note: Option<String>,
+        provenance: Option<NodeProvenance>,
     },
 }

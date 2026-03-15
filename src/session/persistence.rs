@@ -6,10 +6,31 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 use uuid::Uuid;
 
-use super::state::{Session, SessionId, SessionMessage};
-use super::types::{QueueItem, SummarySnapshot};
+use super::archive::verify_restored_session_roundtrip;
+use super::state::{Session, SessionId, SessionMessage, SessionState};
+use super::types::QueueItem;
 use super::{SessionError, SessionResult};
-use crate::graph::{GraphEvent, GraphMaterializer, SessionGraph};
+use crate::graph::{GraphEvent, GraphMaterializer, GraphValidator, SessionGraph};
+
+pub(crate) fn validate_session_graph(session: &Session, backend: &str) -> SessionResult<()> {
+    let report = GraphValidator::validate(&session.graph);
+    if report.is_valid() {
+        return Ok(());
+    }
+
+    let issues = report
+        .issues
+        .into_iter()
+        .map(|issue| format!("{}: {}", issue.code, issue.message))
+        .collect::<Vec<_>>()
+        .join("; ");
+    Err(SessionError::Storage {
+        message: format!(
+            "Invalid graph for session {} in {backend} persistence: {issues}",
+            session.id
+        ),
+    })
+}
 
 #[async_trait::async_trait]
 pub trait Persistence: Send + Sync {
@@ -20,10 +41,19 @@ pub trait Persistence: Send + Sync {
     async fn load(&self, id: &SessionId) -> SessionResult<Option<Session>>;
     async fn delete(&self, id: &SessionId) -> SessionResult<bool>;
     async fn list(&self, tenant_id: Option<&str>) -> SessionResult<Vec<SessionId>>;
-
-    // Summaries
-    async fn add_summary(&self, snapshot: SummarySnapshot) -> SessionResult<()>;
-    async fn get_summaries(&self, session_id: &SessionId) -> SessionResult<Vec<SummarySnapshot>>;
+    async fn list_children(&self, parent_id: &SessionId) -> SessionResult<Vec<SessionId>> {
+        let ids = self.list(None).await?;
+        let mut children = Vec::new();
+        for id in ids {
+            let Some(session) = self.load(&id).await? else {
+                continue;
+            };
+            if session.parent_id == Some(*parent_id) {
+                children.push(id);
+            }
+        }
+        Ok(children)
+    }
 
     // Queue
     async fn enqueue(
@@ -35,6 +65,25 @@ pub trait Persistence: Send + Sync {
     async fn dequeue(&self, session_id: &SessionId) -> SessionResult<Option<QueueItem>>;
     async fn cancel_queued(&self, item_id: Uuid) -> SessionResult<bool>;
     async fn pending_queue(&self, session_id: &SessionId) -> SessionResult<Vec<QueueItem>>;
+    async fn replace_pending_queue(
+        &self,
+        session_id: &SessionId,
+        items: &[QueueItem],
+    ) -> SessionResult<()>;
+
+    /// Restore a session snapshot plus its pending queue as a single backend operation.
+    ///
+    /// Implementations should fail closed if the session already exists and should avoid
+    /// exposing partially restored or unverified state to concurrent readers.
+    ///
+    /// Implementations are expected to validate the persisted round-trip before making the
+    /// restored session visible. No default implementation is provided because these guarantees
+    /// are backend-specific.
+    async fn restore_bundle(
+        &self,
+        session: &Session,
+        pending_queue: &[QueueItem],
+    ) -> SessionResult<()>;
 
     // Cleanup
     async fn cleanup_expired(&self) -> SessionResult<usize>;
@@ -54,12 +103,12 @@ pub trait Persistence: Send + Sync {
         let created_at = session.graph.created_at;
         let primary_branch = session.graph.primary_branch;
         session.graph.events.push(event);
-        session.graph = GraphMaterializer::from_events(&session.graph.events);
+        session.graph = GraphMaterializer::from_events_with_primary(
+            &session.graph.events,
+            Some(primary_branch),
+        );
         session.graph.id = graph_id;
         session.graph.created_at = created_at;
-        if session.graph.branches.contains_key(&primary_branch) {
-            session.graph.primary_branch = primary_branch;
-        }
         self.save(&session).await
     }
 
@@ -87,7 +136,18 @@ pub trait Persistence: Send + Sync {
             .ok_or_else(|| SessionError::NotFound {
                 id: session_id.to_string(),
             })?;
-        session.add_message(message);
+        session.add_message(message)?;
+        self.save(&session).await
+    }
+
+    async fn set_state(&self, session_id: &SessionId, state: SessionState) -> SessionResult<()> {
+        let mut session = self
+            .load(session_id)
+            .await?
+            .ok_or_else(|| SessionError::NotFound {
+                id: session_id.to_string(),
+            })?;
+        session.set_state(state);
         self.save(&session).await
     }
 }
@@ -95,7 +155,6 @@ pub trait Persistence: Send + Sync {
 #[derive(Debug, Default)]
 pub struct MemoryPersistence {
     sessions: Arc<RwLock<HashMap<String, Session>>>,
-    summaries: Arc<RwLock<HashMap<String, Vec<SummarySnapshot>>>>,
     queue: Arc<RwLock<HashMap<String, Vec<QueueItem>>>>,
 }
 
@@ -110,7 +169,6 @@ impl MemoryPersistence {
 
     pub async fn clear(&self) {
         self.sessions.write().await.clear();
-        self.summaries.write().await.clear();
         self.queue.write().await.clear();
     }
 
@@ -126,6 +184,7 @@ impl Persistence for MemoryPersistence {
     }
 
     async fn save(&self, session: &Session) -> SessionResult<()> {
+        validate_session_graph(session, "memory")?;
         self.sessions
             .write()
             .await
@@ -140,7 +199,7 @@ impl Persistence for MemoryPersistence {
     ) -> SessionResult<()> {
         let mut sessions = self.sessions.write().await;
         if let Some(session) = sessions.get_mut(&session_id.to_string()) {
-            session.add_message(message);
+            session.add_message(message)?;
             Ok(())
         } else {
             Err(SessionError::NotFound {
@@ -156,9 +215,7 @@ impl Persistence for MemoryPersistence {
     async fn delete(&self, id: &SessionId) -> SessionResult<bool> {
         let key = id.to_string();
         let mut sessions = self.sessions.write().await;
-        let mut summaries = self.summaries.write().await;
         let mut queue = self.queue.write().await;
-        summaries.remove(&key);
         queue.remove(&key);
         Ok(sessions.remove(&key).is_some())
     }
@@ -178,24 +235,15 @@ impl Persistence for MemoryPersistence {
             .collect())
     }
 
-    async fn add_summary(&self, snapshot: SummarySnapshot) -> SessionResult<()> {
-        self.summaries
-            .write()
-            .await
-            .entry(snapshot.session_id.to_string())
-            .or_default()
-            .push(snapshot);
-        Ok(())
-    }
-
-    async fn get_summaries(&self, session_id: &SessionId) -> SessionResult<Vec<SummarySnapshot>> {
+    async fn list_children(&self, parent_id: &SessionId) -> SessionResult<Vec<SessionId>> {
         Ok(self
-            .summaries
+            .sessions
             .read()
             .await
-            .get(&session_id.to_string())
-            .cloned()
-            .unwrap_or_default())
+            .values()
+            .filter(|session| session.parent_id == Some(*parent_id))
+            .map(|session| session.id)
+            .collect())
     }
 
     async fn enqueue(
@@ -255,12 +303,68 @@ impl Persistence for MemoryPersistence {
             .unwrap_or_default())
     }
 
-    async fn cleanup_expired(&self) -> SessionResult<usize> {
-        // Hold all three write locks simultaneously to prevent races where a
-        // concurrent operation could observe a session removed from `sessions`
-        // but still present in `summaries` or `queue`.
+    async fn replace_pending_queue(
+        &self,
+        session_id: &SessionId,
+        items: &[QueueItem],
+    ) -> SessionResult<()> {
+        let normalized: Vec<QueueItem> = items
+            .iter()
+            .cloned()
+            .map(|mut item| {
+                item.session_id = *session_id;
+                item.status = super::types::QueueStatus::Pending;
+                item.processed_at = None;
+                item
+            })
+            .collect();
+        self.queue
+            .write()
+            .await
+            .insert(session_id.to_string(), normalized);
+        Ok(())
+    }
+
+    async fn restore_bundle(
+        &self,
+        session: &Session,
+        pending_queue: &[QueueItem],
+    ) -> SessionResult<()> {
+        let normalized_queue: Vec<QueueItem> = pending_queue
+            .iter()
+            .cloned()
+            .map(|mut item| {
+                item.session_id = session.id;
+                item.status = super::types::QueueStatus::Pending;
+                item.processed_at = None;
+                item
+            })
+            .collect();
+        verify_restored_session_roundtrip(session, &normalized_queue, session, &normalized_queue)?;
+
         let mut sessions = self.sessions.write().await;
-        let mut summaries = self.summaries.write().await;
+        let mut queue = self.queue.write().await;
+
+        if sessions.contains_key(&session.id.to_string()) {
+            return Err(SessionError::Storage {
+                message: format!(
+                    "Archive restore refuses to overwrite existing session {}",
+                    session.id
+                ),
+            });
+        }
+
+        sessions.insert(session.id.to_string(), session.clone());
+        queue.insert(session.id.to_string(), normalized_queue);
+
+        Ok(())
+    }
+
+    async fn cleanup_expired(&self) -> SessionResult<usize> {
+        // Hold both write locks simultaneously to prevent races where a
+        // concurrent operation could observe a session removed from `sessions`
+        // but still present in `queue`.
+        let mut sessions = self.sessions.write().await;
         let mut queue = self.queue.write().await;
 
         let expired_keys: Vec<String> = sessions
@@ -271,7 +375,6 @@ impl Persistence for MemoryPersistence {
 
         for key in &expired_keys {
             sessions.remove(key);
-            summaries.remove(key);
             queue.remove(key);
         }
 
@@ -372,26 +475,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_summaries() {
-        let persistence = MemoryPersistence::new();
-        let session = Session::new(SessionConfig::default());
-        let id = session.id;
-
-        persistence.save(&session).await.unwrap();
-        persistence
-            .add_summary(SummarySnapshot::new(id, "First"))
-            .await
-            .unwrap();
-        persistence
-            .add_summary(SummarySnapshot::new(id, "Second"))
-            .await
-            .unwrap();
-
-        let summaries = persistence.get_summaries(&id).await.unwrap();
-        assert_eq!(summaries.len(), 2);
-    }
-
-    #[tokio::test]
     async fn test_queue_priority() {
         let persistence = MemoryPersistence::new();
         let session = Session::new(SessionConfig::default());
@@ -444,6 +527,7 @@ mod tests {
                     kind: NodeKind::User,
                     tags: vec!["test".to_string()],
                     payload: serde_json::json!({"text": "hello"}),
+                    provenance: None,
                 }),
             )
             .await
@@ -458,7 +542,9 @@ mod tests {
     async fn test_graph_first_roundtrip_restores_projection() {
         let persistence = MemoryPersistence::new();
         let mut session = Session::new(SessionConfig::default());
-        session.add_message(SessionMessage::user(vec![ContentBlock::text("Hello")]));
+        session
+            .add_message(SessionMessage::user(vec![ContentBlock::text("Hello")]))
+            .unwrap();
         session.clear_messages();
 
         persistence.save(&session).await.unwrap();
@@ -471,15 +557,20 @@ mod tests {
     async fn test_graph_first_roundtrip_preserves_bookmarks_and_checkpoints() {
         let persistence = MemoryPersistence::new();
         let mut session = Session::new(SessionConfig::default());
-        session.add_message(SessionMessage::user(vec![ContentBlock::text("Hello")]));
-        session.graph.create_checkpoint(
-            session.graph.primary_branch,
-            "milestone",
-            Some("saved".to_string()),
-            vec!["tag".to_string()],
-            None,
-            None,
-        );
+        session
+            .add_message(SessionMessage::user(vec![ContentBlock::text("Hello")]))
+            .unwrap();
+        session
+            .graph
+            .create_checkpoint(
+                session.graph.primary_branch,
+                "milestone",
+                Some("saved".to_string()),
+                vec!["tag".to_string()],
+                None,
+                None,
+            )
+            .unwrap();
         session.bookmark_current_head("head", Some("note".to_string()));
         session.clear_messages();
 
