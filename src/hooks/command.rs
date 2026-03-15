@@ -158,10 +158,16 @@ impl Hook for CommandHook {
             .map_err(|e| crate::Error::Config(format!("Failed to spawn hook command: {}", e)))?;
 
         if let Some(mut stdin) = child.stdin.take() {
-            stdin
-                .write_all(input_json.as_bytes())
-                .await
-                .map_err(|e| crate::Error::Config(format!("Failed to write to stdin: {}", e)))?;
+            // Write input and drop stdin to send EOF.
+            // The child may exit before consuming stdin (e.g., `echo` ignores stdin),
+            // which causes BrokenPipe — this is expected, not an error.
+            // Only the child's exit code determines success.
+            if let Err(e) = stdin.write_all(input_json.as_bytes()).await
+                && e.kind() != std::io::ErrorKind::BrokenPipe
+            {
+                tracing::warn!(hook = %self.name, error = %e, "Hook stdin write failed");
+            }
+            drop(stdin);
         }
 
         let timeout = Duration::from_secs(self.timeout_secs);
@@ -265,7 +271,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_command_hook_execution() {
-        let hook = CommandHook::new("echo-test", "echo '{}'", vec![HookEvent::PreToolUse]);
+        // echo ignores stdin and exits immediately — exercises the BrokenPipe path
+        let hook = CommandHook::new("echo-test", "echo hook-ok", vec![HookEvent::PreToolUse]);
 
         let input = HookInput::pre_tool_use("test-session", "Read", serde_json::json!({}));
         let hook_context = HookContext::new("test-session");
