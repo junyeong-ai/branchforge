@@ -121,7 +121,7 @@ Sessions use a graph-first model.
 
 This makes long coding sessions reusable and navigable instead of reducing them to flat logs.
 
-See `docs/session.md` for details.
+See [Session & Graph](docs/session.md) for details.
 
 ## Tooling
 
@@ -133,22 +133,7 @@ The default runtime exposes a minimal core tool surface. Optional workflow tools
 - Optional workflow: Task, TaskOutput, TodoWrite, Plan, GraphHistory
 - Server tools: WebFetch, WebSearch, ToolSearch
 
-See `docs/tools.md` for details.
-
-## Documentation
-
-- `docs/architecture.md`
-- `docs/authentication.md`
-- `docs/cloud-providers.md`
-- `docs/session.md`
-- `docs/tools.md`
-- `docs/security.md`
-- `docs/authorization.md`
-- `docs/subagents.md`
-- `docs/skills.md`
-- `docs/memory-system.md`
-- `docs/backend-selection.md`
-- `docs/audit-export.md`
+See [Tools](docs/tools.md) for details.
 
 ## Quality Gates
 

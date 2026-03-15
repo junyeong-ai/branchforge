@@ -18,8 +18,22 @@ Rust로 작성된 stateful coding agent runtime입니다.
 - graph-first 세션 모델
 - replay, export, bookmark, checkpoint를 포함한 지속 가능한 작업 기록
 - Anthropic, Bedrock, Vertex AI, Azure AI Foundry 지원
-- 안전한 로컬 도구 실행과 권한 제어
+- 안전한 로컬 도구 실행과 인가 제어
 - Claude CLI의 `.claude/` 레이아웃과 호환되는 워크스페이스 리소스 활용
+
+## 문서
+
+| 가이드 | 설명 |
+|--------|------|
+| [아키텍처](docs/architecture.md) | 시스템 경계와 설계 원칙 |
+| [세션 & 그래프](docs/session.md) | Graph-first 세션 모델과 퍼시스턴스 |
+| [도구](docs/tools.md) | 내장 도구, 접근 제어, 커스텀 도구 |
+| [스킬](docs/skills.md) | Progressive disclosure와 스킬 시스템 |
+| [서브에이전트](docs/subagents.md) | 위임, 도구 제한, 모델 해석 |
+| [인가](docs/authorization.md) | 모드, 규칙, 스코프 패턴 |
+| [보안](docs/security.md) | SecureFs, bash 분석, 샌드박싱 |
+| [인증](docs/authentication.md) | OAuth, API 키, 클라우드 프로바이더 |
+| [백엔드 선택](docs/backend-selection.md) | Memory, JSONL, PostgreSQL, Redis |
 
 ## 핵심 가치
 
@@ -93,7 +107,7 @@ let agent = branchforge::Agent::builder()
     .await?;
 ```
 
-상세 내용은 `docs/authentication.md`, `docs/cloud-providers.md`를 참고하세요.
+상세 내용은 [인증](docs/authentication.md), [클라우드 프로바이더](docs/cloud-providers.md)를 참고하세요.
 
 ## 세션과 리플레이
 
@@ -107,7 +121,7 @@ let agent = branchforge::Agent::builder()
 
 이 구조 덕분에 긴 코딩 세션을 단순 로그가 아니라 재개 가능한 작업 기록으로 다룰 수 있습니다.
 
-상세 내용은 `docs/session.md`를 참고하세요.
+상세 내용은 [세션 & 그래프](docs/session.md)를 참고하세요.
 
 ## 도구 시스템
 
@@ -119,22 +133,7 @@ let agent = branchforge::Agent::builder()
 - Optional workflow: Task, TaskOutput, TodoWrite, Plan, GraphHistory
 - Server tools: WebFetch, WebSearch, ToolSearch
 
-상세 내용은 `docs/tools.md`를 참고하세요.
-
-## 문서
-
-- `docs/architecture.md`
-- `docs/authentication.md`
-- `docs/cloud-providers.md`
-- `docs/session.md`
-- `docs/tools.md`
-- `docs/security.md`
-- `docs/authorization.md`
-- `docs/subagents.md`
-- `docs/skills.md`
-- `docs/memory-system.md`
-- `docs/backend-selection.md`
-- `docs/audit-export.md`
+상세 내용은 [도구](docs/tools.md)를 참고하세요.
 
 ## 품질 기준
 
