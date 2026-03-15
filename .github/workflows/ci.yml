@@ -23,6 +23,15 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - uses: taiki-e/install-action@nextest
+
+      # Grep tool requires ripgrep
+      - name: Install ripgrep (Ubuntu)
+        if: runner.os == 'Linux'
+        run: sudo apt-get install -y ripgrep
+      - name: Install ripgrep (macOS)
+        if: runner.os == 'macOS'
+        run: brew install ripgrep
+
       - name: Run tests
         run: cargo nextest run --all-features --no-fail-fast
 
@@ -38,6 +47,10 @@ jobs:
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-llvm-cov,nextest
+
+      - name: Install ripgrep
+        run: sudo apt-get install -y ripgrep
+
       - name: Generate coverage
         run: |
           cargo llvm-cov nextest \
@@ -68,6 +81,6 @@ jobs:
     if: github.event_name == 'push'
     steps:
       - uses: actions/checkout@v4
-      - uses: rustsec/audit-check@v2
+      - uses: rustsec/audit-check@v2.0.0
         with:
           token: ${{ secrets.GITHUB_TOKEN }}

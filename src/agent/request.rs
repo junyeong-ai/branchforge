@@ -339,10 +339,12 @@ mod tests {
 
     #[test]
     fn tools_segment_can_be_cached_independently() {
-        let mut config = AgentConfig::default();
-        config.cache = CacheConfig::default()
-            .strategy(CacheStrategy::ToolsOnly)
-            .static_ttl(CacheTtl::OneHour);
+        let config = AgentConfig {
+            cache: CacheConfig::default()
+                .strategy(CacheStrategy::ToolsOnly)
+                .static_ttl(CacheTtl::OneHour),
+            ..Default::default()
+        };
         let tools = Arc::new(ToolRegistry::default_tools(ToolSurface::All, None, None));
         let builder = RequestBuilder::new(&config, tools, StaticContext::new());
         let request = builder.build(vec![Message::user("hello")], "");
@@ -363,10 +365,12 @@ mod tests {
 
     #[test]
     fn static_and_tools_cache_keeps_dynamic_rules_uncached() {
-        let mut config = AgentConfig::default();
-        config.cache = CacheConfig::default()
-            .strategy(CacheStrategy::StaticAndTools)
-            .static_ttl(CacheTtl::OneHour);
+        let config = AgentConfig {
+            cache: CacheConfig::default()
+                .strategy(CacheStrategy::StaticAndTools)
+                .static_ttl(CacheTtl::OneHour),
+            ..Default::default()
+        };
 
         let tools = Arc::new(ToolRegistry::default_tools(ToolSurface::All, None, None));
         let static_context = StaticContext::new()
