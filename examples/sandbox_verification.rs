@@ -7,8 +7,8 @@
 //!
 //! Run: cargo run --example sandbox_verification
 
-use claude_agent::security::{SecureFs, SecurityContext, SecurityError};
-use claude_agent::tools::{ExecutionContext, GlobTool, GrepTool, ReadTool, Tool, WriteTool};
+use branchforge::security::{SecureFs, SecurityContext, SecurityError};
+use branchforge::tools::{ExecutionContext, GlobTool, GrepTool, ReadTool, Tool, WriteTool};
 use std::path::PathBuf;
 
 struct TestRunner {
@@ -183,7 +183,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .await;
 
         match &result.output {
-            claude_agent::ToolOutput::Success(content)
+            branchforge::ToolOutput::Success(content)
                 if content.contains("This file is allowed") =>
             {
                 Ok(())
@@ -204,12 +204,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .await;
 
         match &result.output {
-            claude_agent::ToolOutput::Error(e)
+            branchforge::ToolOutput::Error(e)
                 if e.to_string().contains("escape") || e.to_string().contains("outside") =>
             {
                 Ok(())
             }
-            claude_agent::ToolOutput::Error(_) => Ok(()), // Any error is acceptable for blocked access
+            branchforge::ToolOutput::Error(_) => Ok(()), // Any error is acceptable for blocked access
             _ => Err(format!("Should be blocked! Got: {:?}", result)),
         }
     });
@@ -227,7 +227,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .await;
 
         match &result.output {
-            claude_agent::ToolOutput::Success(content) if content.contains("allowed.txt") => Ok(()),
+            branchforge::ToolOutput::Success(content) if content.contains("allowed.txt") => Ok(()),
             _ => Err(format!("Unexpected result: {:?}", result)),
         }
     });
@@ -244,14 +244,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .await;
 
         match &result.output {
-            claude_agent::ToolOutput::Success(content) => {
+            branchforge::ToolOutput::Success(content) => {
                 if content.contains("secret.txt") {
                     Err("Should not find secret.txt!".into())
                 } else {
                     Ok(()) // No matches or only sandbox files = OK
                 }
             }
-            claude_agent::ToolOutput::Error(_) => Ok(()), // Error is also acceptable
+            branchforge::ToolOutput::Error(_) => Ok(()), // Error is also acceptable
             _ => Err(format!("Unexpected result: {:?}", result)),
         }
     });
@@ -271,7 +271,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .await;
 
         match &result.output {
-            claude_agent::ToolOutput::Success(_) | claude_agent::ToolOutput::Empty => {
+            branchforge::ToolOutput::Success(_) | branchforge::ToolOutput::Empty => {
                 if new_file.exists() {
                     Ok(())
                 } else {
@@ -298,7 +298,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             Err("File should NOT have been created outside sandbox!".into())
         } else {
             match &result.output {
-                claude_agent::ToolOutput::Error(_) => Ok(()),
+                branchforge::ToolOutput::Error(_) => Ok(()),
                 _ => Err(format!("Should return error: {:?}", result)),
             }
         }
@@ -362,7 +362,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .await;
 
         match &result.output {
-            claude_agent::ToolOutput::Success(content) if content.contains("allowed") => Ok(()),
+            branchforge::ToolOutput::Success(content) if content.contains("allowed") => Ok(()),
             _ => Err(format!("Unexpected result: {:?}", result)),
         }
     });
@@ -379,14 +379,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .await;
 
         match &result.output {
-            claude_agent::ToolOutput::Success(content) => {
+            branchforge::ToolOutput::Success(content) => {
                 if content.contains("SECRET") {
                     Err("Should NOT find SECRET outside sandbox!".into())
                 } else {
                     Ok(())
                 }
             }
-            claude_agent::ToolOutput::Error(_) => Ok(()), // Error is acceptable
+            branchforge::ToolOutput::Error(_) => Ok(()), // Error is acceptable
             _ => Err(format!("Unexpected result: {:?}", result)),
         }
     });

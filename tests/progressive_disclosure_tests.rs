@@ -5,8 +5,8 @@
 //!
 //! Run: cargo nextest run --test progressive_disclosure_tests --all-features
 
-use claude_agent::{
-    ContentSource, Index, IndexRegistry, SourceType, ToolAccess, ToolOutput, ToolRestricted,
+use branchforge::{
+    ContentSource, Index, IndexRegistry, SourceType, ToolOutput, ToolRestricted, ToolSurface,
     common::PathMatched,
     context::RuleIndex,
     skills::{
@@ -374,7 +374,7 @@ mod skill_tool_tests {
 
     #[tokio::test]
     async fn test_skill_tool_in_default_registry() {
-        let registry = ToolRegistry::default_tools(ToolAccess::All, None, None);
+        let registry = ToolRegistry::default_tools(ToolSurface::All, None, None);
         assert!(registry.contains("Skill"));
     }
 
@@ -488,7 +488,7 @@ mod rule_index_tests {
         .await
         .unwrap();
 
-        let loader = claude_agent::context::MemoryLoader::new();
+        let loader = branchforge::context::MemoryLoader::new();
         let content = loader.load(dir.path()).await.unwrap();
 
         assert_eq!(content.rule_indices.len(), 2);
@@ -574,7 +574,7 @@ Execute the appropriate docker-compose command using Bash.
 // =============================================================================
 
 mod live_tests {
-    use claude_agent::{Agent, Auth};
+    use branchforge::{Agent, Auth};
     use tempfile::tempdir;
     use tokio::fs;
 
@@ -594,7 +594,7 @@ mod live_tests {
                     ),
                 ),
             )
-            .tools(ToolAccess::only(["Skill"]))
+            .tools(ToolSurface::only(["Skill"]))
             .max_iterations(5)
             .build()
             .await
@@ -638,7 +638,7 @@ mod live_tests {
                 SkillIndex::new("docker-helper", "Help with Docker commands")
                     .source(ContentSource::in_memory("Docker command: $ARGUMENTS")),
             )
-            .tools(ToolAccess::only(["Skill", "Read"]))
+            .tools(ToolSurface::only(["Skill", "Read"]))
             .working_dir(dir.path())
             .max_iterations(3)
             .build()

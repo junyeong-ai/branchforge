@@ -9,17 +9,17 @@
 //!
 //! Run: cargo run --example all_tools_test
 
-use claude_agent::ToolOutput;
-use claude_agent::agent::{AgentMetrics, AgentState, TaskOutputTool, TaskRegistry};
-use claude_agent::common::{ContentSource, IndexRegistry};
-use claude_agent::security::SecurityContext;
-use claude_agent::session::{MemoryPersistence, SessionId, SessionState, ToolState};
-use claude_agent::skills::{SkillIndex, SkillRuntime};
-use claude_agent::tools::{
+use branchforge::ToolOutput;
+use branchforge::agent::{AgentMetrics, AgentState, TaskOutputTool, TaskRegistry};
+use branchforge::common::{ContentSource, IndexRegistry};
+use branchforge::security::SecurityContext;
+use branchforge::session::{MemoryPersistence, SessionId, SessionState, ToolState};
+use branchforge::skills::{SkillIndex, SkillRuntime};
+use branchforge::tools::{
     BashTool, EditTool, ExecutionContext, GlobTool, GrepTool, KillShellTool, PlanTool,
     ProcessManager, ReadTool, TodoWriteTool, Tool, WriteTool,
 };
-use claude_agent::types::{StopReason, Usage};
+use branchforge::types::{StopReason, Usage};
 use std::sync::Arc;
 
 struct TestRunner {
@@ -402,12 +402,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let task_id = uuid::Uuid::new_v4().to_string();
     let _cancel_rx = task_registry
-        .register(
+        .register_or_resume(
             task_id.clone(),
             "explore".to_string(),
             "Test task".to_string(),
         )
-        .await;
+        .await
+        .unwrap();
     runner.check("TaskRegistry (register)", {
         let status = task_registry.get_status(&task_id).await;
         if status == Some(SessionState::Active) {
@@ -420,14 +421,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let complete_id = uuid::Uuid::new_v4().to_string();
     drop(
         task_registry
-            .register(
+            .register_or_resume(
                 complete_id.clone(),
                 "general".to_string(),
                 "Complete test".to_string(),
             )
-            .await,
+            .await
+            .unwrap(),
     );
-    let result = claude_agent::AgentResult {
+    let result = branchforge::AgentResult {
         text: "Task completed".to_string(),
         messages: vec![],
         tool_calls: 0,
@@ -440,7 +442,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         structured_output: None,
         uuid: uuid::Uuid::new_v4().to_string(),
     };
-    task_registry.complete(&complete_id, result).await;
+    task_registry.complete(&complete_id, result).await?;
     runner.check("TaskRegistry (complete)", {
         let status = task_registry.get_status(&complete_id).await;
         if status == Some(SessionState::Completed) {
@@ -453,12 +455,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let fail_id = uuid::Uuid::new_v4().to_string();
     drop(
         task_registry
-            .register(fail_id.clone(), "plan".to_string(), "Fail test".to_string())
-            .await,
+            .register_or_resume(fail_id.clone(), "plan".to_string(), "Fail test".to_string())
+            .await
+            .unwrap(),
     );
     task_registry
         .fail(&fail_id, "Simulated error".to_string())
-        .await;
+        .await?;
     runner.check("TaskRegistry (fail)", {
         let status = task_registry.get_status(&fail_id).await;
         if status == Some(SessionState::Failed) {
@@ -471,14 +474,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cancel_id = uuid::Uuid::new_v4().to_string();
     drop(
         task_registry
-            .register(
+            .register_or_resume(
                 cancel_id.clone(),
                 "explore".to_string(),
                 "Cancel test".to_string(),
             )
-            .await,
+            .await
+            .unwrap(),
     );
-    let cancelled = task_registry.cancel(&cancel_id).await;
+    let cancelled = task_registry.cancel(&cancel_id).await?;
     runner.check("TaskRegistry (cancel)", {
         if cancelled {
             let status = task_registry.get_status(&cancel_id).await;

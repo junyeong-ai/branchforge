@@ -5,7 +5,7 @@
 //!
 //! Run: cargo nextest run --test context_and_session_tests --all-features
 
-use claude_agent::context::{ContextBuilder, MemoryLoader};
+use branchforge::context::{ContextBuilder, MemoryLoader};
 use tempfile::tempdir;
 use tokio::fs;
 
@@ -293,7 +293,7 @@ mod context_builder_tests {
 // =============================================================================
 
 mod static_context_tests {
-    use claude_agent::context::StaticContext;
+    use branchforge::context::StaticContext;
 
     #[test]
     fn test_static_context_builder() {
@@ -313,10 +313,11 @@ mod static_context_tests {
 // =============================================================================
 
 mod session_tests {
-    use claude_agent::session::{
-        CompactExecutor, CompactStrategy, Session, SessionConfig, SessionManager, SessionMessage,
+    use branchforge::session::{
+        CompactExecutor, CompactStrategy, Session, SessionAccessScope, SessionConfig,
+        SessionManager, SessionMessage,
     };
-    use claude_agent::types::ContentBlock;
+    use branchforge::types::ContentBlock;
 
     #[test]
     fn test_session_creation_and_messages() {
@@ -324,10 +325,10 @@ mod session_tests {
         let mut session = Session::new(config);
 
         let user_msg = SessionMessage::user(vec![ContentBlock::text("Hello")]);
-        session.add_message(user_msg);
+        session.add_message(user_msg).unwrap();
 
         let assistant_msg = SessionMessage::assistant(vec![ContentBlock::text("Hi there!")]);
-        session.add_message(assistant_msg);
+        session.add_message(assistant_msg).unwrap();
 
         assert_eq!(session.messages.len(), 2);
         assert!(session.current_leaf_id.is_some());
@@ -346,13 +347,14 @@ mod session_tests {
     #[tokio::test]
     async fn test_session_manager_multi_session() {
         let manager = SessionManager::in_memory();
+        let scoped = manager.scoped(SessionAccessScope::default());
 
-        let session1 = manager.create(SessionConfig::default()).await.unwrap();
-        let session2 = manager.create(SessionConfig::default()).await.unwrap();
+        let session1 = scoped.create(SessionConfig::default()).await.unwrap();
+        let session2 = scoped.create(SessionConfig::default()).await.unwrap();
 
         assert_ne!(session1.id, session2.id);
 
-        let found = manager.get(&session1.id).await;
+        let found = scoped.get(&session1.id).await;
         assert!(found.is_ok());
     }
 
@@ -385,16 +387,16 @@ mod session_tests {
 // =============================================================================
 
 mod settings_tests {
-    use claude_agent::config::SettingsLoader;
+    use branchforge::config::SettingsLoader;
 
     #[test]
     fn test_settings_loader_defaults() {
         let loader = SettingsLoader::new();
         let settings = loader.settings();
         assert!(settings.env.is_empty());
-        assert!(settings.permissions.allow.is_empty());
-        assert!(settings.permissions.deny.is_empty());
-        assert_eq!(settings.permissions.default_mode, None);
+        assert!(settings.authorization.allow.is_empty());
+        assert!(settings.authorization.deny.is_empty());
+        assert_eq!(settings.authorization.default_mode, None);
     }
 
     #[tokio::test]
@@ -412,7 +414,7 @@ mod settings_tests {
                 "env": {
                     "TEST_VAR": "test_value"
                 },
-                "permissions": {
+                "authorization": {
                     "deny": ["Read(./.env)"]
                 }
             }"#,
@@ -429,7 +431,7 @@ mod settings_tests {
         );
         assert!(
             settings
-                .permissions
+                .authorization
                 .deny
                 .contains(&"Read(./.env)".to_string())
         );
@@ -471,7 +473,7 @@ mod settings_tests {
 // =============================================================================
 
 mod live_tests {
-    use claude_agent::{Agent, ToolAccess};
+    use branchforge::{Agent, ToolSurface};
     use tempfile::tempdir;
     use tokio::fs;
 
@@ -491,10 +493,10 @@ mod live_tests {
             .unwrap();
 
         let agent = Agent::builder()
-            .from_claude_code(dir.path())
+            .from_claude_cli_workspace(dir.path())
             .await
             .expect("Auth failed")
-            .tools(ToolAccess::only(["Read"]))
+            .tools(ToolSurface::only(["Read"]))
             .working_dir(dir.path())
             .max_iterations(3)
             .build()

@@ -5,8 +5,8 @@
 //!
 //! Run: cargo nextest run --test sdk_core_tests --all-features
 
-use claude_agent::ToolOutput;
-use claude_agent::tools::{
+use branchforge::ToolOutput;
+use branchforge::tools::{
     BashTool, EditTool, ExecutionContext, GlobTool, GrepTool, ReadTool, Tool, WriteTool,
 };
 use serde_json::json;
@@ -23,11 +23,11 @@ fn create_test_context(temp_dir: &TempDir) -> ExecutionContext {
 // =============================================================================
 
 mod auth_tests {
-    use chrono::Utc;
-    use claude_agent::auth::{
+    use branchforge::auth::{
         ChainProvider, Credential, CredentialProvider, EnvironmentProvider, ExplicitProvider,
         OAuthCredential,
     };
+    use chrono::Utc;
     use secrecy::{ExposeSecret, SecretString};
 
     #[test]
@@ -160,8 +160,8 @@ mod auth_tests {
 // =============================================================================
 
 mod client_tests {
-    use claude_agent::client::{DEFAULT_SMALL_MODEL, GatewayConfig, ModelConfig, ProviderConfig};
-    use claude_agent::{Auth, BetaConfig, BetaFeature, Client, OAuthConfig};
+    use branchforge::client::{DEFAULT_SMALL_MODEL, GatewayConfig, ModelConfig, ProviderConfig};
+    use branchforge::{Auth, BetaConfig, BetaFeature, Client, OAuthConfig};
 
     #[tokio::test]
     async fn test_client_builder() {
@@ -216,7 +216,7 @@ mod client_tests {
 
     #[tokio::test]
     async fn test_client_builder_with_credential() {
-        let cred = claude_agent::Credential::api_key("test-key");
+        let cred = branchforge::Credential::api_key("test-key");
         let _builder = Client::builder().auth(cred).await.expect("Auth failed");
     }
 
@@ -296,7 +296,7 @@ mod client_tests {
 // =============================================================================
 
 mod cloud_provider_tests {
-    use claude_agent::client::CloudProvider;
+    use branchforge::client::CloudProvider;
 
     #[test]
     fn test_cloud_provider_default() {
@@ -355,11 +355,11 @@ mod cloud_provider_tests {
 // =============================================================================
 
 mod api_types_tests {
-    use claude_agent::client::messages::RequestMetadata;
-    use claude_agent::client::{
+    use branchforge::client::messages::RequestMetadata;
+    use branchforge::client::{
         ContextManagement, CreateMessageRequest, OutputFormat, ThinkingConfig,
     };
-    use claude_agent::types::{
+    use branchforge::types::{
         ContentBlock, Message, Role, StopReason, ToolDefinition, ToolResultBlock, Usage,
     };
 
@@ -460,14 +460,8 @@ mod api_types_tests {
             RequestMetadata::from_identity(Some("tenant-a"), Some("user-1"), Some("session-1"))
                 .expect("metadata should exist");
         assert_eq!(metadata.user_id.as_deref(), Some("user-1"));
-        assert_eq!(
-            metadata.extra.get("tenant_id"),
-            Some(&serde_json::json!("tenant-a"))
-        );
-        assert_eq!(
-            metadata.extra.get("session_id"),
-            Some(&serde_json::json!("session-1"))
-        );
+        assert_eq!(metadata.tenant_id.as_deref(), Some("tenant-a"));
+        assert_eq!(metadata.session_id.as_deref(), Some("session-1"));
     }
 
     #[test]
@@ -482,7 +476,7 @@ mod api_types_tests {
 // =============================================================================
 
 mod error_tests {
-    use claude_agent::Error;
+    use branchforge::Error;
 
     #[test]
     fn test_error_types() {
@@ -493,7 +487,7 @@ mod error_tests {
         };
         assert!(api_error.to_string().contains("Invalid API key"));
 
-        let tool_error = Error::Tool(claude_agent::types::ToolError::not_found("/test/file.txt"));
+        let tool_error = Error::Tool(branchforge::types::ToolError::not_found("/test/file.txt"));
         assert!(tool_error.to_string().contains("not found"));
 
         let rate_limit = Error::RateLimit {
@@ -514,7 +508,7 @@ mod error_tests {
 // =============================================================================
 
 mod agent_builder_tests {
-    use claude_agent::{Agent, AgentEvent, ToolAccess};
+    use branchforge::{Agent, AgentEvent, ToolSurface};
 
     #[tokio::test]
     async fn test_agent_builder_pattern() {
@@ -523,7 +517,7 @@ mod agent_builder_tests {
             .await
             .expect("Auth failed")
             .model("claude-sonnet-4-5-20250514")
-            .tools(ToolAccess::all())
+            .tools(ToolSurface::all())
             .working_dir(".")
             .max_tokens(4096)
             .max_iterations(10)
@@ -534,19 +528,20 @@ mod agent_builder_tests {
     }
 
     #[test]
-    fn test_agent_tool_access_modes() {
-        let access = ToolAccess::all();
+    fn test_agent_tool_surface_modes() {
+        let access = ToolSurface::all();
         assert!(access.is_allowed("Read"));
         assert!(access.is_allowed("Bash"));
 
-        let access = ToolAccess::none();
+        let access = ToolSurface::none();
         assert!(!access.is_allowed("Read"));
 
-        let access = ToolAccess::only(["Read".to_string(), "Glob".to_string(), "Grep".to_string()]);
+        let access =
+            ToolSurface::only(["Read".to_string(), "Glob".to_string(), "Grep".to_string()]);
         assert!(access.is_allowed("Read"));
         assert!(!access.is_allowed("Bash"));
 
-        let access = ToolAccess::except(["Bash".to_string()]);
+        let access = ToolSurface::except(["Bash".to_string()]);
         assert!(access.is_allowed("Read"));
         assert!(!access.is_allowed("Bash"));
     }
@@ -564,7 +559,7 @@ mod agent_builder_tests {
         let tool_blocked = AgentEvent::ToolBlocked {
             id: "id2".to_string(),
             name: "Bash".to_string(),
-            reason: "Permission denied".to_string(),
+            reason: "Authorization denied".to_string(),
         };
         assert!(matches!(text_event, AgentEvent::Text(_)));
         assert!(matches!(tool_complete, AgentEvent::ToolComplete { .. }));
@@ -577,11 +572,11 @@ mod agent_builder_tests {
 // =============================================================================
 
 mod tool_registry_tests {
-    use claude_agent::{ToolAccess, ToolRegistry};
+    use branchforge::{ToolRegistry, ToolSurface};
 
     #[test]
     fn test_registry_all_tools_registered() {
-        let registry = ToolRegistry::default_tools(ToolAccess::All, None, None);
+        let registry = ToolRegistry::default_tools(ToolSurface::All, None, None);
         let expected = [
             "Read",
             "Write",
@@ -603,7 +598,7 @@ mod tool_registry_tests {
 
     #[test]
     fn test_registry_tool_definitions_count() {
-        let registry = ToolRegistry::default_tools(ToolAccess::All, None, None);
+        let registry = ToolRegistry::default_tools(ToolSurface::All, None, None);
         let definitions = registry.definitions();
         assert_eq!(definitions.len(), 12);
         for def in &definitions {
@@ -613,29 +608,30 @@ mod tool_registry_tests {
     }
 
     #[test]
-    fn test_registry_tool_access_filtering() {
-        let registry = ToolRegistry::default_tools(ToolAccess::only(["Read", "Write"]), None, None);
+    fn test_registry_tool_surface_filtering() {
+        let registry =
+            ToolRegistry::default_tools(ToolSurface::only(["Read", "Write"]), None, None);
         assert!(registry.contains("Read"));
         assert!(registry.contains("Write"));
         assert!(!registry.contains("Bash"));
     }
 
     #[test]
-    fn test_registry_tool_access_except() {
-        let registry = ToolRegistry::default_tools(ToolAccess::except(["Bash"]), None, None);
+    fn test_registry_tool_surface_except() {
+        let registry = ToolRegistry::default_tools(ToolSurface::except(["Bash"]), None, None);
         assert!(registry.contains("Read"));
         assert!(!registry.contains("Bash"));
     }
 
     #[test]
-    fn test_registry_tool_access_none() {
-        let registry = ToolRegistry::default_tools(ToolAccess::None, None, None);
+    fn test_registry_tool_surface_none() {
+        let registry = ToolRegistry::default_tools(ToolSurface::None, None, None);
         assert_eq!(registry.names().len(), 0);
     }
 
     #[test]
     fn test_registry_definitions_have_required_fields() {
-        let registry = ToolRegistry::default_tools(ToolAccess::All, None, None);
+        let registry = ToolRegistry::default_tools(ToolSurface::All, None, None);
         for def in registry.definitions() {
             assert!(!def.name.is_empty());
             assert!(!def.description.is_empty());
@@ -645,7 +641,7 @@ mod tool_registry_tests {
 
     #[test]
     fn test_registry_read_tool_schema() {
-        let registry = ToolRegistry::default_tools(ToolAccess::All, None, None);
+        let registry = ToolRegistry::default_tools(ToolSurface::All, None, None);
         let read_tool = registry.get("Read").expect("Read tool should exist");
         let def = read_tool.definition();
         let props = def
@@ -667,7 +663,7 @@ mod tool_registry_tests {
 
     #[test]
     fn test_registry_bash_tool_schema() {
-        let registry = ToolRegistry::default_tools(ToolAccess::All, None, None);
+        let registry = ToolRegistry::default_tools(ToolSurface::All, None, None);
         let bash_tool = registry.get("Bash").expect("Bash tool should exist");
         let def = bash_tool.definition();
         let props = def
@@ -690,7 +686,7 @@ mod tool_registry_tests {
 
     #[test]
     fn test_registry_edit_tool_schema() {
-        let registry = ToolRegistry::default_tools(ToolAccess::All, None, None);
+        let registry = ToolRegistry::default_tools(ToolSurface::All, None, None);
         let edit_tool = registry.get("Edit").expect("Edit tool should exist");
         let def = edit_tool.definition();
         let props = def
@@ -712,7 +708,7 @@ mod tool_registry_tests {
 
     #[test]
     fn test_registry_write_tool_schema() {
-        let registry = ToolRegistry::default_tools(ToolAccess::All, None, None);
+        let registry = ToolRegistry::default_tools(ToolSurface::All, None, None);
         let tool = registry.get("Write").expect("Write tool should exist");
         let def = tool.definition();
         let props = def
@@ -732,7 +728,7 @@ mod tool_registry_tests {
 
     #[test]
     fn test_registry_glob_tool_schema() {
-        let registry = ToolRegistry::default_tools(ToolAccess::All, None, None);
+        let registry = ToolRegistry::default_tools(ToolSurface::All, None, None);
         let tool = registry.get("Glob").expect("Glob tool should exist");
         let def = tool.definition();
         let props = def
@@ -751,7 +747,7 @@ mod tool_registry_tests {
 
     #[test]
     fn test_registry_grep_tool_schema() {
-        let registry = ToolRegistry::default_tools(ToolAccess::All, None, None);
+        let registry = ToolRegistry::default_tools(ToolSurface::All, None, None);
         let tool = registry.get("Grep").expect("Grep tool should exist");
         let def = tool.definition();
         let props = def
@@ -771,7 +767,7 @@ mod tool_registry_tests {
 
     #[test]
     fn test_registry_tool_descriptions_reasonable_size() {
-        let registry = ToolRegistry::default_tools(ToolAccess::All, None, None);
+        let registry = ToolRegistry::default_tools(ToolSurface::All, None, None);
         for def in registry.definitions() {
             let desc_len = def.description.len();
             let max_len = match def.name.as_str() {
@@ -792,7 +788,7 @@ mod tool_registry_tests {
 
     #[test]
     fn test_registry_input_schemas_complete() {
-        let registry = ToolRegistry::default_tools(ToolAccess::All, None, None);
+        let registry = ToolRegistry::default_tools(ToolSurface::All, None, None);
         for def in registry.definitions() {
             let schema = &def.input_schema;
             assert!(schema.get("type").is_some(), "{} missing type", def.name);
@@ -807,7 +803,7 @@ mod tool_registry_tests {
 
     #[test]
     fn test_registry_tool_count_reasonable() {
-        let registry = ToolRegistry::default_tools(ToolAccess::All, None, None);
+        let registry = ToolRegistry::default_tools(ToolSurface::All, None, None);
         let tool_count = registry.names().len();
         assert!(tool_count >= 5);
         assert!(tool_count <= 20);
@@ -820,9 +816,9 @@ mod tool_registry_tests {
 
 mod tool_execution_tests {
     use super::*;
-    use claude_agent::session::SessionId;
-    use claude_agent::session::ToolState;
-    use claude_agent::tools::TodoWriteTool;
+    use branchforge::session::SessionId;
+    use branchforge::session::ToolState;
+    use branchforge::tools::TodoWriteTool;
 
     #[tokio::test]
     async fn test_tool_read_basic() {
@@ -1056,7 +1052,7 @@ mod tool_execution_tests {
 
     #[tokio::test]
     async fn test_tool_bash_background() {
-        let process_manager = Arc::new(claude_agent::tools::ProcessManager::new());
+        let process_manager = Arc::new(branchforge::tools::ProcessManager::new());
         let tool = BashTool::process_manager(process_manager);
         let ctx = ExecutionContext::default();
         let result = tool
@@ -1090,7 +1086,7 @@ mod tool_execution_tests {
     #[tokio::test]
     async fn test_tool_unknown_tool_error() {
         let registry =
-            claude_agent::ToolRegistry::default_tools(claude_agent::ToolAccess::All, None, None);
+            branchforge::ToolRegistry::default_tools(branchforge::ToolSurface::All, None, None);
         let result = registry.execute("NonexistentTool", json!({})).await;
         assert!(result.is_error());
         match &result.output {
@@ -1101,10 +1097,10 @@ mod tool_execution_tests {
 
     #[tokio::test]
     async fn test_tool_read_nonexistent_file() {
-        let registry = claude_agent::ToolRegistry::default_tools(
-            claude_agent::ToolAccess::All,
+        let registry = branchforge::ToolRegistry::default_tools(
+            branchforge::ToolSurface::All,
             Some(std::path::PathBuf::from("/tmp")),
-            Some(claude_agent::PermissionPolicy::permissive()),
+            Some(branchforge::AuthorizationPolicy::permissive()),
         );
         let result = registry
             .execute(
@@ -1121,7 +1117,7 @@ mod tool_execution_tests {
 // =============================================================================
 
 mod server_tool_tests {
-    use claude_agent::tools::{WebFetchTool, WebSearchTool};
+    use branchforge::tools::{WebFetchTool, WebSearchTool};
 
     #[test]
     fn test_web_fetch_tool_config() {
@@ -1224,7 +1220,7 @@ mod integration_scenarios {
 // =============================================================================
 
 mod mcp_tests {
-    use claude_agent::mcp::{
+    use branchforge::mcp::{
         McpConnectionStatus, McpContent, McpServerConfig, McpServerState, McpToolResult,
     };
     use std::collections::HashMap;
@@ -1301,7 +1297,7 @@ mod mcp_tests {
 // =============================================================================
 
 mod caching_tests {
-    use claude_agent::types::{
+    use branchforge::types::{
         CacheControl, CacheType, SystemBlock, SystemPrompt, TokenUsage, Usage,
     };
 
@@ -1402,7 +1398,7 @@ mod caching_tests {
 // =============================================================================
 
 mod live_tests {
-    use claude_agent::{Agent, Auth, Client, ToolAccess};
+    use branchforge::{Agent, Auth, Client, ToolSurface};
     use futures::StreamExt;
     use std::pin::pin;
     use tempfile::tempdir;
@@ -1458,7 +1454,7 @@ mod live_tests {
             .auth(Auth::ClaudeCli)
             .await
             .expect("Failed to load CLI credentials")
-            .tools(ToolAccess::only(["Read"]))
+            .tools(ToolSurface::only(["Read"]))
             .working_dir(dir.path())
             .max_iterations(5)
             .build()
@@ -1478,7 +1474,7 @@ mod live_tests {
             .auth(Auth::ClaudeCli)
             .await
             .expect("Failed to load CLI credentials")
-            .tools(ToolAccess::none())
+            .tools(ToolSurface::none())
             .max_iterations(1)
             .build()
             .await
@@ -1492,8 +1488,8 @@ mod live_tests {
         let mut has_complete = false;
         while let Some(event) = stream.next().await {
             match event.expect("Event error") {
-                claude_agent::AgentEvent::Text(_) => has_text = true,
-                claude_agent::AgentEvent::Complete(_) => has_complete = true,
+                branchforge::AgentEvent::Text(_) => has_text = true,
+                branchforge::AgentEvent::Complete(_) => has_complete = true,
                 _ => {}
             }
         }

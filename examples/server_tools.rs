@@ -5,7 +5,7 @@
 //!
 //! Run: cargo run --example server_tools
 
-use claude_agent::{Agent, Auth, ToolAccess, permissions::PermissionMode};
+use branchforge::{Agent, Auth, ToolSurface, authorization::AuthorizationMode};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Instant;
 
@@ -55,8 +55,8 @@ async fn test_web_search() -> Result<(), String> {
         .auth(Auth::ClaudeCli)
         .await
         .map_err(|e| format!("Auth: {}", e))?
-        .tools(ToolAccess::all())
-        .permission_mode(PermissionMode::BypassPermissions)
+        .tools(ToolSurface::all())
+        .authorization_mode(AuthorizationMode::AllowAll)
         .working_dir(".")
         .build()
         .await
@@ -83,8 +83,8 @@ async fn test_web_fetch() -> Result<(), String> {
         .auth(Auth::ClaudeCli)
         .await
         .map_err(|e| format!("Auth: {}", e))?
-        .tools(ToolAccess::all())
-        .permission_mode(PermissionMode::BypassPermissions)
+        .tools(ToolSurface::all())
+        .authorization_mode(AuthorizationMode::AllowAll)
         .working_dir(".")
         .build()
         .await

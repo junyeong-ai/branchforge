@@ -1,7 +1,7 @@
 //! Advanced Features Integration Test
 //!
 //! Verifies advanced SDK features:
-//! - Permission Modes (BypassPermissions, AcceptEdits, allow_tool, Default)
+//! - Authorization Modes (AllowAll, AutoApproveFiles, allow_tool, Default)
 //! - Hook System (HookManager, HookEvent, HookOutput)
 //! - Session Manager (create, update, fork, lifecycle, tenant)
 //! - Subagent System (SubagentIndex, builtin_subagents)
@@ -9,12 +9,12 @@
 //! Run: cargo run --example advanced_test
 
 use async_trait::async_trait;
-use claude_agent::{
-    Agent, Auth, Hook, ToolAccess,
+use branchforge::{
+    Agent, Auth, Hook, ToolSurface,
+    authorization::{AuthorizationMode, AuthorizationPolicy},
     common::ContentSource,
     hooks::{HookContext, HookEvent, HookInput, HookManager, HookOutput},
-    permissions::{PermissionMode, PermissionPolicy},
-    session::{SessionConfig, SessionManager, SessionState},
+    session::{SessionAccessScope, SessionConfig, SessionManager, SessionState},
     subagents::{SubagentIndex, builtin_subagents},
     types::ContentBlock,
 };
@@ -51,19 +51,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let working_dir = std::env::current_dir().expect("Failed to get cwd");
 
-    println!("Section 1: Permission Modes");
+    println!("Section 1: Authorization Modes");
     println!("------------------------------------------------------------------------");
+    test!("AllowAll mode", test_allow_all_mode(&working_dir).await);
     test!(
-        "BypassPermissions mode",
-        test_bypass_permissions(&working_dir).await
+        "AutoApproveFiles mode",
+        test_accept_edits(&working_dir).await
     );
-    test!("AcceptEdits mode", test_accept_edits(&working_dir).await);
     test!(
         "allow_tool rules",
         test_allow_tool_rules(&working_dir).await
     );
-    test!("Default mode denies", test_default_mode_denies());
-    test!("PermissionPolicy API", test_permission_policy_api());
+    test!("Rules mode denies", test_default_mode_denies());
+    test!("AuthorizationPolicy API", test_authorization_policy_api());
 
     println!("\nSection 2: Hook System");
     println!("------------------------------------------------------------------------");
@@ -99,16 +99,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 // =============================================================================
-// Section 1: Permission Modes
+// Section 1: Authorization Modes
 // =============================================================================
 
-async fn test_bypass_permissions(working_dir: &PathBuf) -> Result<(), String> {
+async fn test_allow_all_mode(working_dir: &PathBuf) -> Result<(), String> {
     let agent = Agent::builder()
         .auth(Auth::ClaudeCli)
         .await
         .map_err(|e| format!("Auth: {}", e))?
-        .tools(ToolAccess::only(["Bash"]))
-        .permission_mode(PermissionMode::BypassPermissions)
+        .tools(ToolSurface::only(["Bash"]))
+        .authorization_mode(AuthorizationMode::AllowAll)
         .working_dir(working_dir)
         .build()
         .await
@@ -135,8 +135,8 @@ async fn test_accept_edits(working_dir: &PathBuf) -> Result<(), String> {
         .auth(Auth::ClaudeCli)
         .await
         .map_err(|e| format!("Auth: {}", e))?
-        .tools(ToolAccess::only(["Write", "Read"]))
-        .permission_mode(PermissionMode::AcceptEdits)
+        .tools(ToolSurface::only(["Write", "Read"]))
+        .authorization_mode(AuthorizationMode::AutoApproveFiles)
         .working_dir(working_dir)
         .build()
         .await
@@ -167,8 +167,8 @@ async fn test_allow_tool_rules(working_dir: &PathBuf) -> Result<(), String> {
         .auth(Auth::ClaudeCli)
         .await
         .map_err(|e| format!("Auth: {}", e))?
-        .tools(ToolAccess::only(["Glob"]))
-        .permission_mode(PermissionMode::Default)
+        .tools(ToolSurface::only(["Glob"]))
+        .authorization_mode(AuthorizationMode::Rules)
         .allow_tool("Glob")
         .working_dir(working_dir)
         .build()
@@ -188,28 +188,28 @@ async fn test_allow_tool_rules(working_dir: &PathBuf) -> Result<(), String> {
 }
 
 fn test_default_mode_denies() -> Result<(), String> {
-    let policy = PermissionPolicy::default();
+    let policy = AuthorizationPolicy::default();
     let result = policy.check("Read", &serde_json::json!({"file_path": "/etc/passwd"}));
 
     if result.is_allowed() {
         return Err("Should deny without allow rule".into());
     }
-    if !result.reason.contains("Default mode") {
+    if !result.reason.contains("Rules mode") {
         return Err(format!("Wrong reason: {}", result.reason));
     }
     Ok(())
 }
 
-fn test_permission_policy_api() -> Result<(), String> {
-    let accept = PermissionPolicy::accept_edits();
+fn test_authorization_policy_api() -> Result<(), String> {
+    let accept = AuthorizationPolicy::auto_approve_files();
     if !accept.check("Read", &serde_json::json!({})).is_allowed() {
-        return Err("AcceptEdits should allow Read".into());
+        return Err("AutoApproveFiles should allow Read".into());
     }
     if accept.check("Bash", &serde_json::json!({})).is_allowed() {
-        return Err("AcceptEdits should deny Bash".into());
+        return Err("AutoApproveFiles should deny Bash".into());
     }
 
-    let bypass = PermissionPolicy::permissive();
+    let bypass = AuthorizationPolicy::permissive();
     if !bypass.check("Bash", &serde_json::json!({})).is_allowed() {
         return Err("Permissive should allow all".into());
     }
@@ -252,7 +252,7 @@ impl Hook for TestHook {
         &self,
         _input: HookInput,
         _ctx: &HookContext,
-    ) -> Result<HookOutput, claude_agent::Error> {
+    ) -> Result<HookOutput, branchforge::Error> {
         Ok(HookOutput::allow())
     }
 }
@@ -336,7 +336,8 @@ fn test_hook_priority() -> Result<(), String> {
 
 async fn test_session_create() -> Result<(), String> {
     let manager = SessionManager::in_memory();
-    let session = manager
+    let scoped = manager.scoped(SessionAccessScope::default());
+    let session = scoped
         .create(SessionConfig::default())
         .await
         .map_err(|e| e.to_string())?;
@@ -353,16 +354,17 @@ async fn test_session_create() -> Result<(), String> {
 
 async fn test_session_update() -> Result<(), String> {
     let manager = SessionManager::in_memory();
-    let mut session = manager
+    let scoped = manager.scoped(SessionAccessScope::default());
+    let mut session = scoped
         .create(SessionConfig::default())
         .await
         .map_err(|e| e.to_string())?;
     let id = session.id;
 
     session.summary = Some("Updated summary".into());
-    manager.update(&session).await.map_err(|e| e.to_string())?;
+    scoped.update(&session).await.map_err(|e| e.to_string())?;
 
-    let restored = manager.get(&id).await.map_err(|e| e.to_string())?;
+    let restored = scoped.get(&id).await.map_err(|e| e.to_string())?;
     if restored.summary != Some("Updated summary".into()) {
         return Err("Summary not updated".into());
     }
@@ -371,20 +373,21 @@ async fn test_session_update() -> Result<(), String> {
 }
 
 async fn test_session_messages() -> Result<(), String> {
-    use claude_agent::session::SessionMessage;
+    use branchforge::session::SessionMessage;
 
     let manager = SessionManager::in_memory();
-    let session = manager
+    let scoped = manager.scoped(SessionAccessScope::default());
+    let session = scoped
         .create(SessionConfig::default())
         .await
         .map_err(|e| e.to_string())?;
     let id = session.id;
 
-    manager
+    scoped
         .add_message(&id, SessionMessage::user(vec![ContentBlock::text("Hello")]))
         .await
         .map_err(|e| e.to_string())?;
-    manager
+    scoped
         .add_message(
             &id,
             SessionMessage::assistant(vec![ContentBlock::text("Hi!")]),
@@ -392,7 +395,7 @@ async fn test_session_messages() -> Result<(), String> {
         .await
         .map_err(|e| e.to_string())?;
 
-    let restored = manager.get(&id).await.map_err(|e| e.to_string())?;
+    let restored = scoped.get(&id).await.map_err(|e| e.to_string())?;
     if restored.messages.len() != 2 {
         return Err(format!(
             "Expected 2 messages, got {}",
@@ -404,20 +407,21 @@ async fn test_session_messages() -> Result<(), String> {
 }
 
 async fn test_session_fork() -> Result<(), String> {
-    use claude_agent::session::SessionMessage;
+    use branchforge::session::SessionMessage;
 
     let manager = SessionManager::in_memory();
-    let session = manager
+    let scoped = manager.scoped(SessionAccessScope::default());
+    let session = scoped
         .create(SessionConfig::default())
         .await
         .map_err(|e| e.to_string())?;
     let id = session.id;
 
-    manager
+    scoped
         .add_message(&id, SessionMessage::user(vec![ContentBlock::text("Hello")]))
         .await
         .map_err(|e| e.to_string())?;
-    manager
+    scoped
         .add_message(
             &id,
             SessionMessage::assistant(vec![ContentBlock::text("Hi!")]),
@@ -425,7 +429,15 @@ async fn test_session_fork() -> Result<(), String> {
         .await
         .map_err(|e| e.to_string())?;
 
-    let forked = manager.fork(&id).await.map_err(|e| e.to_string())?;
+    let original = scoped.get(&id).await.map_err(|e| e.to_string())?;
+    let head = original
+        .graph
+        .branch_head(original.graph.primary_branch)
+        .ok_or_else(|| "Missing head".to_string())?;
+    let forked = scoped
+        .fork_from_node(&id, head)
+        .await
+        .map_err(|e| e.to_string())?;
 
     if forked.id == id {
         return Err("Forked should have different ID".into());
@@ -442,7 +454,8 @@ async fn test_session_fork() -> Result<(), String> {
 
 async fn test_session_lifecycle() -> Result<(), String> {
     let manager = SessionManager::in_memory();
-    let session = manager
+    let scoped = manager.scoped(SessionAccessScope::default());
+    let session = scoped
         .create(SessionConfig::default())
         .await
         .map_err(|e| e.to_string())?;
@@ -452,20 +465,20 @@ async fn test_session_lifecycle() -> Result<(), String> {
         return Err("Initial state wrong".into());
     }
 
-    manager.complete(&id).await.map_err(|e| e.to_string())?;
-    let completed = manager.get(&id).await.map_err(|e| e.to_string())?;
+    scoped.complete(&id).await.map_err(|e| e.to_string())?;
+    let completed = scoped.get(&id).await.map_err(|e| e.to_string())?;
     if completed.state != SessionState::Completed {
         return Err("Should be Completed".into());
     }
 
-    let session2 = manager
+    let session2 = scoped
         .create(SessionConfig::default())
         .await
         .map_err(|e| e.to_string())?;
     let id2 = session2.id;
 
-    manager.set_error(&id2).await.map_err(|e| e.to_string())?;
-    let errored = manager.get(&id2).await.map_err(|e| e.to_string())?;
+    scoped.set_error(&id2).await.map_err(|e| e.to_string())?;
+    let errored = scoped.get(&id2).await.map_err(|e| e.to_string())?;
     if errored.state != SessionState::Failed {
         return Err("Should be Failed".into());
     }
@@ -475,39 +488,51 @@ async fn test_session_lifecycle() -> Result<(), String> {
 
 async fn test_session_tenant() -> Result<(), String> {
     let manager = SessionManager::in_memory();
+    let root = manager.scoped(SessionAccessScope::default());
+    let tenant_a_user_1 = manager.scoped(
+        SessionAccessScope::default()
+            .tenant("tenant-a")
+            .principal("user-1"),
+    );
+    let tenant_a_user_2 = manager.scoped(
+        SessionAccessScope::default()
+            .tenant("tenant-a")
+            .principal("user-2"),
+    );
+    let tenant_b_user_3 = manager.scoped(
+        SessionAccessScope::default()
+            .tenant("tenant-b")
+            .principal("user-3"),
+    );
+    let tenant_a = manager.scoped(SessionAccessScope::default().tenant("tenant-a"));
+    let tenant_b = manager.scoped(SessionAccessScope::default().tenant("tenant-b"));
 
-    manager
-        .create_with_identity(SessionConfig::default(), "tenant-a", "user-1")
+    tenant_a_user_1
+        .create(SessionConfig::default())
         .await
         .map_err(|e| e.to_string())?;
-    manager
-        .create_with_identity(SessionConfig::default(), "tenant-a", "user-2")
+    tenant_a_user_2
+        .create(SessionConfig::default())
         .await
         .map_err(|e| e.to_string())?;
-    manager
-        .create_with_identity(SessionConfig::default(), "tenant-b", "user-3")
+    tenant_b_user_3
+        .create(SessionConfig::default())
         .await
         .map_err(|e| e.to_string())?;
 
-    let all = manager.list().await.map_err(|e| e.to_string())?;
+    let all = root.list().await.map_err(|e| e.to_string())?;
     if all.len() != 3 {
         return Err(format!("Expected 3, got {}", all.len()));
     }
 
-    let tenant_a = manager
-        .list_for_tenant("tenant-a")
-        .await
-        .map_err(|e| e.to_string())?;
-    if tenant_a.len() != 2 {
-        return Err(format!("Tenant A: expected 2, got {}", tenant_a.len()));
+    let tenant_a_list = tenant_a.list().await.map_err(|e| e.to_string())?;
+    if tenant_a_list.len() != 2 {
+        return Err(format!("Tenant A: expected 2, got {}", tenant_a_list.len()));
     }
 
-    let tenant_b = manager
-        .list_for_tenant("tenant-b")
-        .await
-        .map_err(|e| e.to_string())?;
-    if tenant_b.len() != 1 {
-        return Err(format!("Tenant B: expected 1, got {}", tenant_b.len()));
+    let tenant_b_list = tenant_b.list().await.map_err(|e| e.to_string())?;
+    if tenant_b_list.len() != 1 {
+        return Err(format!("Tenant B: expected 1, got {}", tenant_b_list.len()));
     }
 
     Ok(())
@@ -558,7 +583,7 @@ fn test_builtin_subagents() -> Result<(), String> {
 }
 
 fn test_subagent_tools() -> Result<(), String> {
-    use claude_agent::common::ToolRestricted;
+    use branchforge::common::ToolRestricted;
 
     let restricted = SubagentIndex::new("limited", "Limited agent")
         .source(ContentSource::in_memory("Do limited things"))
@@ -590,7 +615,7 @@ fn test_subagent_tools() -> Result<(), String> {
 }
 
 fn test_subagent_model() -> Result<(), String> {
-    use claude_agent::client::{ModelConfig, ModelType};
+    use branchforge::client::{ModelConfig, ModelType};
 
     let config = ModelConfig::default();
 
