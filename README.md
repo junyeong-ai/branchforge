@@ -1,17 +1,17 @@
-# claude-agent-rs
+# branchforge
 
 A Rust-native runtime for stateful coding agents.
 
-[![Crates.io](https://img.shields.io/crates/v/claude-agent.svg)](https://crates.io/crates/claude-agent)
-[![Docs.rs](https://img.shields.io/docsrs/claude-agent)](https://docs.rs/claude-agent)
+[![Crates.io](https://img.shields.io/crates/v/branchforge.svg)](https://crates.io/crates/branchforge)
+[![Docs.rs](https://img.shields.io/docsrs/branchforge)](https://docs.rs/branchforge)
 [![Rust](https://img.shields.io/badge/rust-1.92%2B-orange.svg)](https://www.rust-lang.org)
-[![License](https://img.shields.io/crates/l/claude-agent.svg)](LICENSE)
+[![License](https://img.shields.io/crates/l/branchforge.svg)](LICENSE)
 
 English | [한국어](README.ko.md)
 
 ## Overview
 
-`claude-agent-rs` is more than a thin API binding. It is a Rust-based agent runtime for long-lived engineering workflows.
+`branchforge` is more than a thin API binding. It is a Rust-based agent runtime for long-lived engineering workflows.
 
 The project is designed around:
 
@@ -19,7 +19,7 @@ The project is designed around:
 - durable work history with replay, export, bookmarks, and checkpoints
 - support for Anthropic, Bedrock, Vertex AI, and Azure AI Foundry
 - safe local tool execution with explicit permission control
-- Claude Code-style project resources such as `CLAUDE.md`, skills, and rules
+- workspace resources compatible with the Claude CLI `.claude/` layout
 
 ## Core Value
 
@@ -35,17 +35,17 @@ The project is designed around:
 
 ```toml
 [dependencies]
-claude-agent = "0.2"
+branchforge = "0.2"
 tokio = { version = "1", features = ["full"] }
 ```
 
 ### Simple Query
 
 ```rust
-use claude_agent::query;
+use branchforge::query;
 
 #[tokio::main]
-async fn main() -> claude_agent::Result<()> {
+async fn main() -> branchforge::Result<()> {
     let response = query("Explain the benefits of Rust").await?;
     println!("{response}");
     Ok(())
@@ -55,18 +55,18 @@ async fn main() -> claude_agent::Result<()> {
 ### Build an Agent
 
 ```rust
-use claude_agent::{Agent, ToolAccess};
+use branchforge::{Agent, Auth, ToolSurface};
 
 #[tokio::main]
-async fn main() -> claude_agent::Result<()> {
+async fn main() -> branchforge::Result<()> {
     let agent = Agent::builder()
-        .from_claude_code(".").await?
-        .tools(ToolAccess::all())
+        .auth(Auth::from_env()).await?
+        .tools(ToolSurface::core())
         .build()
         .await?;
 
     let result = agent.execute("Summarize this repository").await?;
-    println!("{}", result.output);
+    println!("{}", result.text());
     Ok(())
 }
 ```
@@ -84,9 +84,9 @@ Supported authentication modes:
 Example:
 
 ```rust
-use claude_agent::Auth;
+use branchforge::Auth;
 
-let agent = claude_agent::Agent::builder()
+let agent = branchforge::Agent::builder()
     .auth(Auth::api_key("sk-ant-..."))
     .await?
     .build()
@@ -111,12 +111,12 @@ See `docs/session.md` for details.
 
 ## Tooling
 
-Built-in tools cover file operations, shell execution, planning, and subagent orchestration.
+The default runtime exposes a minimal core tool surface. Optional workflow tools can be enabled when needed.
 
 - File: Read, Write, Edit, Glob, Grep
 - Execution: Bash, KillShell
-- Agent: Task, TaskOutput, TodoWrite, Skill
-- Planning: Plan
+- Extension: Skill
+- Optional workflow: Task, TaskOutput, TodoWrite, Plan, GraphHistory
 - Server tools: WebFetch, WebSearch, ToolSearch
 
 See `docs/tools.md` for details.
@@ -129,7 +129,7 @@ See `docs/tools.md` for details.
 - `docs/session.md`
 - `docs/tools.md`
 - `docs/security.md`
-- `docs/permissions.md`
+- `docs/authorization.md`
 - `docs/subagents.md`
 - `docs/skills.md`
 - `docs/memory-system.md`

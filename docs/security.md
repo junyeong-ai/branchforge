@@ -7,7 +7,7 @@ The runtime includes multiple safety layers for local tool execution.
 - `SecureFs` for TOCTOU-safe file access
 - `BashAnalyzer` for command analysis
 - OS sandbox support through platform-specific sandboxing
-- permission policies for tool-level control
+- authorization policies for tool-level control
 
 ## Secure File Access
 
@@ -26,5 +26,5 @@ See `sandbox.md` for sandbox-specific details.
 
 ## Related Guides
 
-- `permissions.md`
+- `authorization.md`
 - `sandbox.md`

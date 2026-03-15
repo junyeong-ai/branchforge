@@ -1,17 +1,17 @@
-# claude-agent-rs
+# branchforge
 
 Rust로 작성된 stateful coding agent runtime입니다.
 
-[![Crates.io](https://img.shields.io/crates/v/claude-agent.svg)](https://crates.io/crates/claude-agent)
-[![Docs.rs](https://img.shields.io/docsrs/claude-agent)](https://docs.rs/claude-agent)
+[![Crates.io](https://img.shields.io/crates/v/branchforge.svg)](https://crates.io/crates/branchforge)
+[![Docs.rs](https://img.shields.io/docsrs/branchforge)](https://docs.rs/branchforge)
 [![Rust](https://img.shields.io/badge/rust-1.92%2B-orange.svg)](https://www.rust-lang.org)
-[![License](https://img.shields.io/crates/l/claude-agent.svg)](LICENSE)
+[![License](https://img.shields.io/crates/l/branchforge.svg)](LICENSE)
 
 [English](README.md) | 한국어
 
 ## 소개
 
-`claude-agent-rs`는 단순한 API 바인딩이 아니라, 장기적인 작업 흐름을 다루는 Rust 기반 agent runtime입니다.
+`branchforge`는 단순한 API 바인딩이 아니라, 장기적인 작업 흐름을 다루는 Rust 기반 agent runtime입니다.
 
 이 프로젝트는 다음을 목표로 합니다.
 
@@ -19,7 +19,7 @@ Rust로 작성된 stateful coding agent runtime입니다.
 - replay, export, bookmark, checkpoint를 포함한 지속 가능한 작업 기록
 - Anthropic, Bedrock, Vertex AI, Azure AI Foundry 지원
 - 안전한 로컬 도구 실행과 권한 제어
-- Claude Code 스타일의 프로젝트 리소스(`CLAUDE.md`, skills, rules) 활용
+- Claude CLI의 `.claude/` 레이아웃과 호환되는 워크스페이스 리소스 활용
 
 ## 핵심 가치
 
@@ -35,17 +35,17 @@ Rust로 작성된 stateful coding agent runtime입니다.
 
 ```toml
 [dependencies]
-claude-agent = "0.2"
+branchforge = "0.2"
 tokio = { version = "1", features = ["full"] }
 ```
 
 ### 간단한 질의
 
 ```rust
-use claude_agent::query;
+use branchforge::query;
 
 #[tokio::main]
-async fn main() -> claude_agent::Result<()> {
+async fn main() -> branchforge::Result<()> {
     let response = query("Explain the benefits of Rust").await?;
     println!("{response}");
     Ok(())
@@ -55,18 +55,18 @@ async fn main() -> claude_agent::Result<()> {
 ### 에이전트 생성
 
 ```rust
-use claude_agent::{Agent, ToolAccess};
+use branchforge::{Agent, Auth, ToolSurface};
 
 #[tokio::main]
-async fn main() -> claude_agent::Result<()> {
+async fn main() -> branchforge::Result<()> {
     let agent = Agent::builder()
-        .from_claude_code(".").await?
-        .tools(ToolAccess::all())
+        .auth(Auth::from_env()).await?
+        .tools(ToolSurface::core())
         .build()
         .await?;
 
     let result = agent.execute("Summarize this repository").await?;
-    println!("{}", result.output);
+    println!("{}", result.text());
     Ok(())
 }
 ```
@@ -84,9 +84,9 @@ async fn main() -> claude_agent::Result<()> {
 예시:
 
 ```rust
-use claude_agent::Auth;
+use branchforge::Auth;
 
-let agent = claude_agent::Agent::builder()
+let agent = branchforge::Agent::builder()
     .auth(Auth::api_key("sk-ant-..."))
     .await?
     .build()
@@ -111,12 +111,12 @@ let agent = claude_agent::Agent::builder()
 
 ## 도구 시스템
 
-내장 도구는 파일 작업, 셸 실행, 계획, 서브에이전트 실행을 포함합니다.
+기본 런타임은 최소 코어 도구 표면만 노출하고, 필요할 때 워크플로우 도구를 추가로 켤 수 있습니다.
 
 - File: Read, Write, Edit, Glob, Grep
 - Execution: Bash, KillShell
-- Agent: Task, TaskOutput, TodoWrite, Skill
-- Planning: Plan
+- Extension: Skill
+- Optional workflow: Task, TaskOutput, TodoWrite, Plan, GraphHistory
 - Server tools: WebFetch, WebSearch, ToolSearch
 
 상세 내용은 `docs/tools.md`를 참고하세요.
@@ -129,7 +129,7 @@ let agent = claude_agent::Agent::builder()
 - `docs/session.md`
 - `docs/tools.md`
 - `docs/security.md`
-- `docs/permissions.md`
+- `docs/authorization.md`
 - `docs/subagents.md`
 - `docs/skills.md`
 - `docs/memory-system.md`

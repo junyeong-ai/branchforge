@@ -4,25 +4,17 @@ This backlog captures the highest-value long-term follow-up work after the graph
 
 ## P0 — Graph Integrity and Durability
 
-### ISSUE-GRAPH-021 — GraphValidator
+### ISSUE-GRAPH-021 — Restore Diagnostics and Corruption Classification
 
-- validate branch head consistency
-- validate bookmark/checkpoint targets
-- detect orphan nodes
-- validate parent-child graph shape
-- validate provenance consistency where required
+- add corruption-class specific diagnostics to restore verification failures
+- surface identity-specific mismatch causes directly in verifier output
+- improve operator-facing restore error messages for partial corruption cases
 
-### ISSUE-ARCHIVE-001 — Archive Import and Restore Contract
+### ISSUE-ARCHIVE-001 — Cross-Backend Archive Drill Coverage
 
-- formalize import path for `SessionArchiveBundle`
-- define queue and summary inclusion policy
-- add cross-backend restore verification
-
-### ISSUE-SURREAL-029 — Longer Soak and Failure Matrix
-
-- longer save/load/search cycles
-- broader auth/bootstrap/migration failure classes
-- repeated restore-after-soak checks
+- add broader backend drill scenarios around archive restore
+- validate redacted archive bundles under more export-policy combinations
+- expand queue restore scenarios across persistence backends
 
 ## P1 — Provenance and Audit Expansion
 

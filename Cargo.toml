@@ -1,14 +1,14 @@
 [package]
-name = "claude-agent"
+name = "branchforge"
 version = "0.2.25"
 edition = "2024"
 rust-version = "1.92"
 license = "MIT"
-description = "Rust SDK for building AI agents with Anthropic's Claude - Direct API, no CLI dependency"
-repository = "https://github.com/junyeong-ai/claude-agent-rs"
-documentation = "https://docs.rs/claude-agent"
+description = "Graph-first Rust runtime for durable LLM agents"
+repository = "https://github.com/junyeong-ai/branchforge"
+documentation = "https://docs.rs/branchforge"
 readme = "README.md"
-keywords = ["ai", "claude", "anthropic", "agent", "llm"]
+keywords = ["ai", "agent", "llm", "graph", "runtime"]
 categories = ["api-bindings", "asynchronous"]
 
 [dependencies]

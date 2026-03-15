@@ -1,13 +1,18 @@
 # Tools
 
-The runtime includes built-in tools for file operations, execution, planning, and agent orchestration.
+The runtime exposes a minimal core tool surface by default, with workflow tools available explicitly.
 
-## Built-in Tool Groups
+## Core Tool Groups
 
 - File: `Read`, `Write`, `Edit`, `Glob`, `Grep`
 - Execution: `Bash`, `KillShell`
-- Agent: `Task`, `TaskOutput`, `TodoWrite`, `Skill`, `GraphHistory`
-- Planning: `Plan`
+- Extension: `Skill`
+
+## Optional Workflow Tools
+
+- Agent delegation: `Task`, `TaskOutput`
+- Planning: `TodoWrite`, `Plan`
+- Session exploration: `GraphHistory`
 
 ## Optional Server Tools
 
@@ -19,21 +24,21 @@ When supported by the provider path, the runtime can expose:
 
 ## Access Control
 
-Use `ToolAccess` to allow all, allow a subset, or exclude specific tools.
+Use `ToolSurface` to allow all, allow a subset, or exclude specific tools.
 
 ```rust
-use claude_agent::ToolAccess;
+use branchforge::ToolSurface;
 
-ToolAccess::all();
-ToolAccess::only(["Read", "Grep", "Glob"]);
-ToolAccess::except(["Bash", "Write"]);
+ToolSurface::core();
+ToolSurface::only(["Read", "Grep", "Glob"]);
+ToolSurface::except(["Bash", "Write"]);
 ```
 
 ## Security Notes
 
 - file access integrates with the secure file layer
 - shell execution is analyzed before execution
-- permission rules can restrict tools and scoped inputs
+- authorization rules can restrict tools and scoped inputs
 
 ## Skill Tool
 
@@ -67,6 +72,6 @@ Bookmark, checkpoint, and node responses can also include lightweight action hin
 
 ## Related Guides
 
-- `permissions.md`
+- `authorization.md`
 - `security.md`
 - `subagents.md`

@@ -29,6 +29,7 @@ The canonical conversation model is a session graph.
 
 - `SessionGraph` is canonical state.
 - `Session.messages` is a derived projection used for compatibility with message-based APIs.
-- Persistence backends may store message projections for efficiency, but graph events and graph metadata remain authoritative.
+- Persistence backends must persist graph events and graph metadata as the only durable source of truth.
+- Message projections and summary caches are derived runtime state, not durable authority.
 - Checkpoints and bookmarks are first-class graph metadata and must round-trip independently of message projections.
 - Compaction may intentionally shrink the message projection for downstream APIs, but it must preserve graph history by appending summary/checkpoint metadata instead of deleting graph state.

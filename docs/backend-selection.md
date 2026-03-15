@@ -1,6 +1,6 @@
 # Backend Selection Guide
 
-Use this guide to choose a persistence backend for `claude-agent-rs`.
+Use this guide to choose a persistence backend for `branchforge`.
 
 ## PostgreSQL
 
@@ -11,7 +11,7 @@ Strengths:
 - strongest operational familiarity
 - good graph-first session durability
 - identity-aware persistence
-- Docker-backed integration coverage in this repository
+- local Docker-backed validation is straightforward
 
 Recommended role:
 
@@ -25,7 +25,7 @@ Strengths:
 
 - good fit for queue and cache behavior
 - simple operational profile for support workloads
-- Docker-backed integration coverage in this repository
+- local Docker-backed validation is straightforward
 
 Recommended role:
 
@@ -52,3 +52,16 @@ Recommended role:
 - production default: PostgreSQL
 - support/cache backend: Redis
 - local/dev backend: JSONL
+
+## Local Validation
+
+CI intentionally does not provision PostgreSQL or Redis containers.
+
+Use one of these local-only workflows:
+
+- `docker compose -f docker-compose.backends.local.yml up -d --wait`
+- `cargo test --test backend_integration_tests --all-features -- --ignored`
+
+Or run the wrapper:
+
+- `./scripts/validate-local-backends.sh all`

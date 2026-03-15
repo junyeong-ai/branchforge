@@ -1,6 +1,6 @@
 # Architecture
 
-`claude-agent-rs` is a Rust-native agent runtime built around a graph-first session model.
+`branchforge` is a Rust-native agent runtime built around a graph-first session model.
 
 ## System Boundaries
 

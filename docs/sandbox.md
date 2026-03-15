@@ -9,7 +9,7 @@ Sandbox support provides platform-specific isolation for local execution.
 
 ## Scope
 
-Sandboxing complements permission rules and secure file access. It is not the only security layer.
+Sandboxing complements authorization rules and secure file access. It is not the only security layer.
 
 ## Configuration Areas
 
@@ -22,4 +22,4 @@ Sandboxing complements permission rules and secure file access. It is not the on
 ## Related Guides
 
 - `security.md`
-- `permissions.md`
+- `authorization.md`

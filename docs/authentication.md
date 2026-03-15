@@ -13,7 +13,7 @@ The runtime supports multiple credential sources and keeps authentication separa
 ## Recommended Entry Points
 
 ```rust
-use claude_agent::{Agent, Auth};
+use branchforge::{Agent, Auth};
 
 let direct = Agent::builder()
     .auth(Auth::api_key("sk-ant-..."))
@@ -22,15 +22,15 @@ let direct = Agent::builder()
     .await?;
 
 let claude_code = Agent::builder()
-    .from_claude_code(".")
+    .from_claude_cli_workspace(".")
     .await?
     .build()
     .await?;
 ```
 
-## Claude Code Resources vs Credentials
+## Claude CLI Workspace Resources vs Credentials
 
-`from_claude_code()` combines credential resolution with project resource loading. If you want different credentials but still want `.claude/` resources, configure them separately.
+`from_claude_cli_workspace()` combines credential resolution with project resource loading. If you want different credentials but still want `.claude/` resources, configure them separately.
 
 ```rust
 Agent::builder()

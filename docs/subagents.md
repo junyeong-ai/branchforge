@@ -24,13 +24,20 @@ Subagents are typically launched through the `Task` tool.
 {
   "description": "Review the auth module",
   "prompt": "Inspect authentication code for risks and summarize findings",
-  "subagent_type": "explore"
+  "subagent_type": "Explore"
 }
 ```
 
 ## Background Execution
 
 Subagents can run in the background and later be polled through `TaskOutput`.
+
+Built-in subagent names are case-sensitive:
+
+- `Bash`
+- `Explore`
+- `Plan`
+- `general-purpose`
 
 ## Relationship to Sessions
 

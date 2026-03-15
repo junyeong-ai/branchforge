@@ -37,18 +37,27 @@ It contains:
 It contains:
 
 - bundle version
+- parent session lineage
 - graph state
 - branch export
 - graph stats
 - optional compact history
+- optional pending queue snapshot
 
 Archive bundles can also be imported back into session storage, then validated with `RestoreVerifier` before the restored session is treated as trusted recovery state.
+
+Restore imports are intentionally conservative:
+
+- existing sessions are not overwritten implicitly
+- pending queue restore is verified against the imported bundle
+- failed restore attempts are rolled back before the bundle is considered recovered
 
 ## Restore Verification
 
 Use `RestoreVerifier` after restore to validate:
 
 - session identity
+- tenant/principal identity
 - branch count
 - node count
 - bookmark count

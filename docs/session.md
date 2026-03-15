@@ -26,7 +26,9 @@ Sessions are modeled as graphs, not flat chat transcripts.
 - `PostgresPersistence`
 - `RedisPersistence`
 
-All backends are expected to preserve graph-first semantics and rebuild message projections from graph state.
+`JsonlPersistence` and `PostgresPersistence` are the graph-first backends. Their durable source of truth is graph events plus graph metadata, and message projections are rebuilt from graph payloads on load.
+
+`RedisPersistence` is a support backend that stores full session snapshots for lightweight persistence, queue, and cache-oriented workloads. It preserves session state, but it is not the event-canonical backend.
 
 ## Compaction Policy
 
@@ -42,7 +44,7 @@ Compaction does not depend on preserving a fixed number of recent raw turns. Ins
 ## Programmatic Use
 
 ```rust
-use claude_agent::session::{Session, SessionConfig};
+use branchforge::session::{Session, SessionConfig};
 
 let mut session = Session::new(SessionConfig::default());
 session.add_user_message("hello");
@@ -71,6 +73,15 @@ For durability and operational recovery, the session module also exposes archive
 - `SessionArchiveService` for canonical archive bundles
 - `ArchivePolicy` for archive-specific inclusion rules
 - `RestoreVerifier` for restore round-trip validation
+
+Archive bundles preserve session lineage and can optionally carry a pending queue snapshot for restore-oriented workflows.
+
+Archive restore is strict by default:
+
+- restores do not silently overwrite an existing session id
+- built-in backends verify the restored round-trip before publishing or committing it
+- queue snapshots are replayed and verified during restore
+- invalid bundles are rejected before durable publication
 
 The graph exploration layer exposes:
 

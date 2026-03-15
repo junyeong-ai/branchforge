@@ -1,6 +1,6 @@
 # Cloud Providers
 
-`claude-agent-rs` supports multiple Anthropic delivery paths through provider adapters.
+`branchforge` supports multiple Anthropic delivery paths through provider adapters.
 
 ## Supported Providers
 
@@ -28,7 +28,7 @@ Each provider adapter is responsible for:
 ## Examples
 
 ```rust
-use claude_agent::{Auth, Client};
+use branchforge::{Auth, Client};
 
 let anthropic = Client::builder().auth(Auth::from_env()).build().await?;
 let bedrock = Client::builder().auth(Auth::bedrock("us-east-1")).build().await?;
