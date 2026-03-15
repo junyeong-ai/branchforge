@@ -47,80 +47,21 @@ impl SchemaTool for PlanTool {
     type Input = PlanInput;
 
     const NAME: &'static str = "Plan";
-    const DESCRIPTION: &'static str = r#"Manage structured planning workflow for complex implementation tasks.
+    const DESCRIPTION: &'static str = "Manage a structured planning workflow. Actions: start (enter plan mode), update (record plan content), complete (finalize and proceed), cancel (abort), status (check state). During plan mode only exploration tools are available.";
 
-## Actions
-
-- **start**: Begin plan mode for complex tasks (creates Draft plan)
-- **complete**: Finalize plan and proceed to implementation (approves plan)
-- **cancel**: Abort current plan
-- **update**: Update plan content while in plan mode
-- **status**: Check current plan state
-
-## When to Use Plan Mode
-
-Use `action: "start"` for implementation tasks unless they're simple:
-
-1. **New Feature Implementation**: Adding meaningful new functionality
-2. **Multiple Valid Approaches**: Task can be solved in several ways
-3. **Code Modifications**: Changes affecting existing behavior
-4. **Architectural Decisions**: Choosing between patterns or technologies
-5. **Multi-File Changes**: Task touching more than 2-3 files
-6. **Unclear Requirements**: Need exploration before understanding scope
-
-## When NOT to Use
-
-Skip for simple tasks:
-- Single-line fixes (typos, obvious bugs)
-- Adding a single function with clear requirements
-- Tasks with specific, detailed instructions
-- Pure research (use Task tool with Explore agent)
-
-## Workflow
-
-1. Call with `action: "start"` to enter plan mode
-2. Explore codebase using Glob, Grep, Read tools
-3. Call with `action: "update"` to record your plan
-4. Call with `action: "complete"` to finalize and proceed
-
-## Examples
-
-```json
-// Start planning
-{"action": "start", "name": "Add user authentication"}
-
-// Update plan content
-{"action": "update", "content": "1. Add JWT middleware\n2. Create auth routes"}
-
-// Complete and proceed
-{"action": "complete"}
-
-// Check status
-{"action": "status"}
-
-// Cancel if needed
-{"action": "cancel"}
-```
-
-## Integration
-
-- Use Plan for high-level approach and exploration
-- Use TodoWrite for granular task tracking during execution
-- Plan content persists across session compaction"#;
-
-    async fn handle(&self, input: PlanInput, _context: &ExecutionContext) -> ToolResult {
+    async fn handle(&self, input: PlanInput, context: &ExecutionContext) -> ToolResult {
         match input.action {
-            PlanAction::Start => self.start(input.name).await,
-            PlanAction::Complete => self.complete().await,
-            PlanAction::Cancel => self.cancel().await,
-            PlanAction::Update => self.update(input.content).await,
+            PlanAction::Start => self.start(input.name, context).await,
+            PlanAction::Complete => self.complete(context).await,
+            PlanAction::Cancel => self.cancel(context).await,
+            PlanAction::Update => self.update(input.content, context).await,
             PlanAction::Status => self.status().await,
         }
     }
 }
 
 impl PlanTool {
-    async fn start(&self, name: Option<String>) -> ToolResult {
+    async fn start(&self, name: Option<String>, context: &ExecutionContext) -> ToolResult {
         if self.state.is_in_plan_mode().await {
             return ToolResult::error(
                 "Already in plan mode. Complete or cancel the current plan first.",
@@ -128,6 +69,9 @@ impl PlanTool {
         }
 
         let plan = self.state.enter_plan_mode(name).await;
+        if let Err(e) = context.persist_tool_state(&self.state).await {
+            return ToolResult::error(format!("Failed to persist plan state: {}", e));
+        }
         ToolResult::success(format!(
             "Plan mode started.\n\
             Plan ID: {}\n\
@@ -139,13 +83,16 @@ impl PlanTool {
         ))
     }
 
-    async fn complete(&self) -> ToolResult {
+    async fn complete(&self, context: &ExecutionContext) -> ToolResult {
         if !self.state.is_in_plan_mode().await {
             return ToolResult::error("No active plan. Use action: \"start\" first.");
         }
 
         match self.state.exit_plan_mode().await {
             Some(plan) => {
+                if let Err(e) = context.persist_tool_state(&self.state).await {
+                    return ToolResult::error(format!("Failed to persist plan state: {}", e));
+                }
                 let content = if plan.content.is_empty() {
                     "No plan content recorded.".to_string()
                 } else {
@@ -169,23 +116,28 @@ impl PlanTool {
         }
     }
 
-    async fn cancel(&self) -> ToolResult {
+    async fn cancel(&self, context: &ExecutionContext) -> ToolResult {
         if !self.state.is_in_plan_mode().await {
             return ToolResult::error("No active plan to cancel.");
         }
 
         match self.state.cancel_plan().await {
-            Some(plan) => ToolResult::success(format!(
-                "Plan cancelled.\n\
-                Plan ID: {}\n\
-                Status: {:?}",
-                plan.id, plan.status
-            )),
+            Some(plan) => {
+                if let Err(e) = context.persist_tool_state(&self.state).await {
+                    return ToolResult::error(format!("Failed to persist plan state: {}", e));
+                }
+                ToolResult::success(format!(
+                    "Plan cancelled.\n\
+                    Plan ID: {}\n\
+                    Status: {:?}",
+                    plan.id, plan.status
+                ))
+            }
             None => ToolResult::error("No active plan found."),
         }
     }
 
-    async fn update(&self, content: Option<String>) -> ToolResult {
+    async fn update(&self, content: Option<String>, context: &ExecutionContext) -> ToolResult {
         if !self.state.is_in_plan_mode().await {
             return ToolResult::error("No active plan. Use action: \"start\" first.");
         }
@@ -196,6 +148,9 @@ impl PlanTool {
         };
 
         self.state.update_plan_content(content.clone()).await;
+        if let Err(e) = context.persist_tool_state(&self.state).await {
+            return ToolResult::error(format!("Failed to persist plan state: {}", e));
+        }
         ToolResult::success(format!(
             "Plan content updated.\n\n## Content\n\n{}",
             content
@@ -240,7 +195,7 @@ impl PlanTool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::session::SessionId;
+    use crate::session::{SessionAccessScope, SessionId, SessionManager};
     use crate::tools::Tool;
 
     fn test_context() -> ExecutionContext {
@@ -359,5 +314,54 @@ mod tests {
             .await;
         assert!(result.is_error());
         assert!(result.text().contains("Content is required"));
+    }
+
+    #[tokio::test]
+    async fn test_plan_actions_persist_with_session_manager() {
+        let manager = SessionManager::in_memory();
+        let scope = SessionAccessScope::default()
+            .tenant("tenant-a")
+            .principal("user-1");
+        let session_id = SessionId::new();
+        let tool_state = ToolState::new(session_id);
+        let tool = PlanTool::new(tool_state);
+        let context = ExecutionContext::permissive()
+            .session_manager(manager.clone())
+            .session_scope(scope.clone());
+
+        let start = tool
+            .execute(
+                serde_json::json!({"action": "start", "name": "Persisted Plan"}),
+                &context,
+            )
+            .await;
+        assert!(!start.is_error());
+
+        let update = tool
+            .execute(
+                serde_json::json!({"action": "update", "content": "1. inspect\n2. ship"}),
+                &context,
+            )
+            .await;
+        assert!(!update.is_error());
+
+        let stored = manager
+            .scoped(scope.clone())
+            .get(&session_id)
+            .await
+            .unwrap();
+        let plan = stored.current_plan.expect("active plan should persist");
+        assert_eq!(plan.name.as_deref(), Some("Persisted Plan"));
+        assert_eq!(plan.content, "1. inspect\n2. ship");
+        assert_eq!(stored.tenant_id.as_deref(), Some("tenant-a"));
+        assert_eq!(stored.principal_id.as_deref(), Some("user-1"));
+
+        let complete = tool
+            .execute(serde_json::json!({"action": "complete"}), &context)
+            .await;
+        assert!(!complete.is_error());
+
+        let completed = manager.scoped(scope).get(&session_id).await.unwrap();
+        assert!(completed.current_plan.is_none());
     }
 }

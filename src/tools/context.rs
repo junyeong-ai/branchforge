@@ -4,15 +4,15 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
 
+use crate::authorization::{AuthorizationResult, ToolLimits};
 use crate::hooks::{HookContext, HookEvent, HookInput, HookManager};
-use crate::permissions::{PermissionResult, ToolLimits};
 use crate::security::bash::{BashAnalysis, SanitizedEnv};
 use crate::security::fs::SecureFileHandle;
 use crate::security::guard::SecurityGuard;
 use crate::security::path::SafePath;
 use crate::security::sandbox::{DomainCheck, SandboxResult};
 use crate::security::{ResourceLimits, SecurityContext, SecurityError};
-use crate::session::SessionManager;
+use crate::session::{SessionAccessScope, SessionManager, ToolState};
 
 #[derive(Clone)]
 pub struct ExecutionContext {
@@ -20,6 +20,7 @@ pub struct ExecutionContext {
     hooks: Option<HookManager>,
     session_id: Option<String>,
     session_manager: Option<SessionManager>,
+    session_scope: Option<SessionAccessScope>,
 }
 
 impl ExecutionContext {
@@ -29,6 +30,7 @@ impl ExecutionContext {
             hooks: None,
             session_id: None,
             session_manager: None,
+            session_scope: None,
         }
     }
 
@@ -47,6 +49,7 @@ impl ExecutionContext {
             hooks: None,
             session_id: None,
             session_manager: None,
+            session_scope: None,
         }
     }
 
@@ -65,8 +68,28 @@ impl ExecutionContext {
         self
     }
 
+    pub fn session_scope(mut self, scope: SessionAccessScope) -> Self {
+        self.session_scope = Some(scope);
+        self
+    }
+
     pub fn graph_manager(&self) -> Option<&SessionManager> {
         self.session_manager.as_ref()
+    }
+
+    pub fn session_scope_ref(&self) -> Option<&SessionAccessScope> {
+        self.session_scope.as_ref()
+    }
+
+    pub async fn persist_tool_state(&self, state: &ToolState) -> crate::Result<()> {
+        let Some(manager) = self.session_manager.as_ref() else {
+            return Ok(());
+        };
+        let session = state.session().await;
+        manager
+            .persist_snapshot(&session, self.session_scope.as_ref())
+            .await
+            .map_err(|e| crate::Error::Session(e.to_string()))
     }
 
     pub async fn fire_hook(&self, event: HookEvent, input: HookInput) {
@@ -197,8 +220,19 @@ impl ExecutionContext {
         self.sanitized_env().vars(sandbox_env)
     }
 
-    pub fn check_permission(&self, tool_name: &str, input: &serde_json::Value) -> PermissionResult {
+    pub fn check_permission(
+        &self,
+        tool_name: &str,
+        input: &serde_json::Value,
+    ) -> AuthorizationResult {
         self.security.policy.permission.check(tool_name, input)
+    }
+
+    pub fn check_explicit_skill_permission(
+        &self,
+        input: &serde_json::Value,
+    ) -> AuthorizationResult {
+        self.security.policy.permission.check_explicit_skill(input)
     }
 
     pub fn validate_security(

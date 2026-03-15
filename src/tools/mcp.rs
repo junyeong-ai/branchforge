@@ -5,7 +5,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use serde_json::Value;
 
-use super::{ExecutionContext, Tool};
+use super::{ExecutionContext, Tool, ToolSurface};
 use crate::mcp::{McpManager, McpToolDefinition, make_mcp_name, parse_mcp_name};
 use crate::types::{ToolDefinition, ToolResult};
 
@@ -53,6 +53,10 @@ impl McpToolWrapper {
 
 #[async_trait]
 impl Tool for McpToolWrapper {
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+
     fn name(&self) -> &str {
         &self.qualified_name
     }
@@ -89,10 +93,21 @@ impl Tool for McpToolWrapper {
 
 /// Creates MCP tool wrappers for all tools from an McpManager.
 pub async fn create_mcp_tools(manager: Arc<McpManager>) -> Vec<Arc<dyn Tool>> {
+    create_mcp_tools_with_access(manager, &ToolSurface::all()).await
+}
+
+/// Creates MCP tool wrappers filtered through the current tool access policy.
+pub async fn create_mcp_tools_with_access(
+    manager: Arc<McpManager>,
+    access: &ToolSurface,
+) -> Vec<Arc<dyn Tool>> {
     let tools_list = manager.list_tools().await;
     let mut wrappers: Vec<Arc<dyn Tool>> = Vec::with_capacity(tools_list.len());
 
     for (qualified_name, definition) in tools_list {
+        if !access.is_allowed(&qualified_name) {
+            continue;
+        }
         if let Some((server, _tool)) = parse_mcp_name(&qualified_name) {
             let wrapper = McpToolWrapper::new(Arc::clone(&manager), server, definition);
             wrappers.push(Arc::new(wrapper));

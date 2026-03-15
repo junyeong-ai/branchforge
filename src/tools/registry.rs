@@ -5,13 +5,13 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use super::ProcessManager;
-use super::access::ToolAccess;
 use super::builder::ToolRegistryBuilder;
 use super::context::ExecutionContext;
 use super::env::ToolExecutionEnv;
+use super::surface::ToolSurface;
 use super::traits::Tool;
 use crate::agent::TaskRegistry;
-use crate::permissions::PermissionPolicy;
+use crate::authorization::AuthorizationPolicy;
 use crate::session::MemoryPersistence;
 use crate::types::{ToolDefinition, ToolOutput, ToolResult};
 use std::path::PathBuf;
@@ -53,9 +53,9 @@ impl ToolRegistry {
     }
 
     pub fn default_tools(
-        access: ToolAccess,
+        access: ToolSurface,
         working_dir: Option<PathBuf>,
-        policy: Option<PermissionPolicy>,
+        policy: Option<AuthorizationPolicy>,
     ) -> Self {
         let mut builder = ToolRegistryBuilder::new().access(access);
         if let Some(dir) = working_dir {
@@ -101,19 +101,38 @@ impl ToolRegistry {
         self.tools.get(name)
     }
 
+    /// Tools allowed during plan mode (exploration only).
+    const PLAN_MODE_TOOLS: &[&str] = &["Plan", "Read", "Glob", "Grep", "TodoWrite", "GraphHistory"];
+
     pub async fn execute(&self, name: &str, input: serde_json::Value) -> ToolResult {
         let tool = match self.tools.get(name) {
             Some(t) => t,
             None => return ToolResult::unknown_tool(name),
         };
 
-        let decision = self.env.context.check_permission(name, &input);
-        if !decision.is_allowed() {
-            return ToolResult::permission_denied(name, decision.reason);
+        // Plan mode guard: only exploration tools allowed during planning
+        if let Some(ref tool_state) = self.env.tool_state
+            && tool_state.is_in_plan_mode().await
+            && !Self::PLAN_MODE_TOOLS.contains(&name)
+        {
+            return ToolResult::error(format!(
+                "Tool '{}' is not available during plan mode. \
+                 Complete or cancel the current plan first. \
+                 Allowed: {}",
+                name,
+                Self::PLAN_MODE_TOOLS.join(", ")
+            ));
         }
 
+        // Security validation first — catches structural violations
+        // regardless of authorization policy
         if let Err(e) = self.env.context.validate_security(name, &input) {
             return ToolResult::security_error(e);
+        }
+
+        let decision = self.env.context.check_permission(name, &input);
+        if !decision.is_allowed() {
+            return ToolResult::authorization_denied(name, decision.reason);
         }
 
         let limits = self.env.context.limits_for(name);
@@ -134,7 +153,7 @@ impl ToolRegistry {
     fn apply_output_limits(
         &self,
         mut result: ToolResult,
-        limits: &crate::permissions::ToolLimits,
+        limits: &crate::authorization::ToolLimits,
     ) -> ToolResult {
         if let Some(max_size) = limits.max_output_size
             && let ToolOutput::Success(ref content) = result.output
@@ -193,7 +212,7 @@ impl Default for ToolRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tools::access::ToolAccess;
+    use crate::tools::surface::ToolSurface;
 
     #[test]
     fn test_tool_output() {
@@ -204,7 +223,7 @@ mod tests {
 
     #[test]
     fn test_default_tools_count() {
-        let registry = ToolRegistry::default_tools(ToolAccess::All, None, None);
+        let registry = ToolRegistry::default_tools(ToolSurface::All, None, None);
         assert!(registry.contains("Read"));
         assert!(registry.contains("Write"));
         assert!(registry.contains("Edit"));
@@ -217,12 +236,13 @@ mod tests {
         assert!(registry.contains("TodoWrite"));
         assert!(registry.contains("Plan"));
         assert!(registry.contains("Skill"));
-        assert!(registry.contains("GraphHistory"));
+        assert!(!registry.contains("GraphHistory"));
     }
 
     #[test]
-    fn test_tool_access_filtering() {
-        let registry = ToolRegistry::default_tools(ToolAccess::only(["Read", "Write"]), None, None);
+    fn test_tool_surface_filtering() {
+        let registry =
+            ToolRegistry::default_tools(ToolSurface::only(["Read", "Write"]), None, None);
         assert!(registry.contains("Read"));
         assert!(registry.contains("Write"));
         assert!(!registry.contains("Bash"));
@@ -251,6 +271,61 @@ mod tests {
 
         let old = registry.register_or_replace(tool2);
         assert!(old.is_some());
+    }
+
+    #[tokio::test]
+    async fn test_plan_mode_blocks_mutation_tools() {
+        use crate::session::{SessionId, session_state::ToolState};
+
+        let tool_state = ToolState::new(SessionId::new());
+        tool_state
+            .enter_plan_mode(Some("Test Plan".to_string()))
+            .await;
+
+        let registry = ToolRegistryBuilder::new()
+            .access(ToolSurface::All)
+            .tool_state(tool_state.clone())
+            .build();
+
+        // Mutation tools should be blocked in plan mode
+        for tool in &["Write", "Edit", "Bash"] {
+            let result = registry
+                .execute(
+                    tool,
+                    serde_json::json!({"file_path": "/test", "content": "x"}),
+                )
+                .await;
+            assert!(result.is_error(), "{tool} should be blocked in plan mode");
+            assert!(
+                result.text().contains("plan mode"),
+                "{tool}: expected plan mode error, got: {}",
+                result.text()
+            );
+        }
+
+        // Exploration tools should NOT be blocked by plan mode
+        for tool in &["Read", "Glob", "Grep", "TodoWrite"] {
+            let result = registry
+                .execute(tool, serde_json::json!({"file_path": "/test"}))
+                .await;
+            assert!(
+                !result.text().contains("not available during plan mode"),
+                "{tool} should not be blocked by plan mode"
+            );
+        }
+
+        // After exiting plan mode, mutations should work again
+        tool_state.exit_plan_mode().await;
+        let result = registry
+            .execute(
+                "Write",
+                serde_json::json!({"file_path": "/test.txt", "content": "x"}),
+            )
+            .await;
+        assert!(
+            !result.text().contains("plan mode"),
+            "Write should not be blocked after exiting plan mode"
+        );
     }
 
     #[test]

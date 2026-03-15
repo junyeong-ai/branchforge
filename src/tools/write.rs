@@ -26,14 +26,7 @@ impl SchemaTool for WriteTool {
     type Input = WriteInput;
 
     const NAME: &'static str = "Write";
-    const DESCRIPTION: &'static str = r#"Writes a file to the local filesystem.
-
-Usage:
-- This tool will overwrite the existing file if there is one at the provided path.
-- If this is an existing file, you MUST use the Read tool first to read the file's contents. This tool will fail if you did not read the file first.
-- ALWAYS prefer editing existing files in the codebase. NEVER write new files unless explicitly required.
-- NEVER proactively create documentation files (*.md) or README files. Only create documentation files if explicitly requested by the User.
-- Only use emojis if the user explicitly requests it. Avoid writing emojis to files unless asked."#;
+    const DESCRIPTION: &'static str = "Write a file to the local filesystem. Overwrites existing files. Creates parent directories if needed. Prefer Edit for modifying existing files.";
 
     async fn handle(&self, input: WriteInput, context: &ExecutionContext) -> ToolResult {
         let path = match context.try_resolve_for(Self::NAME, &input.file_path) {

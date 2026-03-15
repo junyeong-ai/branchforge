@@ -1,5 +1,7 @@
 //! Tool trait definitions.
 
+use std::any::Any;
+
 use async_trait::async_trait;
 use schemars::JsonSchema;
 use serde::de::DeserializeOwned;
@@ -10,6 +12,7 @@ use crate::types::{ToolDefinition, ToolResult};
 /// Core tool trait for all tool implementations.
 #[async_trait]
 pub trait Tool: Send + Sync {
+    fn as_any(&self) -> &dyn Any;
     fn name(&self) -> &str;
     fn description(&self) -> &str;
     fn input_schema(&self) -> serde_json::Value;
@@ -67,6 +70,10 @@ pub trait SchemaTool: Send + Sync {
 
 #[async_trait]
 impl<T: SchemaTool + 'static> Tool for T {
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
     fn name(&self) -> &str {
         T::NAME
     }
@@ -91,9 +98,20 @@ impl<T: SchemaTool + 'static> Tool for T {
     }
 
     async fn execute(&self, input: serde_json::Value, context: &ExecutionContext) -> ToolResult {
-        match serde_json::from_value::<T::Input>(input) {
+        match serde_json::from_value::<T::Input>(input.clone()) {
             Ok(typed) => SchemaTool::handle(self, typed, context).await,
-            Err(e) => ToolResult::error(format!("Invalid input: {}", e)),
+            Err(e) => {
+                let provided: Vec<&str> = input
+                    .as_object()
+                    .map(|obj| obj.keys().map(|k| k.as_str()).collect())
+                    .unwrap_or_default();
+                let hint = if provided.is_empty() {
+                    String::new()
+                } else {
+                    format!("\n  Provided fields: [{}]", provided.join(", "))
+                };
+                ToolResult::error(format!("Invalid input for {}: {}{}", T::NAME, e, hint))
+            }
         }
     }
 }

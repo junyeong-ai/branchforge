@@ -16,42 +16,27 @@ use crate::types::ToolResult;
 pub struct GrepInput {
     /// The regular expression pattern to search for in file contents
     pub pattern: String,
-    /// File or directory to search in (rg PATH). Defaults to current working directory.
+    /// File or directory to search in. Defaults to current working directory.
     #[serde(default)]
     pub path: Option<String>,
-    /// Glob pattern to filter files (e.g. "*.js", "*.{ts,tsx}") - maps to rg --glob
+    /// Glob pattern to filter files (e.g. "*.js", "*.{ts,tsx}")
     #[serde(default)]
     pub glob: Option<String>,
-    /// File type to search (rg --type). Common types: js, py, rust, go, java, etc.
+    /// File type to search (e.g. "js", "py", "rust", "go")
     #[serde(default, rename = "type")]
     pub file_type: Option<String>,
-    /// Output mode: "files_with_matches" shows only file paths (default), "content" shows matching lines, "count" shows match counts
+    /// Output mode: "files_with_matches" (default), "content", or "count"
     #[serde(default)]
     pub output_mode: Option<String>,
-    /// Case insensitive search (rg -i)
+    /// Case insensitive search
     #[serde(default, rename = "-i")]
     pub case_insensitive: Option<bool>,
-    /// Show line numbers in output (rg -n). Requires output_mode: "content". Defaults to true.
-    #[serde(default, rename = "-n")]
-    pub line_numbers: Option<bool>,
-    /// Number of lines to show after each match (rg -A). Requires output_mode: "content".
-    #[serde(default, rename = "-A")]
-    pub after_context: Option<u32>,
-    /// Number of lines to show before each match (rg -B). Requires output_mode: "content".
-    #[serde(default, rename = "-B")]
-    pub before_context: Option<u32>,
-    /// Number of lines to show before and after each match (rg -C). Requires output_mode: "content".
-    #[serde(default, rename = "-C")]
+    /// Lines of context around each match (rg -C). Only applies to output_mode: "content".
+    #[serde(default)]
     pub context: Option<u32>,
-    /// Enable multiline mode where . matches newlines and patterns can span lines (rg -U --multiline-dotall). Default: false.
+    /// Enable multiline matching where patterns can span lines. Default: false.
     #[serde(default)]
     pub multiline: Option<bool>,
-    /// Limit output to first N lines/entries. Works across all output modes. Defaults to 0 (unlimited).
-    #[serde(default)]
-    pub head_limit: Option<usize>,
-    /// Skip first N lines/entries before applying head_limit. Works across all output modes. Defaults to 0.
-    #[serde(default)]
-    pub offset: Option<usize>,
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -69,7 +54,7 @@ impl SchemaTool for GrepTool {
   - Supports full regex syntax (e.g., "log.*Error", "function\s+\w+")
   - Filter files with glob parameter (e.g., "*.js", "**/*.tsx") or type parameter (e.g., "js", "py", "rust")
   - Output modes: "content" shows matching lines, "files_with_matches" shows only file paths (default), "count" shows match counts
-  - Use Task tool for open-ended searches requiring multiple rounds
+  - Prefer a delegated workflow only when it is explicitly enabled for open-ended searches requiring multiple rounds
   - Pattern syntax: Uses ripgrep (not grep) - literal braces need escaping (use `interface\{\}` to find `interface{}` in Go code)
   - Multiline matching: By default patterns match within single lines only. For cross-line patterns like `struct \{[\s\S]*?field`, use `multiline: true`"#;
 
@@ -83,9 +68,7 @@ impl SchemaTool for GrepTool {
 
         match input.output_mode.as_deref() {
             Some("content") => {
-                if input.line_numbers.unwrap_or(true) {
-                    cmd.arg("-n");
-                }
+                cmd.arg("-n"); // Always show line numbers in content mode
             }
             Some("files_with_matches") | None => {
                 cmd.arg("-l");
@@ -104,13 +87,6 @@ impl SchemaTool for GrepTool {
 
         if let Some(c) = input.context {
             cmd.arg("-C").arg(c.to_string());
-        } else {
-            if let Some(a) = input.after_context {
-                cmd.arg("-A").arg(a.to_string());
-            }
-            if let Some(b) = input.before_context {
-                cmd.arg("-B").arg(b.to_string());
-            }
         }
 
         if let Some(t) = &input.file_type {
@@ -151,22 +127,7 @@ impl SchemaTool for GrepTool {
             return ToolResult::success("No matches found");
         }
 
-        let result = apply_pagination(&stdout, input.offset, input.head_limit);
-        ToolResult::success(result)
-    }
-}
-
-fn apply_pagination(content: &str, offset: Option<usize>, limit: Option<usize>) -> String {
-    let offset = offset.unwrap_or(0);
-    match limit {
-        Some(limit) => content
-            .lines()
-            .skip(offset)
-            .take(limit)
-            .collect::<Vec<_>>()
-            .join("\n"),
-        None if offset > 0 => content.lines().skip(offset).collect::<Vec<_>>().join("\n"),
-        None => content.to_string(),
+        ToolResult::success(stdout.trim_end())
     }
 }
 
@@ -198,10 +159,8 @@ mod tests {
             "type": "rust",
             "output_mode": "content",
             "-i": false,
-            "-n": true,
-            "-A": 2,
-            "-B": 1,
-            "-C": 3
+            "context": 3,
+            "multiline": true,
         }))
         .unwrap();
 
@@ -211,10 +170,8 @@ mod tests {
         assert_eq!(input.file_type, Some("rust".to_string()));
         assert_eq!(input.output_mode, Some("content".to_string()));
         assert_eq!(input.case_insensitive, Some(false));
-        assert_eq!(input.line_numbers, Some(true));
-        assert_eq!(input.after_context, Some(2));
-        assert_eq!(input.before_context, Some(1));
         assert_eq!(input.context, Some(3));
+        assert_eq!(input.multiline, Some(true));
     }
 
     #[tokio::test]

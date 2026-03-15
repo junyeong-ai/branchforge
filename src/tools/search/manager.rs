@@ -235,6 +235,42 @@ impl PreparedTools {
         self.immediate.iter().chain(self.deferred.iter())
     }
 
+    pub fn filtered_for_access(&self, access: &crate::tools::ToolSurface) -> Self {
+        let mut immediate: Vec<_> = self
+            .immediate
+            .iter()
+            .filter(|tool| access.is_allowed(&tool.name))
+            .cloned()
+            .collect();
+        let mut deferred: Vec<_> = self
+            .deferred
+            .iter()
+            .filter(|tool| access.is_allowed(&tool.name))
+            .cloned()
+            .collect();
+
+        let total_tokens = immediate
+            .iter()
+            .chain(deferred.iter())
+            .map(ToolDefinition::estimated_tokens)
+            .sum::<usize>();
+        let use_search =
+            self.use_search && !deferred.is_empty() && total_tokens > self.threshold_tokens;
+
+        if !use_search {
+            immediate.append(&mut deferred);
+        }
+
+        Self {
+            use_search,
+            search_mode: self.search_mode,
+            immediate,
+            deferred,
+            total_tokens,
+            threshold_tokens: self.threshold_tokens,
+        }
+    }
+
     pub fn token_savings(&self) -> usize {
         if self.use_search {
             self.deferred
@@ -247,9 +283,19 @@ impl PreparedTools {
     }
 }
 
+impl ToolSearchManager {
+    pub async fn prepare_tools_for_access(
+        &self,
+        access: &crate::tools::ToolSurface,
+    ) -> PreparedTools {
+        self.prepare_tools().await.filtered_for_access(access)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tools::ToolSurface;
 
     #[test]
     fn test_config_threshold_tokens() {
@@ -275,5 +321,58 @@ mod tests {
         let manager = ToolSearchManager::default();
         assert!(!manager.should_use_search().await);
         assert_eq!(manager.total_tokens().await, 0);
+    }
+
+    #[test]
+    fn filtered_tools_hide_denied_entries_and_disable_search_when_empty() {
+        let prepared = PreparedTools {
+            use_search: true,
+            search_mode: SearchMode::Regex,
+            immediate: vec![],
+            deferred: vec![ToolDefinition::new(
+                "mcp__filesystem__read_file",
+                "Read a file",
+                serde_json::json!({"type": "object"}),
+            )],
+            total_tokens: 100,
+            threshold_tokens: 1,
+        };
+
+        let filtered = prepared.filtered_for_access(&ToolSurface::none());
+
+        assert!(!filtered.use_search);
+        assert!(filtered.immediate.is_empty());
+        assert!(filtered.deferred.is_empty());
+        assert_eq!(filtered.total_tokens, 0);
+    }
+
+    #[test]
+    fn filtered_tools_keep_only_allowed_mcp_metadata() {
+        let prepared = PreparedTools {
+            use_search: true,
+            search_mode: SearchMode::Regex,
+            immediate: vec![],
+            deferred: vec![
+                ToolDefinition::new(
+                    "mcp__context7__search",
+                    "Search docs",
+                    serde_json::json!({"type": "object"}),
+                ),
+                ToolDefinition::new(
+                    "mcp__filesystem__read_file",
+                    "Read a file",
+                    serde_json::json!({"type": "object"}),
+                ),
+            ],
+            total_tokens: 10_000,
+            threshold_tokens: 1,
+        };
+
+        let filtered = prepared.filtered_for_access(&ToolSurface::only(["mcp__context7__search"]));
+
+        assert!(filtered.use_search);
+        assert!(filtered.immediate.is_empty());
+        assert_eq!(filtered.deferred.len(), 1);
+        assert_eq!(filtered.deferred[0].name, "mcp__context7__search");
     }
 }
