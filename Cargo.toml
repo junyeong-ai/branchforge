@@ -2,11 +2,11 @@
 name = "branchforge"
 version = "0.2.25"
 edition = "2024"
-rust-version = "1.92"
+rust-version = "1.94"
 license = "MIT"
 description = "Graph-first Rust runtime for durable LLM agents"
 repository = "https://github.com/junyeong-ai/branchforge"
-documentation = "https://docs.rs/branchforge"
+documentation = "https://github.com/junyeong-ai/branchforge/tree/main/docs"
 readme = "README.md"
 keywords = ["ai", "agent", "llm", "graph", "runtime"]
 categories = ["api-bindings", "asynchronous"]

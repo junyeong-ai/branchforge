@@ -2,10 +2,10 @@
 
 A Rust-native runtime for stateful coding agents.
 
-[![Crates.io](https://img.shields.io/crates/v/branchforge.svg)](https://crates.io/crates/branchforge)
-[![Docs.rs](https://img.shields.io/docsrs/branchforge)](https://docs.rs/branchforge)
-[![Rust](https://img.shields.io/badge/rust-1.92%2B-orange.svg)](https://www.rust-lang.org)
-[![License](https://img.shields.io/crates/l/branchforge.svg)](LICENSE)
+[![CI](https://github.com/junyeong-ai/branchforge/actions/workflows/ci.yml/badge.svg)](https://github.com/junyeong-ai/branchforge/actions/workflows/ci.yml)
+[![Rust](https://img.shields.io/badge/rust-1.94%2B-orange.svg)](https://www.rust-lang.org)
+[![Edition](https://img.shields.io/badge/edition-2024-blue.svg)](https://doc.rust-lang.org/edition-guide/)
+[![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 
 English | [한국어](README.ko.md)
 
@@ -18,8 +18,22 @@ The project is designed around:
 - a graph-first session model
 - durable work history with replay, export, bookmarks, and checkpoints
 - support for Anthropic, Bedrock, Vertex AI, and Azure AI Foundry
-- safe local tool execution with explicit permission control
+- safe local tool execution with explicit authorization control
 - workspace resources compatible with the Claude CLI `.claude/` layout
+
+## Documentation
+
+| Guide | Description |
+|-------|-------------|
+| [Architecture](docs/architecture.md) | System boundaries and design principles |
+| [Session & Graph](docs/session.md) | Graph-first session model and persistence |
+| [Tools](docs/tools.md) | Built-in tools, access control, and custom tools |
+| [Skills](docs/skills.md) | Progressive disclosure and skill system |
+| [Subagents](docs/subagents.md) | Delegation, tool restrictions, and model resolution |
+| [Authorization](docs/authorization.md) | Modes, rules, and scoped patterns |
+| [Security](docs/security.md) | SecureFs, bash analysis, and sandboxing |
+| [Authentication](docs/authentication.md) | OAuth, API keys, and cloud providers |
+| [Backend Selection](docs/backend-selection.md) | Memory, JSONL, PostgreSQL, Redis |
 
 ## Core Value
 

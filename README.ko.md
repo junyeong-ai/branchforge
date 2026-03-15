@@ -2,10 +2,10 @@
 
 Rust로 작성된 stateful coding agent runtime입니다.
 
-[![Crates.io](https://img.shields.io/crates/v/branchforge.svg)](https://crates.io/crates/branchforge)
-[![Docs.rs](https://img.shields.io/docsrs/branchforge)](https://docs.rs/branchforge)
-[![Rust](https://img.shields.io/badge/rust-1.92%2B-orange.svg)](https://www.rust-lang.org)
-[![License](https://img.shields.io/crates/l/branchforge.svg)](LICENSE)
+[![CI](https://github.com/junyeong-ai/branchforge/actions/workflows/ci.yml/badge.svg)](https://github.com/junyeong-ai/branchforge/actions/workflows/ci.yml)
+[![Rust](https://img.shields.io/badge/rust-1.94%2B-orange.svg)](https://www.rust-lang.org)
+[![Edition](https://img.shields.io/badge/edition-2024-blue.svg)](https://doc.rust-lang.org/edition-guide/)
+[![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 
 [English](README.md) | 한국어
 
