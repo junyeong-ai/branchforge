@@ -7,7 +7,7 @@ use serde_json::Value;
 
 use super::bash::SecurityConcern;
 use super::{SecurityContext, SecurityError};
-use crate::permissions::ToolLimits;
+use crate::authorization::ToolLimits;
 
 pub struct SecurityGuard;
 

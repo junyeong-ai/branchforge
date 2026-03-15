@@ -12,7 +12,7 @@ use glob::Pattern;
 
 use super::SecurityError;
 use super::path::{SafePath, normalize_path};
-use crate::permissions::ToolLimits;
+use crate::authorization::ToolLimits;
 
 #[derive(Clone)]
 pub struct SecureFs {

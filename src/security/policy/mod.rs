@@ -1,16 +1,16 @@
 //! Security policy configuration.
 
-use crate::permissions::{PermissionMode, PermissionPolicy};
+use crate::authorization::{AuthorizationMode, AuthorizationPolicy};
 
 #[derive(Debug, Clone)]
 pub struct SecurityPolicy {
-    pub permission: PermissionPolicy,
+    pub permission: AuthorizationPolicy,
     pub allow_sandbox_bypass: bool,
     pub max_symlink_depth: u8,
 }
 
 impl SecurityPolicy {
-    pub fn new(permission: PermissionPolicy) -> Self {
+    pub fn new(permission: AuthorizationPolicy) -> Self {
         Self {
             permission,
             allow_sandbox_bypass: false,
@@ -20,7 +20,7 @@ impl SecurityPolicy {
 
     pub fn permissive() -> Self {
         Self {
-            permission: PermissionPolicy::permissive(),
+            permission: AuthorizationPolicy::permissive(),
             allow_sandbox_bypass: true,
             max_symlink_depth: 255,
         }
@@ -28,13 +28,13 @@ impl SecurityPolicy {
 
     pub fn strict() -> Self {
         Self {
-            permission: PermissionPolicy::new(),
+            permission: AuthorizationPolicy::new(),
             allow_sandbox_bypass: false,
             max_symlink_depth: 5,
         }
     }
 
-    pub fn permission(mut self, policy: PermissionPolicy) -> Self {
+    pub fn permission(mut self, policy: AuthorizationPolicy) -> Self {
         self.permission = policy;
         self
     }
@@ -53,14 +53,14 @@ impl SecurityPolicy {
         self.allow_sandbox_bypass
     }
 
-    pub fn mode(&self) -> PermissionMode {
+    pub fn mode(&self) -> AuthorizationMode {
         self.permission.mode
     }
 }
 
 impl Default for SecurityPolicy {
     fn default() -> Self {
-        Self::new(PermissionPolicy::default())
+        Self::new(AuthorizationPolicy::default())
     }
 }
 

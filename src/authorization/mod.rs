@@ -1,12 +1,12 @@
-//! Permission system for controlling tool execution.
+//! Authorization system for controlling tool execution.
 
 mod modes;
 mod rules;
 
-pub use modes::PermissionMode;
+pub use modes::AuthorizationMode;
 pub use rules::{
-    PermissionDecision, PermissionPolicy, PermissionPolicyBuilder, PermissionResult,
-    PermissionRule, ToolLimits,
+    AuthorizationDecision, AuthorizationPolicy, AuthorizationPolicyBuilder, AuthorizationResult,
+    AuthorizationRule, ToolLimits,
 };
 
 pub const READ_ONLY_TOOLS: &[&str] = &["Read", "Glob", "Grep", "WebSearch", "WebFetch"];

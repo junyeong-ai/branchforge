@@ -1,4 +1,4 @@
-//! # claude-agent
+//! # branchforge
 //!
 //! Rust runtime for building stateful coding agents.
 //!
@@ -9,10 +9,10 @@
 //! ## Quick Start
 //!
 //! ```rust,no_run
-//! use claude_agent::query;
+//! use branchforge::query;
 //!
 //! #[tokio::main]
-//! async fn main() -> Result<(), claude_agent::Error> {
+//! async fn main() -> Result<(), branchforge::Error> {
 //!     let response = query("What is 2 + 2?").await?;
 //!     println!("{}", response);
 //!     Ok(())
@@ -22,15 +22,15 @@
 //! ## Full Agent Example
 //!
 //! ```rust,no_run
-//! use claude_agent::{Agent, AgentEvent, ToolAccess};
+//! use branchforge::{Agent, AgentEvent, ToolSurface};
 //! use futures::StreamExt;
 //! use std::pin::pin;
 //!
 //! #[tokio::main]
-//! async fn main() -> Result<(), claude_agent::Error> {
+//! async fn main() -> Result<(), branchforge::Error> {
 //!     let agent = Agent::builder()
 //!         .model("claude-sonnet-4-5")
-//!         .tools(ToolAccess::all())
+//!         .tools(ToolSurface::core())
 //!         .working_dir("./project")
 //!         .build()
 //!         .await?;
@@ -56,6 +56,7 @@
 
 pub mod agent;
 pub mod auth;
+pub mod authorization;
 pub mod budget;
 pub mod client;
 pub mod common;
@@ -68,7 +69,6 @@ pub mod mcp;
 pub mod models;
 pub mod observability;
 pub mod output_style;
-pub mod permissions;
 #[cfg(feature = "plugins")]
 pub mod plugins;
 pub mod prelude;
@@ -90,17 +90,18 @@ pub mod types;
 
 pub use agent::{Agent, AgentBuilder, AgentConfig, AgentEvent, AgentResult};
 pub use auth::{Auth, Credential};
+pub use authorization::{AuthorizationMode, AuthorizationPolicy};
 pub use client::{Client, ClientBuilder};
 pub use credentials::{CredentialKind, CredentialRecord};
 pub use graph::{
-    Bookmark, Branch, BranchExport, BranchId, Checkpoint, ExportBookmark, ExportNode, GraphEvent,
-    GraphEventBody, GraphMaterializer, GraphNode, NodeId, NodeKind, ReplayInput, SessionGraph,
+    Bookmark, Branch, BranchExport, BranchId, Checkpoint, ExportBookmark, ExportNode, GraphError,
+    GraphEvent, GraphEventBody, GraphMaterializer, GraphNode, NodeId, NodeKind, ReplayInput,
+    SessionGraph,
 };
-pub use permissions::{PermissionMode, PermissionPolicy};
 pub use prompting::PromptFrame;
 pub use provider::{CapabilitySupport, ProviderProfile};
 pub use runtime::{RunDescriptor, RuntimeEventRecorder};
-pub use tools::{ExecutionContext, SchemaTool, Tool, ToolAccess, ToolRegistry};
+pub use tools::{ExecutionContext, SchemaTool, Tool, ToolRegistry, ToolSurface};
 pub use types::{ContentBlock, Message, Role, ToolDefinition, ToolError, ToolOutput, ToolResult};
 
 // =========================================================================
@@ -123,7 +124,8 @@ pub use context::{
 pub use hooks::{CommandHook, Hook, HookContext, HookEvent, HookManager, HookOutput};
 pub use output_style::OutputStyle;
 pub use session::{
-    Session, SessionConfig, SessionId, SessionManager, SessionMessage, SessionState, ToolState,
+    ScopedSessionManager, Session, SessionConfig, SessionId, SessionManager, SessionMessage,
+    SessionState, ToolState,
 };
 pub use skills::{SkillIndex, SkillResult, SkillRuntime};
 pub use subagents::{SubagentIndex, builtin_subagents};
@@ -143,7 +145,7 @@ pub use plugins::{PluginDescriptor, PluginDiscovery, PluginError, PluginManager,
 #[cfg(feature = "cli-integration")]
 pub use subagents::{SubagentFrontmatter, SubagentIndexLoader};
 
-/// Error type for claude-agent operations.
+/// Error type for branchforge operations.
 ///
 /// All errors include actionable context to help diagnose and resolve issues.
 #[derive(Debug, thiserror::Error)]
@@ -234,8 +236,8 @@ pub enum Error {
     },
 
     /// Operation blocked by permission policy.
-    #[error("Permission denied: {0}")]
-    Permission(String),
+    #[error("Authorization denied: {0}")]
+    Authorization(String),
 
     /// Budget limit exceeded.
     #[error("Budget exceeded: ${used} used (limit: ${limit})")]
@@ -309,7 +311,7 @@ impl Error {
                 status: Some(401 | 403),
                 ..
             } => ErrorCategory::Authorization,
-            Error::Permission(_) | Error::HookFailed { .. } | Error::HookTimeout { .. } => {
+            Error::Authorization(_) | Error::HookFailed { .. } | Error::HookTimeout { .. } => {
                 ErrorCategory::Authorization
             }
 
@@ -445,27 +447,33 @@ impl From<session::SessionError> for Error {
     }
 }
 
+impl From<graph::GraphError> for Error {
+    fn from(err: graph::GraphError) -> Self {
+        Error::Config(err.to_string())
+    }
+}
+
 impl From<security::SecurityError> for Error {
     fn from(err: security::SecurityError) -> Self {
         match err {
             security::SecurityError::Io(e) => Error::Io(e),
             security::SecurityError::ResourceLimit(msg) => Error::ResourceExhausted(msg),
-            security::SecurityError::BashBlocked(msg) => Error::Permission(msg),
+            security::SecurityError::BashBlocked(msg) => Error::Authorization(msg),
             security::SecurityError::DeniedPath(path) => {
-                Error::Permission(format!("Denied path: {}", path.display()))
+                Error::Authorization(format!("Denied path: {}", path.display()))
             }
             security::SecurityError::PathEscape(path) => {
-                Error::Permission(format!("Path escapes sandbox: {}", path.display()))
+                Error::Authorization(format!("Path escapes sandbox: {}", path.display()))
             }
             security::SecurityError::NotWithinSandbox(path) => {
-                Error::Permission(format!("Path not within sandbox: {}", path.display()))
+                Error::Authorization(format!("Path not within sandbox: {}", path.display()))
             }
             security::SecurityError::InvalidPath(msg) => Error::Config(msg),
-            security::SecurityError::AbsoluteSymlink(path) => Error::Permission(format!(
+            security::SecurityError::AbsoluteSymlink(path) => Error::Authorization(format!(
                 "Absolute symlink outside sandbox: {}",
                 path.display()
             )),
-            security::SecurityError::SymlinkDepthExceeded { path, max } => Error::Permission(
+            security::SecurityError::SymlinkDepthExceeded { path, max } => Error::Authorization(
                 format!("Symlink depth exceeded (max {}): {}", max, path.display()),
             ),
         }
@@ -489,7 +497,7 @@ impl From<security::sandbox::SandboxError> for Error {
                 Error::Config(format!("Sandbox rule application failed: {}", msg))
             }
             security::sandbox::SandboxError::PathNotAccessible(path) => {
-                Error::Permission(format!("Sandbox path not accessible: {}", path.display()))
+                Error::Authorization(format!("Sandbox path not accessible: {}", path.display()))
             }
             security::sandbox::SandboxError::InvalidConfig(msg) => {
                 Error::Config(format!("Invalid sandbox config: {}", msg))

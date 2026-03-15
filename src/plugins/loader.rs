@@ -216,6 +216,17 @@ impl PluginLoader {
         let plugin_root = plugin.root_dir();
         for mut subagent in subagents {
             subagent.name = namespace::namespaced(plugin_name, &subagent.name);
+            subagent.mcp_servers = subagent
+                .mcp_servers
+                .into_iter()
+                .map(|server| {
+                    if namespace::is_namespaced(&server) {
+                        server
+                    } else {
+                        namespace::namespaced(plugin_name, &server)
+                    }
+                })
+                .collect();
             subagent.source_type = SourceType::Plugin;
             Self::collect_resource_hooks(
                 &subagent.hooks,
@@ -393,7 +404,7 @@ mod tests {
         std::fs::create_dir_all(&agents_dir).unwrap();
         std::fs::write(
             agents_dir.join("reviewer.md"),
-            "---\nname: reviewer\ndescription: Code reviewer\n---\nPrompt",
+            "---\nname: reviewer\ndescription: Code reviewer\nmcpServers:\n  - context7\n---\nPrompt",
         )
         .unwrap();
 
@@ -402,6 +413,10 @@ mod tests {
 
         assert_eq!(resources.subagents.len(), 1);
         assert_eq!(resources.subagents[0].name, "my-plugin:reviewer");
+        assert_eq!(
+            resources.subagents[0].mcp_servers,
+            vec!["my-plugin:context7"]
+        );
         assert_eq!(resources.subagents[0].source_type, SourceType::Plugin);
     }
 

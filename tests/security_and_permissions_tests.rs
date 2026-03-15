@@ -1,6 +1,6 @@
-//! Security & Permissions Tests
+//! Security & Authorization Tests
 //!
-//! Tests for security context, guards, permissions, hooks, and network sandbox.
+//! Tests for security context, guards, authorization, hooks, and network sandbox.
 //!
 //! Run: cargo nextest run --test security_and_permissions_tests --all-features
 
@@ -9,7 +9,7 @@
 // =============================================================================
 
 mod security_tests {
-    use claude_agent::security::{SecurityContext, SecurityGuard};
+    use branchforge::security::{SecurityContext, SecurityGuard};
     use tempfile::tempdir;
 
     #[test]
@@ -48,7 +48,7 @@ mod security_tests {
 
     #[tokio::test]
     async fn test_security_bash_dangerous_blocked() {
-        use claude_agent::tools::{BashTool, ExecutionContext, Tool};
+        use branchforge::tools::{BashTool, ExecutionContext, Tool};
 
         let tool = BashTool::new();
         let security = SecurityContext::builder()
@@ -65,7 +65,7 @@ mod security_tests {
         assert!(
             result.is_error()
                 || text.contains("denied")
-                || text.contains("Permission")
+                || text.contains("Authorization")
                 || text.contains("may not be removed")
                 || text.contains("Exit code: 1"),
             "Dangerous command should be blocked or denied: {:?}",
@@ -75,12 +75,13 @@ mod security_tests {
 }
 
 // =============================================================================
-// Permissions
+// Authorization
 // =============================================================================
 
-mod permission_tests {
-    use claude_agent::permissions::{
-        PermissionMode, PermissionPolicyBuilder, is_file_tool, is_read_only_tool, is_shell_tool,
+mod authorization_tests {
+    use branchforge::authorization::{
+        AuthorizationMode, AuthorizationPolicyBuilder, is_file_tool, is_read_only_tool,
+        is_shell_tool,
     };
 
     #[test]
@@ -101,19 +102,19 @@ mod permission_tests {
     }
 
     #[test]
-    fn test_permission_modes() {
-        assert_eq!(PermissionMode::default(), PermissionMode::Default);
+    fn test_authorization_modes() {
+        assert_eq!(AuthorizationMode::default(), AuthorizationMode::Rules);
+        assert_eq!(AuthorizationMode::AllowAll.to_string(), "allowAll");
+        assert_eq!(AuthorizationMode::ReadOnly.to_string(), "readOnly");
         assert_eq!(
-            PermissionMode::BypassPermissions.to_string(),
-            "bypassPermissions"
+            AuthorizationMode::AutoApproveFiles.to_string(),
+            "autoApproveFiles"
         );
-        assert_eq!(PermissionMode::Plan.to_string(), "plan");
-        assert_eq!(PermissionMode::AcceptEdits.to_string(), "acceptEdits");
     }
 
     #[test]
-    fn test_permission_policy_builder() {
-        let policy = PermissionPolicyBuilder::new()
+    fn test_authorization_policy_builder() {
+        let policy = AuthorizationPolicyBuilder::new()
             .allow("Read")
             .allow("Glob")
             .deny("Bash")
@@ -133,7 +134,7 @@ mod permission_tests {
 
 mod hook_tests {
     use async_trait::async_trait;
-    use claude_agent::hooks::{Hook, HookContext, HookEvent, HookInput, HookManager, HookOutput};
+    use branchforge::hooks::{Hook, HookContext, HookEvent, HookInput, HookManager, HookOutput};
 
     struct TestHook {
         name: String,
@@ -163,7 +164,7 @@ mod hook_tests {
             &self,
             input: HookInput,
             _ctx: &HookContext,
-        ) -> Result<HookOutput, claude_agent::Error> {
+        ) -> Result<HookOutput, branchforge::Error> {
             if input.tool_name() == Some("Bash") {
                 return Ok(HookOutput::block("Bash blocked by hook"));
             }
@@ -223,7 +224,7 @@ mod hook_tests {
 // =============================================================================
 
 mod network_sandbox_tests {
-    use claude_agent::tools::{DomainCheck, NetworkSandbox};
+    use branchforge::tools::{DomainCheck, NetworkSandbox};
 
     #[test]
     fn test_network_sandbox_defaults() {

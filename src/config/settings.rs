@@ -1,4 +1,4 @@
-//! Claude Code settings.json provider with hierarchical loading.
+//! Claude CLI workspace settings loader with hierarchical merging.
 //!
 //! Loads settings from (lowest to highest priority):
 //! 1. User settings: ~/.claude/settings.json
@@ -33,7 +33,7 @@ pub struct Settings {
     pub env: HashMap<String, String>,
 
     #[serde(default)]
-    pub permissions: PermissionSettings,
+    pub authorization: AuthorizationSettings,
 
     #[serde(default)]
     pub sandbox: SandboxSettings,
@@ -112,7 +112,7 @@ pub enum HookConfig {
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct PermissionSettings {
+pub struct AuthorizationSettings {
     #[serde(default)]
     pub deny: Vec<String>,
     #[serde(default)]
@@ -121,14 +121,14 @@ pub struct PermissionSettings {
     pub default_mode: Option<String>,
 }
 
-impl PermissionSettings {
-    pub fn to_policy(&self) -> crate::permissions::PermissionPolicy {
-        use crate::permissions::{PermissionMode, PermissionPolicy};
+impl AuthorizationSettings {
+    pub fn to_policy(&self) -> crate::authorization::AuthorizationPolicy {
+        use crate::authorization::{AuthorizationMode, AuthorizationPolicy};
 
-        let mut builder = PermissionPolicy::builder();
+        let mut builder = AuthorizationPolicy::builder();
 
         if let Some(mode_str) = &self.default_mode
-            && let Ok(mode) = mode_str.parse::<PermissionMode>()
+            && let Ok(mode) = mode_str.parse::<AuthorizationMode>()
         {
             builder = builder.mode(mode);
         }
@@ -359,11 +359,15 @@ impl SettingsLoader {
             let managed: Settings = serde_json::from_str(&content)?;
 
             // Lock non-empty fields from enterprise settings
-            if !managed.permissions.deny.is_empty() {
-                self.locked_keys.insert("permissions.deny".to_string());
+            if !managed.authorization.deny.is_empty() {
+                self.locked_keys.insert("authorization.deny".to_string());
             }
-            if !managed.permissions.allow.is_empty() {
-                self.locked_keys.insert("permissions.allow".to_string());
+            if !managed.authorization.allow.is_empty() {
+                self.locked_keys.insert("authorization.allow".to_string());
+            }
+            if managed.authorization.default_mode.is_some() {
+                self.locked_keys
+                    .insert("authorization.defaultMode".to_string());
             }
             if managed.model.is_some() {
                 self.locked_keys.insert("model".to_string());
@@ -396,22 +400,40 @@ impl SettingsLoader {
     }
 
     fn merge_settings(&mut self, other: Settings, is_managed: bool) {
+        if is_managed {
+            if !other.authorization.deny.is_empty() {
+                self.locked_keys.insert("authorization.deny".to_string());
+            }
+            if !other.authorization.allow.is_empty() {
+                self.locked_keys.insert("authorization.allow".to_string());
+            }
+            if other.authorization.default_mode.is_some() {
+                self.locked_keys
+                    .insert("authorization.defaultMode".to_string());
+            }
+            if other.model.is_some() {
+                self.locked_keys.insert("model".to_string());
+            }
+        }
+
         self.settings.env.extend(other.env);
 
-        if !self.locked_keys.contains("permissions.deny") || is_managed {
+        if !self.locked_keys.contains("authorization.deny") || is_managed {
             self.settings
-                .permissions
+                .authorization
                 .deny
-                .extend(other.permissions.deny);
+                .extend(other.authorization.deny);
         }
-        if !self.locked_keys.contains("permissions.allow") || is_managed {
+        if !self.locked_keys.contains("authorization.allow") || is_managed {
             self.settings
-                .permissions
+                .authorization
                 .allow
-                .extend(other.permissions.allow);
+                .extend(other.authorization.allow);
         }
-        if other.permissions.default_mode.is_some() {
-            self.settings.permissions.default_mode = other.permissions.default_mode;
+        if (!self.locked_keys.contains("authorization.defaultMode") || is_managed)
+            && other.authorization.default_mode.is_some()
+        {
+            self.settings.authorization.default_mode = other.authorization.default_mode;
         }
 
         self.settings
@@ -525,26 +547,26 @@ mod tests {
     }
 
     #[test]
-    fn test_permission_settings_to_policy() {
-        use crate::permissions::PermissionMode;
+    fn test_authorization_settings_to_policy() {
+        use crate::authorization::AuthorizationMode;
 
-        let settings = PermissionSettings {
+        let settings = AuthorizationSettings {
             deny: vec!["Bash(rm:*)".to_string()],
             allow: vec!["Bash(git:*)".to_string()],
-            default_mode: Some("acceptEdits".to_string()),
+            default_mode: Some("autoApproveFiles".to_string()),
         };
 
         let policy = settings.to_policy();
-        assert_eq!(policy.mode, PermissionMode::AcceptEdits);
+        assert_eq!(policy.mode, AuthorizationMode::AutoApproveFiles);
         assert_eq!(policy.rules.len(), 2);
     }
 
     #[test]
-    fn test_permission_settings_is_empty() {
-        let empty = PermissionSettings::default();
+    fn test_authorization_settings_is_empty() {
+        let empty = AuthorizationSettings::default();
         assert!(empty.is_empty());
 
-        let with_deny = PermissionSettings {
+        let with_deny = AuthorizationSettings {
             deny: vec!["Bash".to_string()],
             ..Default::default()
         };
@@ -638,5 +660,37 @@ mod tests {
 
         assert!(!settings.is_enabled());
         assert!(!settings.is_empty());
+    }
+
+    #[test]
+    fn test_managed_default_mode_is_locked() {
+        let mut loader = SettingsLoader::new();
+
+        loader.merge_settings(
+            Settings {
+                authorization: AuthorizationSettings {
+                    default_mode: Some("readOnly".to_string()),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+            true,
+        );
+
+        loader.merge_settings(
+            Settings {
+                authorization: AuthorizationSettings {
+                    default_mode: Some("allowAll".to_string()),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+            false,
+        );
+
+        assert_eq!(
+            loader.settings.authorization.default_mode.as_deref(),
+            Some("readOnly")
+        );
     }
 }

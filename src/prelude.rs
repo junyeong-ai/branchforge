@@ -1,12 +1,12 @@
 //! Prelude module for convenient imports.
 //!
 //! This module re-exports the most commonly used types and traits
-//! for building Claude-powered applications.
+//! for building branchforge applications.
 //!
 //! # Usage
 //!
 //! ```rust
-//! use claude_agent::prelude::*;
+//! use branchforge::prelude::*;
 //! ```
 
 // Core types
@@ -29,7 +29,7 @@ pub use crate::ClientBuilder;
 pub use crate::common::{ContentSource, Index, IndexRegistry, Named, SourceType, ToolRestricted};
 
 // Tools
-pub use crate::tools::{ExecutionContext, SchemaTool, Tool, ToolAccess, ToolRegistry};
+pub use crate::tools::{ExecutionContext, SchemaTool, Tool, ToolRegistry, ToolSurface};
 pub use crate::types::ToolResult;
 
 // Types

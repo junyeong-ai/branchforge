@@ -1,7 +1,7 @@
 //! Pluggable configuration provider system.
 //!
 //! ```rust,no_run
-//! use claude_agent::config::ConfigBuilder;
+//! use branchforge::config::ConfigBuilder;
 //!
 //! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
 //! let config = ConfigBuilder::new()
@@ -29,7 +29,7 @@ pub use file::FileConfigProvider;
 pub use memory::MemoryConfigProvider;
 pub use provider::{ConfigProvider, ConfigProviderExt};
 pub use settings::{
-    HookConfig, HooksSettings, NetworkSandboxSettings, PermissionSettings, SandboxSettings,
+    AuthorizationSettings, HookConfig, HooksSettings, NetworkSandboxSettings, SandboxSettings,
     Settings, SettingsLoader, SettingsSource, ToolSearchSettings,
 };
 pub use validator::{ConfigValidator, ValueType};
