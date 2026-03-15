@@ -3,17 +3,27 @@
 mod helpers;
 
 use super::events::{AgentEvent, AgentResult};
+use super::executor::Agent;
 use super::state::AgentMetrics;
 use super::state_formatter::format_todo_summary;
 use super::{AgentConfig, AgentState};
+use crate::Client;
+use crate::authorization::AuthorizationPolicy;
+use crate::client::{DEFAULT_SMALL_MODEL, GatewayConfig, ModelConfig, ProviderConfig};
+use crate::common::{ContentSource, IndexRegistry};
+use crate::context::{PromptOrchestrator, StaticContext};
 use crate::hooks::{HookContext, HookEvent, HookInput, HookManager, HookOutput};
 use crate::session::types::TodoItem;
-use crate::session::{Session, SessionConfig};
-use crate::tools::{ExecutionContext, ToolOutput, ToolRegistry, ToolResult};
-use crate::types::{StopReason, ToolResultBlock, Usage};
+use crate::session::{Session, SessionAccessScope, SessionConfig, SessionId, SessionManager};
+use crate::skills::{SkillIndex, SkillRuntime};
+use crate::tools::{ExecutionContext, ToolOutput, ToolRegistry, ToolResult, ToolSurface};
+use crate::types::{ContentBlock, StopReason, ToolResultBlock, ToolResultContent, Usage};
 
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
+use tokio::sync::RwLock;
+use wiremock::matchers::{method, path};
+use wiremock::{Mock, MockServer, ResponseTemplate};
 
 #[test]
 fn test_agent_result() {
@@ -134,7 +144,7 @@ fn test_agent_event_variants() {
     let tool_blocked = AgentEvent::ToolBlocked {
         id: "tool_2".to_string(),
         name: "Bash".to_string(),
-        reason: "Permission denied".to_string(),
+        reason: "Authorization denied".to_string(),
     };
     assert!(matches!(tool_blocked, AgentEvent::ToolBlocked { .. }));
 }
@@ -267,6 +277,217 @@ fn test_tool_result_variants() {
     let empty = ToolResult::empty();
     assert!(!empty.is_error());
     assert_eq!(empty.text(), "");
+}
+
+async fn mock_client_with_message(text: &str) -> (MockServer, Client) {
+    let server = MockServer::start().await;
+    let response = serde_json::json!({
+        "id": "msg_test",
+        "type": "message",
+        "role": "assistant",
+        "content": [
+            {"type": "text", "text": text}
+        ],
+        "model": "claude-sonnet-4-5-20250514",
+        "stop_reason": "end_turn",
+        "stop_sequence": null,
+        "usage": {
+            "input_tokens": 12,
+            "output_tokens": 6
+        }
+    });
+    Mock::given(method("POST"))
+        .and(path("/v1/messages"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(response))
+        .mount(&server)
+        .await;
+
+    let config = ProviderConfig::new(ModelConfig::new(
+        "claude-sonnet-4-5-20250514",
+        DEFAULT_SMALL_MODEL,
+    ))
+    .max_tokens(1024);
+    let client = Client::builder()
+        .auth("test-key")
+        .await
+        .expect("auth should initialize")
+        .config(config)
+        .gateway(GatewayConfig::base_url(server.uri()))
+        .build()
+        .await
+        .expect("client should build");
+    (server, client)
+}
+
+#[tokio::test]
+async fn test_execute_persists_live_session_when_session_manager_is_configured() {
+    let (_server, client) = mock_client_with_message("persisted reply").await;
+    let manager = SessionManager::in_memory();
+    let scope = SessionAccessScope::default()
+        .tenant("tenant-a")
+        .principal("user-1");
+    let tools = Arc::new(ToolRegistry::default_tools(ToolSurface::All, None, None));
+    let config = Arc::new(AgentConfig::default());
+    let hooks = Arc::new(HookManager::new());
+    let agent = Agent::from_parts(Arc::new(client), config, tools, hooks, None)
+        .session_persistence(manager.clone(), Some(scope.clone()));
+
+    agent
+        .state()
+        .with_session_mut(|session| {
+            session.tenant_id = Some("tenant-a".to_string());
+            session.principal_id = Some("user-1".to_string());
+        })
+        .await;
+
+    let result = agent.execute("hello persistence").await.unwrap();
+    assert_eq!(result.text(), "persisted reply");
+
+    let session_id = SessionId::parse(agent.get_session_id()).unwrap();
+    let stored = manager.scoped(scope).get(&session_id).await.unwrap();
+    let messages = stored.current_branch_messages();
+    assert_eq!(messages.len(), 2);
+    assert_eq!(messages[0].content[0].as_text(), Some("hello persistence"));
+    assert_eq!(messages[1].content[0].as_text(), Some("persisted reply"));
+    assert_eq!(stored.total_usage.input_tokens, 12);
+    assert_eq!(stored.total_usage.output_tokens, 6);
+}
+
+#[tokio::test]
+async fn test_execute_routes_explicit_manual_only_skill_before_model_request() {
+    let (_server, client) = mock_client_with_message("model reply").await;
+
+    let mut skill_registry = IndexRegistry::new();
+    let mut skill = SkillIndex::new("math-helper", "Perform calculations")
+        .source(ContentSource::in_memory("Calculate: $ARGUMENTS"));
+    skill.disable_model_invocation = true;
+    skill_registry.register(skill);
+
+    let tools = Arc::new(
+        ToolRegistry::builder()
+            .access(ToolSurface::only(["Skill"]))
+            .policy(AuthorizationPolicy::permissive())
+            .skill_executor(SkillRuntime::new(skill_registry.clone()))
+            .build(),
+    );
+
+    let orchestrator = PromptOrchestrator::new(StaticContext::new(), "claude-sonnet-4-5")
+        .skill_registry(skill_registry);
+
+    let agent = Agent::from_parts(
+        Arc::new(client),
+        Arc::new(AgentConfig::default()),
+        tools,
+        Arc::new(HookManager::new()),
+        Some(Arc::new(RwLock::new(orchestrator))),
+    );
+
+    let result = agent.execute("/math-helper 15 * 23 + 47").await.unwrap();
+    assert_eq!(result.text(), "model reply");
+
+    let messages = agent
+        .state()
+        .with_session(|session| session.current_branch_messages())
+        .await;
+    assert_eq!(messages.len(), 4);
+    assert_eq!(
+        messages[0].content[0].as_text(),
+        Some("/math-helper 15 * 23 + 47")
+    );
+    assert!(matches!(messages[1].content[0], ContentBlock::ToolUse(_)));
+    assert!(matches!(
+        messages[2].content[0],
+        ContentBlock::ToolResult(_)
+    ));
+
+    if let ContentBlock::ToolResult(result_block) = &messages[2].content[0] {
+        match &result_block.content {
+            Some(ToolResultContent::Text(text)) => {
+                assert!(text.contains("Calculate: 15 * 23 + 47"));
+            }
+            _ => panic!("expected text tool result"),
+        }
+    }
+}
+
+#[tokio::test]
+async fn test_execute_routes_explicit_skill_with_default_authorization_mode() {
+    let (_server, client) = mock_client_with_message("model reply").await;
+
+    let mut skill_registry = IndexRegistry::new();
+    let mut skill = SkillIndex::new("math-helper", "Perform calculations")
+        .source(ContentSource::in_memory("Calculate: $ARGUMENTS"));
+    skill.disable_model_invocation = true;
+    skill_registry.register(skill);
+
+    let tools = Arc::new(
+        ToolRegistry::builder()
+            .access(ToolSurface::only(["Skill"]))
+            .skill_executor(SkillRuntime::new(skill_registry.clone()))
+            .build(),
+    );
+
+    let orchestrator = PromptOrchestrator::new(StaticContext::new(), "claude-sonnet-4-5")
+        .skill_registry(skill_registry);
+
+    let agent = Agent::from_parts(
+        Arc::new(client),
+        Arc::new(AgentConfig::default()),
+        tools,
+        Arc::new(HookManager::new()),
+        Some(Arc::new(RwLock::new(orchestrator))),
+    );
+
+    let result = agent.execute("/math-helper 15 * 23 + 47").await.unwrap();
+    assert_eq!(result.text(), "model reply");
+
+    let messages = agent
+        .state()
+        .with_session(|session| session.current_branch_messages())
+        .await;
+    assert!(messages.iter().any(|message| {
+        message.content.iter().any(
+            |block| matches!(block, ContentBlock::ToolUse(tool_use) if tool_use.name == "Skill"),
+        )
+    }));
+}
+
+#[tokio::test]
+async fn test_execute_explicit_skill_respects_deny_rule() {
+    let (_server, client) = mock_client_with_message("model reply").await;
+
+    let mut skill_registry = IndexRegistry::new();
+    let mut skill = SkillIndex::new("internal", "Internal skill")
+        .source(ContentSource::in_memory("Internal: $ARGUMENTS"));
+    skill.disable_model_invocation = true;
+    skill_registry.register(skill);
+
+    let policy = AuthorizationPolicy::builder()
+        .mode(crate::authorization::AuthorizationMode::Rules)
+        .deny("Skill(internal)")
+        .build();
+
+    let tools = Arc::new(
+        ToolRegistry::builder()
+            .access(ToolSurface::only(["Skill"]))
+            .policy(policy)
+            .skill_executor(SkillRuntime::new(skill_registry.clone()))
+            .build(),
+    );
+
+    let orchestrator = PromptOrchestrator::new(StaticContext::new(), "claude-sonnet-4-5")
+        .skill_registry(skill_registry);
+
+    let agent = Agent::from_parts(
+        Arc::new(client),
+        Arc::new(AgentConfig::default()),
+        tools,
+        Arc::new(HookManager::new()),
+        Some(Arc::new(RwLock::new(orchestrator))),
+    );
+
+    let error = agent.execute("/internal inspect auth").await.unwrap_err();
+    assert!(error.to_string().contains("Denied by rule"));
 }
 
 #[test]

@@ -2,6 +2,7 @@
 
 use std::path::Path;
 use std::sync::Arc;
+use std::time::Instant;
 
 use rust_decimal::Decimal;
 use serde_json::Value;
@@ -12,8 +13,8 @@ use crate::ToolRegistry;
 use crate::budget::{BudgetTracker, TenantBudget};
 use crate::context::PromptOrchestrator;
 use crate::hooks::{HookContext, HookEvent, HookInput, HookManager};
-use crate::session::ToolState;
-use crate::types::{CompactResult, ToolResult, Usage};
+use crate::session::{ToolExecution, ToolState};
+use crate::types::{CompactResult, ContentBlock, ToolResult, ToolResultBlock, ToolUseBlock, Usage};
 
 use super::config::{BudgetConfig, ExecutionConfig};
 use super::state::AgentMetrics;
@@ -139,6 +140,92 @@ pub(crate) async fn accumulate_inner_usage(
             "Accumulated inner usage from tool"
         );
     }
+}
+
+pub(crate) async fn maybe_invoke_explicit_skill_command(
+    tools: &ToolRegistry,
+    tool_state: &ToolState,
+    hooks: &HookManager,
+    hook_ctx: &HookContext,
+    session_id: &str,
+    prompt: &str,
+    metrics: &mut AgentMetrics,
+) -> crate::Result<bool> {
+    let Some(tool) = tools.get("Skill") else {
+        return Ok(false);
+    };
+    let Some(skill_tool) = tool.as_any().downcast_ref::<crate::skills::SkillTool>() else {
+        return Ok(false);
+    };
+    let Some(input) = skill_tool.resolve_explicit_command(prompt).await else {
+        return Ok(false);
+    };
+
+    let raw_input = serde_json::to_value(&input).map_err(|e| {
+        crate::Error::Config(format!(
+            "Failed to serialize explicit skill invocation: {e}"
+        ))
+    })?;
+    let pre_input = HookInput::pre_tool_use(session_id, "Skill", raw_input.clone());
+    let pre_output = hooks
+        .execute(HookEvent::PreToolUse, pre_input, hook_ctx)
+        .await?;
+
+    if !pre_output.continue_execution {
+        return Err(crate::Error::Authorization(
+            pre_output
+                .stop_reason
+                .unwrap_or_else(|| "Blocked by hook".into()),
+        ));
+    }
+
+    let actual_input = pre_output.updated_input.unwrap_or(raw_input);
+    let permission = tools
+        .get_context()
+        .check_explicit_skill_permission(&actual_input);
+    if !permission.is_allowed() {
+        return Err(crate::Error::Authorization(permission.reason));
+    }
+
+    let typed_input: crate::skills::SkillInput = serde_json::from_value(actual_input.clone())
+        .map_err(|e| crate::Error::Config(format!("Invalid explicit skill input: {e}")))?;
+
+    let start = Instant::now();
+    let result = Box::pin(skill_tool.execute_explicit_input(typed_input)).await;
+    let duration_ms = start.elapsed().as_millis() as u64;
+    let is_error = result.is_error();
+    let tool_use_id = format!("skill_{}", uuid::Uuid::new_v4().simple());
+
+    run_post_tool_hooks(hooks, hook_ctx, session_id, "Skill", is_error, &result).await;
+    metrics.record_tool(&tool_use_id, "Skill", duration_ms, is_error);
+
+    tool_state
+        .record_tool_execution(
+            ToolExecution::new(tool_state.session_id(), "Skill", actual_input.clone())
+                .message(tool_use_id.clone())
+                .output(result.output.text(), is_error)
+                .duration(duration_ms),
+        )
+        .await?;
+
+    tool_state
+        .with_session_mut(|session| {
+            session.add_assistant_message(
+                vec![ContentBlock::ToolUse(ToolUseBlock {
+                    id: tool_use_id.clone(),
+                    name: "Skill".to_string(),
+                    input: actual_input.clone(),
+                })],
+                None,
+            );
+            session.add_tool_results(vec![ToolResultBlock::from_tool_result(
+                &tool_use_id,
+                &result,
+            )]);
+        })
+        .await;
+
+    Ok(true)
 }
 
 /// Run post-tool hooks (PostToolUse on success, PostToolUseFailure on error).

@@ -38,10 +38,10 @@ impl OAuthConfig {
     pub fn from_env() -> Self {
         let mut config = Self::default();
 
-        if let Ok(ua) = std::env::var("CLAUDE_AGENT_USER_AGENT") {
+        if let Ok(ua) = std::env::var("BRANCHFORGE_USER_AGENT") {
             config.user_agent = ua;
         }
-        if let Ok(app) = std::env::var("CLAUDE_AGENT_APP_IDENTIFIER") {
+        if let Ok(app) = std::env::var("BRANCHFORGE_APP_IDENTIFIER") {
             config.app_identifier = app;
         }
 

@@ -96,6 +96,10 @@ pub struct DummyTool {
 
 #[async_trait]
 impl Tool for DummyTool {
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+
     fn name(&self) -> &str {
         &self.name
     }

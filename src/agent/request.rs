@@ -16,7 +16,7 @@ pub struct RequestBuilder {
     max_tokens: u32,
     tools: Arc<ToolRegistry>,
     server_tools: ServerToolsConfig,
-    tool_access: crate::tools::ToolAccess,
+    tool_surface: crate::tools::ToolSurface,
     system_prompt_mode: SystemPromptMode,
     custom_system_prompt: Option<String>,
     base_system_prompt: String,
@@ -45,7 +45,7 @@ impl RequestBuilder {
             max_tokens: config.model.max_tokens,
             tools,
             server_tools: config.server_tools.clone(),
-            tool_access: config.security.tool_access.clone(),
+            tool_surface: config.security.tool_surface.clone(),
             system_prompt_mode: config.prompt.system_prompt_mode,
             custom_system_prompt: config.prompt.system_prompt.clone(),
             base_system_prompt,
@@ -91,12 +91,12 @@ impl RequestBuilder {
             request = request.tool_search(tool_search);
         }
 
-        if self.tool_access.is_allowed("WebSearch") {
+        if self.tool_surface.is_allowed("WebSearch") {
             let web_search = self.server_tools.web_search.clone().unwrap_or_default();
             request = request.web_search(web_search);
         }
 
-        if self.tool_access.is_allowed("WebFetch") {
+        if self.tool_surface.is_allowed("WebFetch") {
             let web_fetch = self.server_tools.web_fetch.clone().unwrap_or_default();
             request = request.web_fetch(web_fetch);
         }
@@ -154,6 +154,17 @@ impl RequestBuilder {
             ));
         }
 
+        // Tool-conditional guidelines (cached with static context)
+        let active_tool_names: Vec<&str> = self.tools.names();
+        let guidelines = crate::prompts::build_guidelines_section(&active_tool_names);
+        if !guidelines.is_empty() {
+            blocks.push(self.make_block(
+                &guidelines,
+                self.cache_config.strategy.cache_static(),
+                self.cache_config.static_ttl,
+            ));
+        }
+
         // Dynamic rules are never cached (they change frequently)
         if !dynamic_rules.is_empty() {
             blocks.push(SystemBlock::uncached(dynamic_rules));
@@ -170,11 +181,13 @@ impl RequestBuilder {
         let registry_tools = self.tools.definitions();
         let builtin_tools: Vec<_> = registry_tools
             .into_iter()
+            .filter(|tool| self.tool_surface.is_allowed(&tool.name))
             .filter(|tool| !crate::mcp::is_mcp_name(&tool.name))
             .collect();
 
         match &self.prepared_mcp_tools {
             Some(prepared) => {
+                let prepared = prepared.filtered_for_access(&self.tool_surface);
                 let mut tool_definitions = Vec::with_capacity(
                     builtin_tools.len() + prepared.immediate.len() + prepared.deferred.len(),
                 );
@@ -247,10 +260,10 @@ impl RequestBuilder {
 
     fn server_tool_summaries(&self, include_tool_search: bool) -> Vec<String> {
         let mut lines = Vec::new();
-        if self.tool_access.is_allowed("WebSearch") {
+        if self.tool_surface.is_allowed("WebSearch") {
             lines.push("- web_search: server-side web search".to_string());
         }
-        if self.tool_access.is_allowed("WebFetch") {
+        if self.tool_surface.is_allowed("WebFetch") {
             lines.push("- web_fetch: server-side URL fetch".to_string());
         }
         if include_tool_search {
@@ -297,7 +310,7 @@ mod tests {
 
     use super::*;
     use crate::agent::config::{AgentConfig, CacheConfig, CacheStrategy};
-    use crate::tools::{ToolAccess, ToolRegistry};
+    use crate::tools::{ToolRegistry, ToolSurface};
     use crate::types::CacheTtl;
 
     fn test_config() -> AgentConfig {
@@ -330,7 +343,7 @@ mod tests {
         config.cache = CacheConfig::default()
             .strategy(CacheStrategy::ToolsOnly)
             .static_ttl(CacheTtl::OneHour);
-        let tools = Arc::new(ToolRegistry::default_tools(ToolAccess::All, None, None));
+        let tools = Arc::new(ToolRegistry::default_tools(ToolSurface::All, None, None));
         let builder = RequestBuilder::new(&config, tools, StaticContext::new());
         let request = builder.build(vec![Message::user("hello")], "");
         let system = request.system.expect("system prompt should exist");
@@ -342,6 +355,42 @@ mod tests {
                 }));
                 assert!(blocks.iter().any(|block| {
                     !block.text.contains("Built-in Tools") && block.cache_control.is_none()
+                }));
+            }
+            _ => panic!("expected system prompt blocks"),
+        }
+    }
+
+    #[test]
+    fn static_and_tools_cache_keeps_dynamic_rules_uncached() {
+        let mut config = AgentConfig::default();
+        config.cache = CacheConfig::default()
+            .strategy(CacheStrategy::StaticAndTools)
+            .static_ttl(CacheTtl::OneHour);
+
+        let tools = Arc::new(ToolRegistry::default_tools(ToolSurface::All, None, None));
+        let static_context = StaticContext::new()
+            .claude_md("# Project Memory")
+            .skill_summary("# Available Skills\n- review-pr: Review pull requests")
+            .rules_summary("# Available Rules\n- rust: applies to **/*.rs");
+
+        let builder = RequestBuilder::new(&config, tools, static_context);
+        let request = builder.build(vec![Message::user("hello")], "# Active Rules\n- rust");
+        let system = request.system.expect("system prompt should exist");
+
+        match system {
+            SystemPrompt::Blocks(blocks) => {
+                assert!(blocks.iter().any(|block| {
+                    block.text.contains("Project Memory") && block.cache_control.is_some()
+                }));
+                assert!(blocks.iter().any(|block| {
+                    block.text.contains("Available Skills") && block.cache_control.is_some()
+                }));
+                assert!(blocks.iter().any(|block| {
+                    block.text.contains("Built-in Tools") && block.cache_control.is_some()
+                }));
+                assert!(blocks.iter().any(|block| {
+                    block.text.contains("Active Rules") && block.cache_control.is_none()
                 }));
             }
             _ => panic!("expected system prompt blocks"),
@@ -362,10 +411,8 @@ mod tests {
             .expect("request metadata should be present");
 
         assert_eq!(metadata.user_id.as_deref(), Some("user-1"));
-        assert_eq!(
-            metadata.extra.get("tenant_id"),
-            Some(&serde_json::json!("tenant-a"))
-        );
+        assert_eq!(metadata.tenant_id.as_deref(), Some("tenant-a"));
+        assert_eq!(metadata.session_id.as_deref(), Some("session-1"));
     }
 
     #[test]

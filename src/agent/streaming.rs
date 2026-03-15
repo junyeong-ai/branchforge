@@ -1,16 +1,18 @@
 //! Agent streaming execution with session-based context management.
 
+use std::collections::VecDeque;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Instant;
 
-use futures::{Stream, StreamExt, stream};
+use futures::{Stream, StreamExt, future::join_all, stream};
 use tokio::sync::RwLock;
 use tracing::{debug, warn};
 
 use super::common::{
     BudgetContext, accumulate_inner_usage, accumulate_response_usage, handle_compaction,
-    run_post_tool_hooks, run_stop_hooks, try_activate_dynamic_rules,
+    maybe_invoke_explicit_skill_command, run_post_tool_hooks, run_stop_hooks,
+    try_activate_dynamic_rules,
 };
 use super::events::{AgentEvent, AgentResult};
 use super::executor::Agent;
@@ -20,10 +22,11 @@ use crate::budget::{BudgetTracker, TenantBudget};
 use crate::client::{RecoverableStream, StreamItem};
 use crate::context::PromptOrchestrator;
 use crate::hooks::{HookContext, HookEvent, HookInput, HookManager};
-use crate::session::ToolState;
+use crate::session::ToolExecution;
+use crate::session::{MessageMetadata, SessionAccessScope, SessionManager, ToolState};
 use crate::types::{
-    ContentBlock, PermissionDenial, StopReason, StreamEvent, ToolResultBlock, ToolUseBlock, Usage,
-    context_window,
+    AuthorizationDenied, ContentBlock, StopReason, StreamEvent, ToolResultBlock, ToolUseBlock,
+    Usage, context_window,
 };
 use crate::{Client, ToolRegistry};
 
@@ -80,6 +83,8 @@ impl Agent {
                 session_id: Arc::clone(&self.session_id),
                 budget_tracker: Arc::clone(&self.budget_tracker),
                 tenant_budget: self.tenant_budget.clone(),
+                session_manager: self.session_manager.clone(),
+                session_scope: self.session_scope.clone(),
             },
             timeout,
             prompt.to_string(),
@@ -103,6 +108,8 @@ struct StreamStateConfig {
     session_id: Arc<str>,
     budget_tracker: Arc<BudgetTracker>,
     tenant_budget: Option<Arc<TenantBudget>>,
+    session_manager: Option<SessionManager>,
+    session_scope: Option<SessionAccessScope>,
 }
 
 enum StreamPollResult {
@@ -115,7 +122,7 @@ enum Phase {
     StartRequest,
     Streaming(Box<StreamingPhase>),
     StreamEnded { accumulated_usage: Usage },
-    ProcessingTools { tool_index: usize },
+    EmittingToolResults { events: VecDeque<AgentEvent> },
     Done,
 }
 
@@ -137,6 +144,7 @@ struct StreamState {
     final_text: String,
     total_usage: Usage,
     phase: Phase,
+    all_non_retryable: bool,
     session_started: bool,
     prompt_submitted: bool,
     initial_prompt: Option<String>,
@@ -159,6 +167,7 @@ impl StreamState {
             final_text: String::new(),
             total_usage: Usage::default(),
             phase: Phase::StartRequest,
+            all_non_retryable: false,
             session_started: false,
             prompt_submitted: false,
             initial_prompt: Some(prompt),
@@ -236,10 +245,34 @@ impl StreamState {
                         return Some(event);
                     }
                 }
-                Phase::ProcessingTools { tool_index } => {
-                    if let Some(result) = self.do_process_tool(tool_index).await {
-                        return Some(result);
+                Phase::EmittingToolResults { mut events } => {
+                    if let Some(event) = events.pop_front() {
+                        self.phase = Phase::EmittingToolResults { events };
+                        return Some(Ok(event));
                     }
+                    if self.all_non_retryable {
+                        self.phase = Phase::Done;
+                        self.metrics.execution_time_ms =
+                            self.start_time.elapsed().as_millis() as u64;
+                        run_stop_hooks(
+                            &self.cfg.hooks,
+                            &self.cfg.hook_context,
+                            &self.cfg.session_id,
+                        )
+                        .await;
+                        let messages = self
+                            .cfg
+                            .tool_state
+                            .with_session(|session| session.to_api_messages())
+                            .await;
+                        let result = self.build_result(
+                            self.metrics.iterations,
+                            StopReason::EndTurn,
+                            messages,
+                        );
+                        return Some(Ok(AgentEvent::Complete(Box::new(result))));
+                    }
+                    self.phase = Phase::StartRequest;
                 }
                 Phase::Done => return None,
             }
@@ -302,7 +335,7 @@ impl StreamState {
 
                 if !prompt_output.continue_execution {
                     self.phase = Phase::Done;
-                    return Some(Err(crate::Error::Permission(
+                    return Some(Err(crate::Error::Authorization(
                         prompt_output
                             .stop_reason
                             .unwrap_or_else(|| "Blocked by hook".into()),
@@ -315,6 +348,46 @@ impl StreamState {
                         session.add_user_message(&prompt);
                     })
                     .await;
+                if let Err(e) = persist_stream_session_state(
+                    self.cfg.session_manager.clone(),
+                    self.cfg.session_scope.clone(),
+                    self.cfg.tool_state.clone(),
+                )
+                .await
+                {
+                    self.phase = Phase::Done;
+                    return Some(Err(e));
+                }
+
+                match maybe_invoke_explicit_skill_command(
+                    &self.cfg.tools,
+                    &self.cfg.tool_state,
+                    &self.cfg.hooks,
+                    &self.cfg.hook_context,
+                    &self.cfg.session_id,
+                    &prompt,
+                    &mut self.metrics,
+                )
+                .await
+                {
+                    Ok(true) => {
+                        if let Err(e) = persist_stream_session_state(
+                            self.cfg.session_manager.clone(),
+                            self.cfg.session_scope.clone(),
+                            self.cfg.tool_state.clone(),
+                        )
+                        .await
+                        {
+                            self.phase = Phase::Done;
+                            return Some(Err(e));
+                        }
+                    }
+                    Ok(false) => {}
+                    Err(e) => {
+                        self.phase = Phase::Done;
+                        return Some(Err(e));
+                    }
+                }
             }
             self.prompt_submitted = true;
         }
@@ -471,13 +544,6 @@ impl StreamState {
         &mut self,
         accumulated_usage: Usage,
     ) -> Option<crate::Result<AgentEvent>> {
-        self.cfg
-            .tool_state
-            .with_session_mut(|session| {
-                session.update_usage(&accumulated_usage);
-            })
-            .await;
-
         accumulate_response_usage(
             &mut self.total_usage,
             &mut self.metrics,
@@ -486,6 +552,7 @@ impl StreamState {
             &self.cfg.config.model.primary,
             &accumulated_usage,
         );
+        let structured_output = self.extract_structured_output(&self.final_text);
 
         self.cfg
             .tool_state
@@ -503,10 +570,27 @@ impl StreamState {
                     content.push(ContentBlock::ToolUse(tool_use.clone()));
                 }
                 if !content.is_empty() {
-                    session.add_assistant_message(content, Some(accumulated_usage));
+                    session.add_assistant_message_with_metadata(
+                        content,
+                        Some(accumulated_usage),
+                        MessageMetadata {
+                            structured_output: structured_output.clone(),
+                            ..Default::default()
+                        },
+                    );
                 }
             })
             .await;
+        if let Err(e) = persist_stream_session_state(
+            self.cfg.session_manager.clone(),
+            self.cfg.session_scope.clone(),
+            self.cfg.tool_state.clone(),
+        )
+        .await
+        {
+            self.phase = Phase::Done;
+            return Some(Err(e));
+        }
 
         if self.pending_tool_uses.is_empty() {
             self.phase = Phase::Done;
@@ -528,146 +612,164 @@ impl StreamState {
             return Some(Ok(AgentEvent::Complete(Box::new(result))));
         }
 
-        self.phase = Phase::ProcessingTools { tool_index: 0 };
-        None
-    }
-
-    async fn do_process_tool(&mut self, tool_index: usize) -> Option<crate::Result<AgentEvent>> {
-        if tool_index >= self.pending_tool_uses.len() {
-            if !self.pending_tool_results.is_empty() {
-                self.finalize_tool_results().await;
+        match self.execute_tools_parallel().await {
+            Ok(events) => {
+                if events.is_empty() {
+                    self.phase = Phase::StartRequest;
+                } else {
+                    self.phase = Phase::EmittingToolResults {
+                        events: events.into(),
+                    };
+                }
+                None
             }
-            self.final_text.clear();
-            self.pending_tool_uses.clear();
-            self.phase = Phase::StartRequest;
-            return None;
-        }
-
-        let tool_use = self.pending_tool_uses[tool_index].clone();
-        self.execute_tool(tool_use, tool_index).await
-    }
-
-    async fn execute_tool(
-        &mut self,
-        tool_use: ToolUseBlock,
-        tool_index: usize,
-    ) -> Option<crate::Result<AgentEvent>> {
-        let pre_input = HookInput::pre_tool_use(
-            &*self.cfg.session_id,
-            &tool_use.name,
-            tool_use.input.clone(),
-        );
-        let pre_output = match self
-            .cfg
-            .hooks
-            .execute(HookEvent::PreToolUse, pre_input, &self.cfg.hook_context)
-            .await
-        {
-            Ok(output) => output,
             Err(e) => {
                 self.phase = Phase::Done;
-                return Some(Err(e));
+                Some(Err(e))
             }
-        };
-
-        if !pre_output.continue_execution {
-            let reason = pre_output
-                .stop_reason
-                .clone()
-                .unwrap_or_else(|| "Blocked by hook".into());
-            debug!(tool = %tool_use.name, "Tool blocked by hook");
-
-            self.pending_tool_results
-                .push(ToolResultBlock::error(&tool_use.id, reason.clone()));
-            self.metrics.record_permission_denial(
-                PermissionDenial::new(&tool_use.name, &tool_use.id, tool_use.input.clone())
-                    .reason(reason.clone()),
-            );
-            self.phase = Phase::ProcessingTools {
-                tool_index: tool_index + 1,
-            };
-
-            return Some(Ok(AgentEvent::ToolBlocked {
-                id: tool_use.id,
-                name: tool_use.name,
-                reason,
-            }));
         }
-
-        let actual_input = pre_output.updated_input.unwrap_or(tool_use.input.clone());
-
-        let start = Instant::now();
-        let result = self
-            .cfg
-            .tools
-            .execute(&tool_use.name, actual_input.clone())
-            .await;
-        let duration_ms = start.elapsed().as_millis() as u64;
-
-        let (output, is_error) = match &result.output {
-            crate::types::ToolOutput::Success(s) => (s.clone(), false),
-            crate::types::ToolOutput::SuccessBlocks(blocks) => {
-                let text = blocks
-                    .iter()
-                    .filter_map(|b| match b {
-                        crate::types::ToolOutputBlock::Text { text } => Some(text.as_str()),
-                        _ => None,
-                    })
-                    .collect::<Vec<_>>()
-                    .join("\n");
-                (text, false)
-            }
-            crate::types::ToolOutput::Error(e) => (e.to_string(), true),
-            crate::types::ToolOutput::Empty => (String::new(), false),
-        };
-
-        self.metrics
-            .record_tool(&tool_use.id, &tool_use.name, duration_ms, is_error);
-
-        accumulate_inner_usage(
-            &self.cfg.tool_state,
-            &mut self.total_usage,
-            &mut self.metrics,
-            &self.cfg.budget_tracker,
-            &result,
-            &tool_use.name,
-        )
-        .await;
-
-        run_post_tool_hooks(
-            &self.cfg.hooks,
-            &self.cfg.hook_context,
-            &self.cfg.session_id,
-            &tool_use.name,
-            is_error,
-            &result,
-        )
-        .await;
-
-        try_activate_dynamic_rules(
-            &tool_use.name,
-            &actual_input,
-            &self.cfg.orchestrator,
-            &mut self.dynamic_rules,
-        )
-        .await;
-
-        self.pending_tool_results
-            .push(ToolResultBlock::from_tool_result(&tool_use.id, &result));
-        self.phase = Phase::ProcessingTools {
-            tool_index: tool_index + 1,
-        };
-
-        Some(Ok(AgentEvent::ToolComplete {
-            id: tool_use.id,
-            name: tool_use.name,
-            output,
-            is_error,
-            duration_ms,
-        }))
     }
 
-    async fn finalize_tool_results(&mut self) {
+    /// Execute all pending tools in parallel (matching batch execution behavior),
+    /// then collect results and events for sequential emission.
+    async fn execute_tools_parallel(&mut self) -> crate::Result<Vec<AgentEvent>> {
+        let tool_uses = std::mem::take(&mut self.pending_tool_uses);
+        let mut events = Vec::new();
+        let mut all_tool_results = Vec::new();
+
+        // Phase 1: Pre-hooks (serial — hooks may depend on ordering)
+        let mut prepared = Vec::new();
+
+        for tool_use in &tool_uses {
+            let pre_input = HookInput::pre_tool_use(
+                &*self.cfg.session_id,
+                &tool_use.name,
+                tool_use.input.clone(),
+            );
+            let pre_output = self
+                .cfg
+                .hooks
+                .execute(HookEvent::PreToolUse, pre_input, &self.cfg.hook_context)
+                .await?;
+
+            if !pre_output.continue_execution {
+                let reason = pre_output
+                    .stop_reason
+                    .clone()
+                    .unwrap_or_else(|| "Blocked by hook".into());
+                debug!(tool = %tool_use.name, "Tool blocked by hook");
+
+                all_tool_results.push(ToolResultBlock::error(&tool_use.id, reason.clone()));
+                self.metrics.record_authorization_denial(
+                    AuthorizationDenied::new(&tool_use.name, &tool_use.id, tool_use.input.clone())
+                        .reason(reason.clone()),
+                );
+                events.push(AgentEvent::ToolBlocked {
+                    id: tool_use.id.clone(),
+                    name: tool_use.name.clone(),
+                    reason,
+                });
+            } else {
+                let actual_input = pre_output.updated_input.unwrap_or(tool_use.input.clone());
+                self.cfg
+                    .tool_state
+                    .append_graph_node(
+                        crate::graph::NodeKind::ToolCall,
+                        serde_json::json!({
+                            "tool_use_id": tool_use.id.clone(),
+                            "tool_name": tool_use.name.clone(),
+                            "tool_input": actual_input.clone(),
+                        }),
+                    )
+                    .await?;
+                prepared.push((tool_use.id.clone(), tool_use.name.clone(), actual_input));
+            }
+        }
+
+        // Phase 2: Parallel tool execution
+        let tools = Arc::clone(&self.cfg.tools);
+        let tool_futures = prepared.into_iter().map(|(id, name, input)| {
+            let tools = Arc::clone(&tools);
+            async move {
+                let start = Instant::now();
+                let result = tools.execute(&name, input.clone()).await;
+                let duration_ms = start.elapsed().as_millis() as u64;
+                (id, name, input, result, duration_ms)
+            }
+        });
+        let parallel_results: Vec<_> = join_all(tool_futures).await;
+
+        self.all_non_retryable = !parallel_results.is_empty()
+            && parallel_results
+                .iter()
+                .all(|(_, _, _, result, _)| result.is_non_retryable());
+
+        // Phase 3: Post-processing (serial — metrics, hooks, graph recording)
+        for (id, name, input, result, duration_ms) in parallel_results {
+            let output = result.text();
+            let is_error = result.is_error();
+
+            self.metrics.record_tool(&id, &name, duration_ms, is_error);
+
+            accumulate_inner_usage(
+                &self.cfg.tool_state,
+                &mut self.total_usage,
+                &mut self.metrics,
+                &self.cfg.budget_tracker,
+                &result,
+                &name,
+            )
+            .await;
+
+            try_activate_dynamic_rules(
+                &name,
+                &input,
+                &self.cfg.orchestrator,
+                &mut self.dynamic_rules,
+            )
+            .await;
+
+            run_post_tool_hooks(
+                &self.cfg.hooks,
+                &self.cfg.hook_context,
+                &self.cfg.session_id,
+                &name,
+                is_error,
+                &result,
+            )
+            .await;
+
+            self.cfg
+                .tool_state
+                .record_tool_execution(
+                    ToolExecution::new(self.cfg.tool_state.session_id(), &name, input.clone())
+                        .message(id.clone())
+                        .output(result.output.text(), is_error)
+                        .duration(duration_ms),
+                )
+                .await?;
+
+            all_tool_results.push(ToolResultBlock::from_tool_result(&id, &result));
+            events.push(AgentEvent::ToolComplete {
+                id,
+                name,
+                output,
+                is_error,
+                duration_ms,
+            });
+        }
+
+        // Phase 4: Finalize — add results to session, persist, compact
+        self.pending_tool_results = all_tool_results;
+        if !self.pending_tool_results.is_empty() {
+            self.finalize_tool_results().await?;
+        }
+        self.final_text.clear();
+
+        Ok(events)
+    }
+
+    async fn finalize_tool_results(&mut self) -> crate::Result<()> {
         let results = std::mem::take(&mut self.pending_tool_results);
         let max_tokens = context_window::for_model(&self.cfg.config.model.primary);
 
@@ -677,6 +779,12 @@ impl StreamState {
                 session.add_tool_results(results);
             })
             .await;
+        persist_stream_session_state(
+            self.cfg.session_manager.clone(),
+            self.cfg.session_scope.clone(),
+            self.cfg.tool_state.clone(),
+        )
+        .await?;
 
         handle_compaction(
             &self.cfg.tool_state,
@@ -690,7 +798,29 @@ impl StreamState {
             &mut self.metrics,
         )
         .await;
+        persist_stream_session_state(
+            self.cfg.session_manager.clone(),
+            self.cfg.session_scope.clone(),
+            self.cfg.tool_state.clone(),
+        )
+        .await?;
+        Ok(())
     }
+}
+
+async fn persist_stream_session_state(
+    manager: Option<SessionManager>,
+    scope: Option<SessionAccessScope>,
+    tool_state: ToolState,
+) -> crate::Result<()> {
+    let Some(manager) = manager else {
+        return Ok(());
+    };
+    let session = tool_state.session().await;
+    manager
+        .persist_snapshot(&session, scope.as_ref())
+        .await
+        .map_err(|e| crate::Error::Session(e.to_string()))
 }
 
 #[cfg(test)]

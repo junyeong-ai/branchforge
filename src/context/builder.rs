@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 
 use crate::client::DEFAULT_MODEL;
 use crate::common::IndexRegistry;
-use crate::skills::SkillIndex;
+use crate::skills::{SkillIndex, build_model_invocable_summary};
 
 use super::ContextResult;
 use super::memory_loader::MemoryLoader;
@@ -140,7 +140,7 @@ impl ContextBuilder {
     }
 
     fn build_skill_summary(&self) -> String {
-        let summary = self.skill_registry.build_summary();
+        let summary = build_model_invocable_summary(&self.skill_registry);
         if summary.is_empty() {
             return String::new();
         }
@@ -181,6 +181,15 @@ mod tests {
         let orchestrator = ContextBuilder::new().skill(skill).build().unwrap();
 
         assert!(!orchestrator.static_context().skill_summary.is_empty());
+    }
+
+    #[test]
+    fn test_context_builder_filters_manual_only_skills_from_summary() {
+        let mut skill = SkillIndex::new("internal", "Manual-only skill");
+        skill.disable_model_invocation = true;
+
+        let orchestrator = ContextBuilder::new().skill(skill).build().unwrap();
+        assert!(orchestrator.static_context().skill_summary.is_empty());
     }
 
     #[tokio::test]

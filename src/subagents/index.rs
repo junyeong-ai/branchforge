@@ -56,13 +56,21 @@ pub struct SubagentIndex {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub skills: Vec<String>,
 
+    /// MCP servers explicitly available to this subagent.
+    #[serde(default, alias = "mcpServers", skip_serializing_if = "Vec::is_empty")]
+    pub mcp_servers: Vec<String>,
+
     /// Tools explicitly disallowed for this subagent
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub disallowed_tools: Vec<String>,
 
-    /// Permission mode (e.g., "dontAsk", "allowAll")
+    /// Authorization mode (e.g., "readOnly", "allowAll")
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub permission_mode: Option<String>,
+    pub authorization_mode: Option<String>,
+
+    /// Maximum delegated turns before stopping this subagent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_turns: Option<usize>,
 
     /// Lifecycle hooks (event name → rules)
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -81,8 +89,10 @@ impl SubagentIndex {
             model: None,
             model_type: None,
             skills: Vec::new(),
+            mcp_servers: Vec::new(),
             disallowed_tools: Vec::new(),
-            permission_mode: None,
+            authorization_mode: None,
+            max_turns: None,
             hooks: None,
         }
     }
@@ -125,6 +135,18 @@ impl SubagentIndex {
     /// Set available skills.
     pub fn skills(mut self, skills: impl IntoIterator<Item = impl Into<String>>) -> Self {
         self.skills = skills.into_iter().map(Into::into).collect();
+        self
+    }
+
+    /// Set MCP servers available to this subagent.
+    pub fn mcp_servers(mut self, servers: impl IntoIterator<Item = impl Into<String>>) -> Self {
+        self.mcp_servers = servers.into_iter().map(Into::into).collect();
+        self
+    }
+
+    /// Limit the number of turns this subagent may take.
+    pub fn max_turns(mut self, max_turns: usize) -> Self {
+        self.max_turns = Some(max_turns);
         self
     }
 
@@ -178,9 +200,14 @@ impl Index for SubagentIndex {
         } else {
             self.allowed_tools.join(", ")
         };
+        let mcp_str = if self.mcp_servers.is_empty() {
+            String::new()
+        } else {
+            format!("; MCP: {}", self.mcp_servers.join(", "))
+        };
         format!(
-            "- {}: {} (Tools: {})",
-            self.name, self.description, tools_str
+            "- {}: {} (Tools: {}{})",
+            self.name, self.description, tools_str, mcp_str
         )
     }
 
@@ -225,6 +252,19 @@ mod tests {
         assert!(summary.contains("(Tools: *)"));
     }
 
+    #[test]
+    fn test_mcp_servers_builder() {
+        let subagent =
+            SubagentIndex::new("reviewer", "Code reviewer").mcp_servers(["context7", "filesystem"]);
+
+        assert_eq!(subagent.mcp_servers, vec!["context7", "filesystem"]);
+        assert!(
+            subagent
+                .to_summary_line()
+                .contains("MCP: context7, filesystem")
+        );
+    }
+
     #[tokio::test]
     async fn test_load_prompt() {
         let subagent = SubagentIndex::new("test", "Test agent")
@@ -257,5 +297,11 @@ mod tests {
             .source(ContentSource::in_memory("Use type"))
             .model_type(ModelType::Small);
         assert!(subagent.resolve_model(&config).contains("haiku"));
+    }
+
+    #[test]
+    fn test_max_turns_builder() {
+        let subagent = SubagentIndex::new("limited", "Limited agent").max_turns(3);
+        assert_eq!(subagent.max_turns, Some(3));
     }
 }

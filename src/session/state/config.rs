@@ -2,14 +2,14 @@
 
 use serde::{Deserialize, Serialize};
 
-use super::policy::SessionPermissions;
+use super::policy::SessionAuthorization;
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionConfig {
     pub model: String,
     pub max_tokens: u32,
     #[serde(default)]
-    pub permissions: SessionPermissions,
+    pub authorization: SessionAuthorization,
     pub ttl_secs: Option<u64>,
     pub system_prompt: Option<String>,
 }
@@ -19,7 +19,7 @@ impl Default for SessionConfig {
         Self {
             model: "claude-sonnet-4-5".to_string(),
             max_tokens: 16384,
-            permissions: SessionPermissions::default(),
+            authorization: SessionAuthorization::default(),
             ttl_secs: None,
             system_prompt: None,
         }

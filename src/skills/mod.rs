@@ -21,8 +21,8 @@
 //! # Example
 //!
 //! ```rust,ignore
-//! use claude_agent::common::{ContentSource, IndexRegistry};
-//! use claude_agent::skills::{SkillIndex, SkillRuntime};
+//! use branchforge::common::{ContentSource, IndexRegistry};
+//! use branchforge::skills::{SkillIndex, SkillRuntime};
 //!
 //! // Create skill with metadata only (content loaded lazily)
 //! let skill = SkillIndex::new("commit", "Create git commits")
@@ -47,11 +47,87 @@ mod skill_tool;
 pub use index::SkillIndex;
 pub use index_loader::{SkillFrontmatter, SkillIndexLoader};
 pub use runtime::{SkillExecutionKind, SkillRuntime, SkillSpec};
-pub use skill_tool::SkillTool;
+pub use skill_tool::{SkillInput, SkillTool};
 
 use std::path::PathBuf;
 
+use crate::common::{Index, IndexRegistry};
 use serde::{Deserialize, Serialize};
+
+pub fn list_model_invocable_skills(registry: &IndexRegistry<SkillIndex>) -> Vec<&SkillIndex> {
+    registry
+        .iter()
+        .filter(|skill| !skill.disable_model_invocation)
+        .collect()
+}
+
+pub fn find_explicit_command<'a>(
+    registry: &'a IndexRegistry<SkillIndex>,
+    input: &str,
+) -> Option<&'a SkillIndex> {
+    let trimmed = input.trim_start();
+    registry.iter().find(|skill| skill.matches_command(trimmed))
+}
+
+pub fn parse_explicit_command(
+    registry: &IndexRegistry<SkillIndex>,
+    input: &str,
+) -> Option<(String, Option<String>)> {
+    let trimmed = input.trim_start();
+    let skill = find_explicit_command(registry, trimmed)?;
+    let command = trimmed.strip_prefix('/')?;
+    let mut parts = command.trim_start().splitn(2, char::is_whitespace);
+    let _command_name = parts.next()?;
+    let args = parts
+        .next()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned);
+    Some((skill.name.clone(), args))
+}
+
+pub fn find_trigger_matches<'a>(
+    registry: &'a IndexRegistry<SkillIndex>,
+    input: &str,
+) -> Vec<&'a SkillIndex> {
+    list_model_invocable_skills(registry)
+        .into_iter()
+        .filter(|skill| skill.matches_triggers(input))
+        .collect()
+}
+
+pub fn find_first_trigger_match<'a>(
+    registry: &'a IndexRegistry<SkillIndex>,
+    input: &str,
+) -> Option<&'a SkillIndex> {
+    find_trigger_matches(registry, input).into_iter().next()
+}
+
+pub fn extract_trigger_args(input: &str, skill: &SkillIndex) -> Option<String> {
+    let input_lower = input.to_lowercase();
+    for trigger in &skill.triggers {
+        let trigger_lower = trigger.to_lowercase();
+        if let Some(byte_pos) = input_lower.find(&trigger_lower) {
+            let end_byte = byte_pos + trigger_lower.len();
+            if end_byte <= input.len() && input.is_char_boundary(end_byte) {
+                let after_trigger = input[end_byte..].trim();
+                if !after_trigger.is_empty() {
+                    return Some(after_trigger.to_string());
+                }
+            }
+        }
+    }
+    None
+}
+
+pub fn build_model_invocable_summary(registry: &IndexRegistry<SkillIndex>) -> String {
+    let mut lines: Vec<_> = list_model_invocable_skills(registry)
+        .into_iter()
+        .map(|skill| skill.to_summary_line())
+        .collect();
+    lines.sort();
+    lines.join("\n")
+}
 
 /// Result of skill execution.
 ///

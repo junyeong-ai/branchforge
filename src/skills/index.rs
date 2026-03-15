@@ -58,13 +58,10 @@ pub struct SkillIndex {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub argument_hint: Option<String>,
 
-    /// When true, the skill cannot be invoked by the model (only by user)
+    /// When true, the skill is excluded from model-driven discovery and summaries.
+    /// Users may still invoke it explicitly via `/skill-name`.
     #[serde(default)]
     pub disable_model_invocation: bool,
-
-    /// Whether this skill is user-invocable via slash commands (default: true)
-    #[serde(default = "default_true")]
-    pub user_invocable: bool,
 
     /// Context mode (e.g., "fork" for forked context)
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -83,8 +80,6 @@ pub struct SkillIndex {
     base_dir_override: Option<PathBuf>,
 }
 
-use crate::common::serde_defaults::default_true;
-
 impl SkillIndex {
     /// Create a new skill index entry.
     pub fn new(name: impl Into<String>, description: impl Into<String>) -> Self {
@@ -98,7 +93,6 @@ impl SkillIndex {
             model: None,
             argument_hint: None,
             disable_model_invocation: false,
-            user_invocable: true,
             context: None,
             agent: None,
             hooks: None,
@@ -189,6 +183,12 @@ impl SkillIndex {
         } else {
             Ok(content)
         }
+    }
+
+    /// Load skill content for startup preload without executing dynamic content.
+    pub async fn load_preloaded_content(&self) -> crate::Result<String> {
+        let content = self.load_content_with_resolved_paths().await?;
+        Ok(processing::strip_frontmatter(&content).to_string())
     }
 
     /// Substitute arguments in content.
@@ -318,6 +318,26 @@ mod tests {
 
         let content = skill.load_content().await.unwrap();
         assert_eq!(content, "Full skill content here");
+    }
+
+    #[tokio::test]
+    async fn test_load_preloaded_content() {
+        let skill = SkillIndex::new("review", "Review code")
+            .source(ContentSource::in_memory(
+                r#"---
+name: review
+description: Review code
+---
+Check [guide](guide.md)
+Run !`echo should-not-run`"#,
+            ))
+            .base_dir("/tmp/skills");
+
+        let content = skill.load_preloaded_content().await.unwrap();
+
+        assert!(!content.contains("name: review"));
+        assert!(content.contains("[guide](/tmp/skills/guide.md)"));
+        assert!(content.contains("!`echo should-not-run`"));
     }
 
     #[test]

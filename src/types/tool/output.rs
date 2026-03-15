@@ -47,8 +47,8 @@ impl ToolOutput {
         Self::Error(error)
     }
 
-    pub fn permission_denied(tool: impl Into<String>, permission: impl Into<String>) -> Self {
-        Self::Error(ToolError::permission_denied(tool, permission))
+    pub fn authorization_denied(tool: impl Into<String>, permission: impl Into<String>) -> Self {
+        Self::Error(ToolError::authorization_denied(tool, permission))
     }
 
     pub fn not_found(path: impl Into<String>) -> Self {
@@ -202,7 +202,7 @@ impl ToolResult {
         matches!(
             self.output,
             ToolOutput::Error(
-                ToolError::PermissionDenied { .. }
+                ToolError::AuthorizationDenied { .. }
                     | ToolError::SecurityViolation { .. }
                     | ToolError::UnknownTool { .. }
             )
@@ -221,9 +221,9 @@ impl ToolResult {
         self.output.as_error()
     }
 
-    pub fn permission_denied(tool: impl Into<String>, reason: impl Into<String>) -> Self {
+    pub fn authorization_denied(tool: impl Into<String>, reason: impl Into<String>) -> Self {
         Self {
-            output: ToolOutput::permission_denied(tool, reason),
+            output: ToolOutput::authorization_denied(tool, reason),
             inner_usage: None,
             inner_model: None,
         }

@@ -45,15 +45,19 @@ impl From<Uuid> for SessionId {
     }
 }
 
-impl From<&str> for SessionId {
-    fn from(s: &str) -> Self {
-        Self::parse(s).unwrap_or_default()
+impl TryFrom<&str> for SessionId {
+    type Error = uuid::Error;
+
+    fn try_from(s: &str) -> Result<Self, Self::Error> {
+        Self::from_str(s)
     }
 }
 
-impl From<String> for SessionId {
-    fn from(s: String) -> Self {
-        Self::from(s.as_str())
+impl TryFrom<String> for SessionId {
+    type Error = uuid::Error;
+
+    fn try_from(s: String) -> Result<Self, Self::Error> {
+        Self::from_str(&s)
     }
 }
 
@@ -107,6 +111,12 @@ mod tests {
         let id = SessionId::new();
         let parsed = SessionId::parse(&id.to_string());
         assert_eq!(parsed, Some(id));
+    }
+
+    #[test]
+    fn test_session_id_try_from_invalid_value() {
+        let parsed = SessionId::try_from("not-a-uuid");
+        assert!(parsed.is_err());
     }
 
     #[test]

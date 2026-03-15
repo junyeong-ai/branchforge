@@ -1,18 +1,47 @@
 //! Session message types.
 
 use chrono::{DateTime, Utc};
+use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 
 use super::ids::MessageId;
 use crate::session::types::EnvironmentContext;
-use crate::types::{ContentBlock, Message, Role, TokenUsage};
+use crate::types::{ContentBlock, Message, Role, StopReason, TokenUsage, Usage};
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct ExecutionMetadata {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub result_uuid: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stop_reason: Option<StopReason>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub iterations: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_calls: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usage: Option<Usage>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execution_time_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub api_calls: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compactions: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub errors: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub total_cost_usd: Option<Decimal>,
+}
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct MessageMetadata {
     pub model: Option<String>,
     pub request_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub structured_output: Option<serde_json::Value>,
     pub tool_results: Option<Vec<ToolResultMeta>>,
     pub thinking: Option<ThinkingMetadata>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execution: Option<ExecutionMetadata>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -110,6 +139,11 @@ impl SessionMessage {
 
     pub fn request_id(mut self, request_id: impl Into<String>) -> Self {
         self.metadata.request_id = Some(request_id.into());
+        self
+    }
+
+    pub fn metadata(mut self, metadata: MessageMetadata) -> Self {
+        self.metadata = metadata;
         self
     }
 

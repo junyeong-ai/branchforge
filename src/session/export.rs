@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::graph::{BranchExport, SessionGraph};
-use crate::session::Session;
+use crate::session::{Session, SessionError, SessionResult};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExportPolicy {
@@ -38,18 +38,22 @@ impl SessionExporter {
     pub fn export_branch(
         graph: &SessionGraph,
         branch_id: crate::graph::BranchId,
-    ) -> Option<BranchExport> {
-        graph.export_branch(branch_id)
+    ) -> SessionResult<BranchExport> {
+        graph
+            .export_branch(branch_id)
+            .map_err(|error| SessionError::Storage {
+                message: error.to_string(),
+            })
     }
 
     pub fn export_branch_with_policy(
         graph: &SessionGraph,
         branch_id: crate::graph::BranchId,
         policy: &ExportPolicy,
-    ) -> Option<BranchExport> {
-        let mut export = graph.export_branch(branch_id)?;
+    ) -> SessionResult<BranchExport> {
+        let mut export = Self::export_branch(graph, branch_id)?;
         apply_policy(&mut export, policy);
-        Some(export)
+        Ok(export)
     }
 
     pub fn branch_to_json(export: &BranchExport) -> crate::Result<String> {
@@ -146,11 +150,11 @@ impl SessionExporter {
         html
     }
 
-    pub fn audit_bundle(session: &Session, policy: &ExportPolicy) -> Option<AuditBundle> {
+    pub fn audit_bundle(session: &Session, policy: &ExportPolicy) -> SessionResult<AuditBundle> {
         let export =
             Self::export_branch_with_policy(&session.graph, session.graph.primary_branch, policy)?;
         let stats = crate::graph::GraphSearchService::stats(&session.graph);
-        Some(AuditBundle {
+        Ok(AuditBundle {
             session_id: session.id.to_string(),
             tenant_id: policy
                 .include_identity

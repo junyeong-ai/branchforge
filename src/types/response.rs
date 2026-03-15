@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use super::ContentBlock;
 use super::citations::{Citation, SearchResultLocationCitation};
 
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TokenUsage {
     pub input_tokens: u64,
     pub output_tokens: u64,
@@ -504,12 +504,12 @@ impl ServerToolUse {
     }
 }
 
-/// Record of a permission denial for a tool request.
+/// Record of a authorization denial for a tool request.
 ///
 /// Tracks when and why a tool execution was blocked, useful for
 /// debugging and audit logging.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PermissionDenial {
+pub struct AuthorizationDenied {
     /// Name of the tool that was denied.
     pub tool_name: String,
     /// The tool use ID from the API request.
@@ -524,8 +524,8 @@ pub struct PermissionDenial {
     pub timestamp: Option<chrono::DateTime<chrono::Utc>>,
 }
 
-impl PermissionDenial {
-    /// Create a new permission denial record.
+impl AuthorizationDenied {
+    /// Create a new authorization denial record.
     pub fn new(
         tool_name: impl Into<String>,
         tool_use_id: impl Into<String>,
@@ -625,8 +625,8 @@ mod tests {
     }
 
     #[test]
-    fn test_permission_denial() {
-        let denial = PermissionDenial::new(
+    fn test_authorization_denial() {
+        let denial = AuthorizationDenied::new(
             "WebSearch",
             "tool_123",
             serde_json::json!({"query": "test"}),

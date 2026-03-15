@@ -6,12 +6,12 @@
 use std::path::Path;
 
 use crate::auth::Auth;
+use crate::authorization::{AuthorizationMode, AuthorizationPolicy};
 use crate::common::{IndexRegistry, Named, Provider};
 use crate::config::{Settings, SettingsLoader};
 use crate::context::{LeveledMemoryProvider, MemoryLoader, enterprise_base_path, user_base_path};
 use crate::hooks::CommandHook;
 use crate::output_style::file_output_style_provider;
-use crate::permissions::{PermissionMode, PermissionPolicy};
 use crate::skills::SkillIndexLoader;
 use crate::subagents::{SubagentIndexLoader, builtin_subagents};
 
@@ -27,10 +27,10 @@ impl AgentBuilder {
     /// # Example
     ///
     /// ```rust,no_run
-    /// # use claude_agent::Agent;
-    /// # async fn example() -> claude_agent::Result<()> {
+    /// # use branchforge::Agent;
+    /// # async fn example() -> branchforge::Result<()> {
     /// let agent = Agent::builder()
-    ///     .from_claude_code("./project").await?
+    ///     .from_claude_cli_workspace("./project").await?
     ///     .user_resources()
     ///     .project_resources()
     ///     .build()
@@ -38,7 +38,10 @@ impl AgentBuilder {
     /// # Ok(())
     /// # }
     /// ```
-    pub async fn from_claude_code(mut self, path: impl AsRef<Path>) -> crate::Result<Self> {
+    pub async fn from_claude_cli_workspace(
+        mut self,
+        path: impl AsRef<Path>,
+    ) -> crate::Result<Self> {
         let path = path.as_ref();
         self = self.auth(Auth::ClaudeCli).await?;
         self.config.working_dir = Some(path.to_path_buf());
@@ -72,7 +75,7 @@ impl AgentBuilder {
     /// Enables loading of project-level resources during build.
     ///
     /// Resources are loaded from `{working_dir}/.claude/`.
-    /// Requires `from_claude_code()` to be called first to set the working directory.
+    /// Requires `from_claude_cli_workspace()` to be called first to set the working directory.
     ///
     /// This method only sets a flag; actual loading happens during `build()`
     /// in the fixed order: Enterprise → User → Project → Local.
@@ -85,7 +88,7 @@ impl AgentBuilder {
     ///
     /// Loads CLAUDE.local.md and settings.local.json from the project directory.
     /// These are typically gitignored and contain personal/machine-specific settings.
-    /// Requires `from_claude_code()` to be called first to set the working directory.
+    /// Requires `from_claude_cli_workspace()` to be called first to set the working directory.
     ///
     /// This method only sets a flag; actual loading happens during `build()`
     /// in the fixed order: Enterprise → User → Project → Local.
@@ -124,7 +127,7 @@ impl AgentBuilder {
 
     pub(super) async fn load_project_resources(&mut self) {
         let Some(working_dir) = self.config.working_dir.clone() else {
-            tracing::warn!("working_dir not set, call from_claude_code() first");
+            tracing::warn!("working_dir not set, call from_claude_cli_workspace() first");
             return;
         };
 
@@ -137,7 +140,7 @@ impl AgentBuilder {
 
     pub(super) async fn load_local_resources(&mut self) {
         let Some(working_dir) = self.config.working_dir.clone() else {
-            tracing::warn!("working_dir not set, call from_claude_code() first");
+            tracing::warn!("working_dir not set, call from_claude_cli_workspace() first");
             return;
         };
 
@@ -243,10 +246,11 @@ impl AgentBuilder {
 
         self.config.security.env.extend(settings.env.clone());
 
-        if !settings.permissions.is_empty() {
-            let loaded_policy = settings.permissions.to_policy();
-            let existing_policy = std::mem::take(&mut self.config.security.permission_policy);
-            self.config.security.permission_policy =
+        if !settings.authorization.is_empty() {
+            self.authorization_policy_explicit = true;
+            let loaded_policy = settings.authorization.to_policy();
+            let existing_policy = std::mem::take(&mut self.config.security.authorization_policy);
+            self.config.security.authorization_policy =
                 Self::merge_permission_policies(existing_policy, loaded_policy);
         }
 
@@ -281,10 +285,10 @@ impl AgentBuilder {
     }
 
     fn merge_permission_policies(
-        from_settings: PermissionPolicy,
-        programmatic: PermissionPolicy,
-    ) -> PermissionPolicy {
-        let mode = if programmatic.mode != PermissionMode::Default {
+        from_settings: AuthorizationPolicy,
+        programmatic: AuthorizationPolicy,
+    ) -> AuthorizationPolicy {
+        let mode = if programmatic.mode != AuthorizationMode::Rules {
             programmatic.mode
         } else {
             from_settings.mode
@@ -296,7 +300,7 @@ impl AgentBuilder {
         let mut tool_limits = from_settings.tool_limits;
         tool_limits.extend(programmatic.tool_limits);
 
-        PermissionPolicy {
+        AuthorizationPolicy {
             mode,
             rules,
             tool_limits,
@@ -407,5 +411,24 @@ mod tests {
         assert_eq!(builder1.load_enterprise, builder2.load_enterprise);
         assert_eq!(builder1.load_user, builder2.load_user);
         assert_eq!(builder1.load_project, builder2.load_project);
+    }
+
+    #[test]
+    fn test_settings_permissions_mark_policy_explicit() {
+        let settings = Settings {
+            authorization: crate::config::AuthorizationSettings {
+                default_mode: Some("default".to_string()),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        let builder = AgentBuilder::new().apply_settings(settings);
+
+        assert!(builder.authorization_policy_explicit);
+        assert_eq!(
+            builder.config.security.authorization_policy.mode,
+            crate::authorization::AuthorizationMode::Rules
+        );
     }
 }

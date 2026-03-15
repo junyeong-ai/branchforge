@@ -4,7 +4,10 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::skills::SkillIndex;
+use crate::common::IndexRegistry;
+use crate::skills::{
+    SkillIndex, find_explicit_command, find_trigger_matches, list_model_invocable_skills,
+};
 
 /// Strategy for routing user input to skills
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -61,24 +64,21 @@ impl RoutingStrategy {
 
 /// Route user input to determine skill discovery strategy.
 pub fn route(input: &str, skill_indices: &[SkillIndex]) -> RoutingStrategy {
-    let eligible_skills: Vec<_> = skill_indices
-        .iter()
-        .filter(|skill| !skill.disable_model_invocation)
-        .collect();
+    // Explicit slash commands are a user choice and stay routable even when the
+    // skill is hidden from model-driven discovery.
+    let mut registry = IndexRegistry::new();
+    registry.register_all(skill_indices.iter().cloned());
 
-    // 1. Check for explicit slash command
-    if let Some(skill) = eligible_skills.iter().find(|s| s.matches_command(input)) {
+    if let Some(skill) = find_explicit_command(&registry, input) {
         return RoutingStrategy::Explicit {
             skill_name: skill.name.clone(),
         };
     }
 
+    let model_visible_skills = list_model_invocable_skills(&registry);
+
     // 2. Check for trigger keyword matches
-    let matches: Vec<_> = eligible_skills
-        .iter()
-        .copied()
-        .filter(|s| s.matches_triggers(input))
-        .collect();
+    let matches = find_trigger_matches(&registry, input);
 
     if !matches.is_empty() {
         let matched_triggers: Vec<String> = matches
@@ -100,7 +100,7 @@ pub fn route(input: &str, skill_indices: &[SkillIndex]) -> RoutingStrategy {
     }
 
     // 3. Fall back to semantic matching (Claude will decide)
-    if !eligible_skills.is_empty() {
+    if !model_visible_skills.is_empty() {
         RoutingStrategy::Semantic { confidence: 0.0 }
     } else {
         RoutingStrategy::NoSkill
@@ -172,6 +172,22 @@ mod tests {
         // Keywords match when no explicit command
         let result = route("git commit these changes", &skills);
         assert!(matches!(result, RoutingStrategy::KeywordMatch { .. }));
+    }
+
+    #[test]
+    fn test_manual_only_skill_is_still_explicitly_routable() {
+        let mut skills = test_skills();
+        let mut internal = SkillIndex::new("internal", "Manual-only internal workflow");
+        internal.disable_model_invocation = true;
+        skills.push(internal);
+
+        let result = route("/internal", &skills);
+        assert!(
+            matches!(result, RoutingStrategy::Explicit { skill_name } if skill_name == "internal")
+        );
+
+        let result = route("internal workflow", &skills);
+        assert!(!matches!(result, RoutingStrategy::KeywordMatch { .. }));
     }
 
     #[test]

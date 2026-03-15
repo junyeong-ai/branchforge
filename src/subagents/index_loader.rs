@@ -16,55 +16,85 @@ pub struct SubagentFrontmatter {
     pub name: String,
     pub description: String,
     #[serde(default)]
-    pub tools: Option<String>,
+    pub tools: Option<StringList>,
     #[serde(default)]
     pub model: Option<String>,
-    #[serde(default)]
+    #[serde(default, alias = "model-type")]
     pub model_type: Option<String>,
     #[serde(default)]
-    pub skills: Option<String>,
+    pub skills: Option<StringList>,
+    #[serde(default, alias = "mcpServers")]
+    pub mcp_servers: Option<StringList>,
     #[serde(default, rename = "source-type")]
     pub source_type: Option<String>,
     #[serde(default, alias = "disallowedTools")]
-    pub disallowed_tools: Option<String>,
+    pub disallowed_tools: Option<StringList>,
     #[serde(default, alias = "permissionMode")]
-    pub permission_mode: Option<String>,
+    pub authorization_mode: Option<String>,
+    #[serde(default, alias = "maxTurns")]
+    pub max_turns: Option<usize>,
     #[serde(default)]
     pub hooks: Option<HashMap<String, Vec<HookRule>>>,
 }
 
-fn split_csv(s: Option<String>) -> Vec<String> {
-    s.map(|v| {
-        let mut items = Vec::new();
-        let mut current = String::new();
-        let mut depth = 0u32;
-        for ch in v.chars() {
-            match ch {
-                '(' => {
-                    depth += 1;
-                    current.push(ch);
-                }
-                ')' => {
-                    depth = depth.saturating_sub(1);
-                    current.push(ch);
-                }
-                ',' if depth == 0 => {
-                    let trimmed = current.trim().to_string();
-                    if !trimmed.is_empty() {
-                        items.push(trimmed);
-                    }
-                    current.clear();
-                }
-                _ => current.push(ch),
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum StringList {
+    Csv(String),
+    List(Vec<String>),
+}
+
+fn split_csv(value: impl AsRef<str>) -> Vec<String> {
+    let value = value.as_ref();
+    if value.trim().is_empty() {
+        return Vec::new();
+    }
+
+    let mut items = Vec::new();
+    let mut current = String::new();
+    let mut depth = 0u32;
+    for ch in value.chars() {
+        match ch {
+            '(' => {
+                depth += 1;
+                current.push(ch);
             }
+            ')' => {
+                depth = depth.saturating_sub(1);
+                current.push(ch);
+            }
+            ',' if depth == 0 => {
+                let trimmed = current.trim().to_string();
+                if !trimmed.is_empty() {
+                    items.push(trimmed);
+                }
+                current.clear();
+            }
+            _ => current.push(ch),
         }
-        let trimmed = current.trim().to_string();
-        if !trimmed.is_empty() {
-            items.push(trimmed);
+    }
+    let trimmed = current.trim().to_string();
+    if !trimmed.is_empty() {
+        items.push(trimmed);
+    }
+    items
+}
+
+impl StringList {
+    fn into_vec(self) -> Vec<String> {
+        match self {
+            Self::Csv(value) => split_csv(value),
+            Self::List(values) => values
+                .into_iter()
+                .map(|value| value.trim().to_string())
+                .filter(|value| !value.is_empty())
+                .collect(),
         }
-        items
-    })
-    .unwrap_or_default()
+    }
+}
+
+fn parse_list(list: Option<StringList>) -> Vec<String> {
+    list.map(StringList::into_vec).unwrap_or_default()
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -83,18 +113,21 @@ impl SubagentIndexLoader {
     fn build_index(&self, fm: SubagentFrontmatter, path: &Path) -> SubagentIndex {
         let source_type = SourceType::from_str_opt(fm.source_type.as_deref());
 
-        let tools = split_csv(fm.tools);
-        let skills = split_csv(fm.skills);
-        let disallowed_tools = split_csv(fm.disallowed_tools);
+        let tools = parse_list(fm.tools);
+        let skills = parse_list(fm.skills);
+        let mcp_servers = parse_list(fm.mcp_servers);
+        let disallowed_tools = parse_list(fm.disallowed_tools);
 
         let mut index = SubagentIndex::new(fm.name, fm.description)
             .source(ContentSource::file(path))
             .source_type(source_type)
             .tools(tools)
-            .skills(skills);
+            .skills(skills)
+            .mcp_servers(mcp_servers);
 
         index.disallowed_tools = disallowed_tools;
-        index.permission_mode = fm.permission_mode;
+        index.authorization_mode = fm.authorization_mode;
+        index.max_turns = fm.max_turns;
         index.hooks = fm.hooks;
 
         if let Some(m) = fm.model {
@@ -181,6 +214,7 @@ description: Full featured agent
 tools: Read, Write, Bash(git:*)
 model: sonnet
 skills: security-check, linting
+mcpServers: context7, filesystem
 ---
 
 Full agent prompt.
@@ -192,6 +226,7 @@ Full agent prompt.
             .unwrap();
 
         assert_eq!(index.skills, vec!["security-check", "linting"]);
+        assert_eq!(index.mcp_servers, vec!["context7", "filesystem"]);
         assert_eq!(index.model, Some("sonnet".to_string()));
     }
 
@@ -232,11 +267,11 @@ Restricted prompt"#;
     }
 
     #[test]
-    fn test_parse_permission_mode() {
+    fn test_parse_authorization_mode() {
         let content = r#"---
 name: auto-agent
-description: Agent with permission mode
-permissionMode: dontAsk
+description: Agent with authorization mode
+permissionMode: readOnly
 ---
 Auto prompt"#;
 
@@ -245,18 +280,18 @@ Auto prompt"#;
             .parse_index(content, Path::new("/test/auto.md"))
             .unwrap();
 
-        assert_eq!(index.permission_mode, Some("dontAsk".to_string()));
+        assert_eq!(index.authorization_mode, Some("readOnly".to_string()));
     }
 
     #[test]
     fn test_split_csv_with_parens() {
-        let result = split_csv(Some("Read, Bash(git:*,docker:*), Write".to_string()));
+        let result = split_csv("Read, Bash(git:*,docker:*), Write");
         assert_eq!(result, vec!["Read", "Bash(git:*,docker:*)", "Write"]);
     }
 
     #[test]
     fn test_split_csv_simple() {
-        let result = split_csv(Some("Read, Grep, Glob".to_string()));
+        let result = split_csv("Read, Grep, Glob");
         assert_eq!(result, vec!["Read", "Grep", "Glob"]);
     }
 
@@ -274,6 +309,39 @@ Prompt"#;
             .unwrap();
 
         assert!(index.disallowed_tools.is_empty());
-        assert!(index.permission_mode.is_none());
+        assert!(index.mcp_servers.is_empty());
+        assert!(index.authorization_mode.is_none());
+    }
+
+    #[test]
+    fn test_parse_yaml_lists_and_max_turns() {
+        let content = r#"---
+name: yaml-agent
+description: Agent with YAML list fields
+tools:
+  - Read
+  - Bash(git:*)
+skills:
+  - review
+  - lint
+mcpServers:
+  - context7
+  - filesystem
+disallowedTools:
+  - Edit
+maxTurns: 4
+---
+Prompt"#;
+
+        let loader = SubagentIndexLoader::new();
+        let index = loader
+            .parse_index(content, Path::new("/test/yaml-agent.md"))
+            .unwrap();
+
+        assert_eq!(index.allowed_tools, vec!["Read", "Bash(git:*)"]);
+        assert_eq!(index.skills, vec!["review", "lint"]);
+        assert_eq!(index.mcp_servers, vec!["context7", "filesystem"]);
+        assert_eq!(index.disallowed_tools, vec!["Edit"]);
+        assert_eq!(index.max_turns, Some(4));
     }
 }

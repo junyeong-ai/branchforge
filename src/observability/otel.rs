@@ -20,7 +20,7 @@ use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 
 /// Default service name for OpenTelemetry instrumentation.
-pub const SERVICE_NAME_DEFAULT: &str = "claude-agent";
+pub const SERVICE_NAME_DEFAULT: &str = "branchforge";
 
 /// OpenTelemetry configuration for the agent.
 #[derive(Debug, Clone)]
@@ -428,7 +428,7 @@ mod tests {
     #[test]
     fn test_otel_config_default() {
         let config = OtelConfig::default();
-        assert_eq!(config.service_name, "claude-agent");
+        assert_eq!(config.service_name, "branchforge");
         assert!(config.traces_enabled);
         assert!(config.metrics_enabled);
         assert_eq!(config.sample_ratio, 1.0);

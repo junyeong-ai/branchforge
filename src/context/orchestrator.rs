@@ -11,9 +11,10 @@ use std::sync::Arc;
 
 use tokio::sync::RwLock;
 
-use crate::common::{Index, IndexRegistry, LoadedEntry};
+use crate::common::{IndexRegistry, LoadedEntry};
 use crate::session::compact::DEFAULT_COMPACT_THRESHOLD;
 use crate::skills::SkillIndex;
+use crate::skills::{build_model_invocable_summary, find_explicit_command, find_trigger_matches};
 use crate::types::{TokenUsage, context_window};
 
 use super::rule_index::RuleIndex;
@@ -175,26 +176,15 @@ impl PromptOrchestrator {
     }
 
     pub fn find_skills_by_triggers(&self, input: &str) -> Vec<&SkillIndex> {
-        self.skill_registry
-            .iter()
-            .filter(|s| !s.disable_model_invocation && s.matches_triggers(input))
-            .collect()
+        find_trigger_matches(&self.skill_registry, input)
     }
 
     pub fn find_skill_by_command(&self, input: &str) -> Option<&SkillIndex> {
-        self.skill_registry
-            .iter()
-            .find(|s| !s.disable_model_invocation && s.matches_command(input))
+        find_explicit_command(&self.skill_registry, input)
     }
 
     pub fn build_skill_summary(&self) -> String {
-        let summary = self
-            .skill_registry
-            .iter()
-            .filter(|skill| !skill.disable_model_invocation)
-            .map(|skill| skill.to_summary_line())
-            .collect::<Vec<_>>()
-            .join("\n");
+        let summary = build_model_invocable_summary(&self.skill_registry);
         if summary.is_empty() {
             return String::new();
         }
@@ -335,6 +325,23 @@ mod tests {
         let summary = orchestrator.build_skill_summary();
         assert!(summary.contains("commit"));
         assert!(summary.contains("review"));
+    }
+
+    #[test]
+    fn test_find_skill_by_command_includes_manual_only_skills() {
+        let static_context = StaticContext::new();
+        let mut skill_registry = IndexRegistry::new();
+        let mut skill = SkillIndex::new("internal", "Internal manual-only skill");
+        skill.disable_model_invocation = true;
+        skill_registry.register(skill);
+
+        let orchestrator = PromptOrchestrator::new(static_context, "claude-sonnet-4-5")
+            .skill_registry(skill_registry);
+
+        let skill = orchestrator.find_skill_by_command("/internal");
+        assert!(skill.is_some());
+        assert_eq!(skill.unwrap().name, "internal");
+        assert!(orchestrator.build_skill_summary().is_empty());
     }
 
     #[tokio::test]

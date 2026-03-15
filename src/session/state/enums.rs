@@ -9,6 +9,9 @@ pub enum SessionState {
     Created,
     Active,
     WaitingForTools,
+    Completing,
+    Failing,
+    Cancelling,
     Completed,
     Failed,
     Cancelled,
@@ -20,10 +23,34 @@ impl SessionState {
         match s.to_lowercase().as_str() {
             "active" => Self::Active,
             "waitingfortools" | "waiting_for_tools" => Self::WaitingForTools,
+            "completing" => Self::Completing,
+            "failing" => Self::Failing,
+            "cancelling" | "canceling" => Self::Cancelling,
             "completed" => Self::Completed,
             "failed" => Self::Failed,
             "cancelled" | "canceled" => Self::Cancelled,
             _ => Self::Created,
+        }
+    }
+
+    pub fn is_running(self) -> bool {
+        matches!(self, Self::Active | Self::WaitingForTools)
+    }
+
+    pub fn is_finalizing(self) -> bool {
+        matches!(self, Self::Completing | Self::Failing | Self::Cancelling)
+    }
+
+    pub fn is_terminal(self) -> bool {
+        matches!(self, Self::Completed | Self::Failed | Self::Cancelled)
+    }
+
+    pub fn terminal_from_finalizing(self) -> Option<Self> {
+        match self {
+            Self::Completing => Some(Self::Completed),
+            Self::Failing => Some(Self::Failed),
+            Self::Cancelling => Some(Self::Cancelled),
+            _ => None,
         }
     }
 }
@@ -58,6 +85,22 @@ mod tests {
             SessionState::WaitingForTools
         );
         assert_eq!(
+            SessionState::from_str_lenient("completing"),
+            SessionState::Completing
+        );
+        assert_eq!(
+            SessionState::from_str_lenient("failing"),
+            SessionState::Failing
+        );
+        assert_eq!(
+            SessionState::from_str_lenient("cancelling"),
+            SessionState::Cancelling
+        );
+        assert_eq!(
+            SessionState::from_str_lenient("canceling"),
+            SessionState::Cancelling
+        );
+        assert_eq!(
             SessionState::from_str_lenient("completed"),
             SessionState::Completed
         );
@@ -77,5 +120,21 @@ mod tests {
             SessionState::from_str_lenient("unknown"),
             SessionState::Created
         );
+    }
+
+    #[test]
+    fn test_session_state_helpers() {
+        assert!(SessionState::Active.is_running());
+        assert!(SessionState::WaitingForTools.is_running());
+        assert!(SessionState::Completing.is_finalizing());
+        assert!(SessionState::Failing.is_finalizing());
+        assert!(SessionState::Cancelling.is_finalizing());
+        assert_eq!(
+            SessionState::Completing.terminal_from_finalizing(),
+            Some(SessionState::Completed)
+        );
+        assert!(SessionState::Completed.is_terminal());
+        assert!(SessionState::Failed.is_terminal());
+        assert!(SessionState::Cancelled.is_terminal());
     }
 }

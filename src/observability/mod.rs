@@ -1,4 +1,4 @@
-//! Observability module for Claude Agent SDK.
+//! Observability module for Branchforge SDK.
 //!
 //! Provides structured tracing, metrics collection, and telemetry integration.
 //!
@@ -13,11 +13,11 @@
 //! Enable the `otel` feature to export traces and metrics:
 //!
 //! ```toml
-//! claude-agent = { version = "0.2", features = ["otel"] }
+//! branchforge = { version = "0.2", features = ["otel"] }
 //! ```
 //!
 //! ```rust,ignore
-//! use claude_agent::observability::{OtelConfig, OtelRuntime};
+//! use branchforge::observability::{OtelConfig, OtelRuntime};
 //!
 //! let config = OtelConfig::new("my-agent")
 //!     .with_endpoint("http://localhost:4317");

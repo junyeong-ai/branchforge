@@ -34,7 +34,7 @@ impl AgentState {
     }
 }
 
-use crate::types::{ModelUsage, PermissionDenial, ServerToolUse, ServerToolUseUsage, Usage};
+use crate::types::{AuthorizationDenied, ModelUsage, ServerToolUse, ServerToolUseUsage, Usage};
 
 #[derive(Debug, Clone, Default)]
 pub struct AgentMetrics {
@@ -53,7 +53,7 @@ pub struct AgentMetrics {
     pub tool_call_records: Vec<ToolCallRecord>,
     pub model_usage: std::collections::HashMap<String, ModelUsage>,
     pub server_tool_use: ServerToolUse,
-    pub permission_denials: Vec<PermissionDenial>,
+    pub authorization_denials: Vec<AuthorizationDenied>,
     pub api_time_ms: u64,
 }
 
@@ -212,9 +212,9 @@ impl AgentMetrics {
         self.server_tool_use.add_from_usage(usage);
     }
 
-    /// Record a permission denial.
-    pub fn record_permission_denial(&mut self, denial: PermissionDenial) {
-        self.permission_denials.push(denial);
+    /// Record a authorization denial.
+    pub fn record_authorization_denial(&mut self, denial: AuthorizationDenied) {
+        self.authorization_denials.push(denial);
     }
 
     /// Get the total cost across all models.

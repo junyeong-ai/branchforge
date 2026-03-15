@@ -8,16 +8,17 @@ use tracing::{debug, info, instrument, warn};
 use super::AgentMetrics;
 use super::common::{
     self, BudgetContext, accumulate_inner_usage, accumulate_response_usage, handle_compaction,
-    run_post_tool_hooks, run_stop_hooks, try_activate_dynamic_rules,
+    maybe_invoke_explicit_skill_command, run_post_tool_hooks, run_stop_hooks,
+    try_activate_dynamic_rules,
 };
 use super::events::AgentResult;
 use super::executor::Agent;
 use super::request::RequestBuilder;
 use crate::graph::ReplayInput;
 use crate::hooks::{HookContext, HookEvent, HookInput};
-use crate::session::ToolExecution;
+use crate::session::{MessageMetadata, ToolExecution};
 use crate::types::{
-    ContentBlock, Message, PermissionDenial, StopReason, ToolResultBlock, Usage, context_window,
+    AuthorizationDenied, ContentBlock, Message, StopReason, ToolResultBlock, Usage, context_window,
 };
 
 impl Agent {
@@ -140,7 +141,7 @@ impl Agent {
             {
                 warn!(error = %e, "SessionEnd hook failed");
             }
-            return Err(crate::Error::Permission(
+            return Err(crate::Error::Authorization(
                 prompt_output
                     .stop_reason
                     .unwrap_or_else(|| "Blocked by hook".into()),
@@ -152,12 +153,27 @@ impl Agent {
                 session.add_user_message(&final_prompt);
             })
             .await;
+        self.persist_session_state().await?;
 
         let mut metrics = AgentMetrics::default();
         let mut final_text = String::new();
         let mut final_stop_reason = StopReason::EndTurn;
         let mut dynamic_rules_context = String::new();
         let mut total_usage = Usage::default();
+
+        if maybe_invoke_explicit_skill_command(
+            &self.tools,
+            &self.state,
+            &self.hooks,
+            &hook_ctx,
+            &self.session_id,
+            &final_prompt,
+            &mut metrics,
+        )
+        .await?
+        {
+            self.persist_session_state().await?;
+        }
 
         let mut request_builder = {
             let static_context = match &self.orchestrator {
@@ -179,7 +195,9 @@ impl Agent {
                     .metadata(metadata);
 
             if let Some(ref tsm) = self.tool_search_manager {
-                let prepared = tsm.prepare_tools().await;
+                let prepared = tsm
+                    .prepare_tools_for_access(&self.config.security.tool_surface)
+                    .await;
                 if prepared.use_search {
                     info!(
                         immediate = prepared.immediate.len(),
@@ -234,12 +252,6 @@ impl Agent {
             metrics.record_api_call_with_timing(api_duration_ms);
             debug!(api_time_ms = api_duration_ms, "API call completed");
 
-            self.state
-                .with_session_mut(|session| {
-                    session.update_usage(&response.usage);
-                })
-                .await;
-
             accumulate_response_usage(
                 &mut total_usage,
                 &mut metrics,
@@ -251,12 +263,23 @@ impl Agent {
 
             final_text = response.text();
             final_stop_reason = response.stop_reason.unwrap_or(StopReason::EndTurn);
+            let assistant_metadata = MessageMetadata {
+                model: Some(response.model.clone()),
+                request_id: Some(response.id.clone()),
+                structured_output: self.extract_structured_output(&final_text),
+                ..Default::default()
+            };
 
             self.state
                 .with_session_mut(|session| {
-                    session.add_assistant_message(response.content.clone(), Some(response.usage));
+                    session.add_assistant_message_with_metadata(
+                        response.content.clone(),
+                        Some(response.usage),
+                        assistant_metadata,
+                    );
                 })
                 .await;
+            self.persist_session_state().await?;
 
             if !response.wants_tool_use() {
                 debug!("No tool use requested, ending loop");
@@ -287,9 +310,13 @@ impl Agent {
                         .clone()
                         .unwrap_or_else(|| "Blocked by hook".into());
                     blocked.push(ToolResultBlock::error(&tool_use.id, reason.clone()));
-                    metrics.record_permission_denial(
-                        PermissionDenial::new(&tool_use.name, &tool_use.id, tool_use.input.clone())
-                            .reason(reason),
+                    metrics.record_authorization_denial(
+                        AuthorizationDenied::new(
+                            &tool_use.name,
+                            &tool_use.id,
+                            tool_use.input.clone(),
+                        )
+                        .reason(reason),
                     );
                 } else {
                     let input = pre_output.updated_input.unwrap_or(tool_use.input.clone());
@@ -302,7 +329,7 @@ impl Agent {
                                 "tool_input": input.clone(),
                             }),
                         )
-                        .await;
+                        .await?;
                     prepared.push((tool_use.id.clone(), tool_use.name.clone(), input));
                 }
             }
@@ -365,7 +392,7 @@ impl Agent {
                             .output(result.output.text(), is_error)
                             .duration(duration_ms),
                     )
-                    .await;
+                    .await?;
 
                 results.push(ToolResultBlock::from_tool_result(&id, &result));
             }
@@ -375,6 +402,7 @@ impl Agent {
                     session.add_tool_results(results);
                 })
                 .await;
+            self.persist_session_state().await?;
 
             if all_non_retryable {
                 warn!("All tool calls failed with non-retryable errors, ending execution");
@@ -393,6 +421,7 @@ impl Agent {
                 &mut metrics,
             )
             .await;
+            self.persist_session_state().await?;
         }
 
         metrics.execution_time_ms = execution_start.elapsed().as_millis() as u64;

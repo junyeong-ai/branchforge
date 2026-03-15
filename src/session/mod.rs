@@ -24,7 +24,7 @@ pub use archive::{
 };
 pub use compact::{CompactExecutor, CompactStrategy, DEFAULT_COMPACT_THRESHOLD};
 pub use export::{AuditBundle, ExportPolicy, SessionExporter};
-pub use manager::SessionManager;
+pub use manager::{ScopedSessionManager, SessionManager};
 pub use persistence::{MemoryPersistence, Persistence, PersistenceFactory};
 #[cfg(feature = "jsonl")]
 pub use persistence_jsonl::{
@@ -40,13 +40,14 @@ pub use queue::{InputQueue, MergedInput, QueueError, QueuedInput, SharedInputQue
 pub use replay::ReplayService;
 pub use session_state::{ExecutionGuard, ToolState};
 pub use state::{
-    MessageId, MessageMetadata, Session, SessionConfig, SessionId, SessionMessage,
-    SessionPermissions, SessionState, SessionToolLimits, SessionType,
+    ExecutionMetadata, MessageId, MessageMetadata, Session, SessionAuthorization, SessionConfig,
+    SessionId, SessionMessage, SessionState, SessionToolLimits, SessionType, ThinkingMetadata,
+    ToolResultMeta,
 };
 pub use types::{
     CompactRecord, CompactTrigger, EnvironmentContext, Plan, PlanStatus, QueueItem, QueueOperation,
-    QueueStatus, SessionAccessScope, SessionStats, SessionTree, SummarySnapshot, TodoItem,
-    TodoStatus, ToolExecution,
+    QueueStatus, SessionAccessScope, SessionStats, SessionTree, TodoItem, TodoStatus,
+    ToolExecution,
 };
 
 use thiserror::Error;

@@ -6,7 +6,7 @@ use crate::client::{CloudProvider, ProviderConfig};
 use crate::common::Index;
 use crate::common::IndexRegistry;
 use crate::context::{MemoryProvider, PromptOrchestrator, RuleIndex, StaticContext};
-use crate::skills::SkillRuntime;
+use crate::skills::{SkillRuntime, build_model_invocable_summary};
 use crate::tools::{ToolRegistry, ToolSearchConfig, ToolSearchManager};
 
 use super::builder::AgentBuilder;
@@ -25,10 +25,15 @@ impl AgentBuilder {
         self.connect_mcp_servers().await?;
         self.initialize_tool_search().await;
 
+        let delegation_runtime = self.build_delegation_runtime().await;
         let client = self.build_client().await?;
-        let tools = self.build_tools().await;
+        let tools = self.build_tools(delegation_runtime).await;
         let orchestrator = self.build_orchestrator().await;
         let identity = self.config.identity.clone();
+        let session_scope = crate::session::SessionAccessScope {
+            tenant_id: identity.tenant_id.clone(),
+            principal_id: identity.principal_id.clone(),
+        };
 
         let tenant_budget = self.tenant_budget_manager.as_ref().and_then(|m| {
             self.config
@@ -58,6 +63,15 @@ impl AgentBuilder {
         if let Some(budget) = tenant_budget {
             agent = agent.tenant_budget(budget);
         }
+        if let Some(manager) = self.session_manager.clone() {
+            let scope = if session_scope.tenant_id.is_some() || session_scope.principal_id.is_some()
+            {
+                Some(session_scope.clone())
+            } else {
+                None
+            };
+            agent = agent.session_persistence(manager, scope);
+        }
 
         agent
             .state()
@@ -79,6 +93,8 @@ impl AgentBuilder {
                 })
                 .await;
         }
+
+        agent.persist_session_state().await?;
         if let Some(tsm) = self.tool_search_manager {
             agent = agent.tool_search_manager(tsm);
         }
@@ -213,7 +229,9 @@ impl AgentBuilder {
 
         manager.build_index(mcp_manager).await;
 
-        let prepared = manager.prepare_tools().await;
+        let prepared = manager
+            .prepare_tools_for_access(&self.config.security.tool_surface)
+            .await;
         tracing::debug!(
             use_search = prepared.use_search,
             immediate_count = prepared.immediate.len(),
@@ -341,16 +359,11 @@ impl AgentBuilder {
         // Get skill registry for building summary
         let skill_registry = self.skill_registry.clone().unwrap_or_default();
 
-        if !skill_registry.is_empty() {
-            let mut lines = vec!["# Available Skills".to_string()];
-            for skill in skill_registry
-                .iter()
-                .filter(|skill| !skill.disable_model_invocation)
-            {
-                lines.push(skill.to_summary_line());
-            }
-            if lines.len() > 1 {
-                static_context = static_context.skill_summary(lines.join("\n"));
+        if self.config.security.tool_surface.is_allowed("Skill") {
+            let summary = build_model_invocable_summary(&skill_registry);
+            if !summary.is_empty() {
+                static_context =
+                    static_context.skill_summary(format!("# Available Skills\n{summary}"));
             }
         }
 
@@ -372,15 +385,16 @@ impl AgentBuilder {
             .skill_registry(skill_registry)
     }
 
-    async fn build_tools(&mut self) -> Arc<ToolRegistry> {
+    async fn build_tools(
+        &mut self,
+        delegation_runtime: crate::agent::DelegationRuntime,
+    ) -> Arc<ToolRegistry> {
         let skill_registry = self.skill_registry.take().unwrap_or_default();
         let skill_count = skill_registry.iter().count();
         tracing::debug!(skill_count, "build_tools: skill_registry taken");
         let subagent_registry = self.subagent_registry.take();
-        let mut skill_executor = SkillRuntime::new(skill_registry);
-        if let Some(ref registry) = subagent_registry {
-            skill_executor = skill_executor.subagent_registry(registry.clone());
-        }
+        let skill_executor =
+            SkillRuntime::new(skill_registry).delegation_runtime(delegation_runtime.clone());
 
         let working_dir = self
             .config
@@ -399,25 +413,45 @@ impl AgentBuilder {
                 (crate::session::ToolState::from_session(session), id)
             }
             None => {
-                let id = crate::session::SessionId::new();
+                let id = self
+                    .resume_session_id
+                    .as_deref()
+                    .and_then(crate::session::SessionId::parse)
+                    .unwrap_or_default();
                 (crate::session::ToolState::new(id), id)
             }
         };
 
         let mut builder = crate::tools::ToolRegistryBuilder::new()
-            .access(self.config.security.tool_access.clone())
+            .access(self.config.security.tool_surface.clone())
             .working_dir(working_dir)
             .skill_executor(skill_executor)
-            .policy(self.config.security.permission_policy.clone())
             .tool_state(tool_state)
-            .session_id(session_id);
+            .session_id(session_id)
+            .hooks(self.hooks.clone())
+            .scope(crate::session::SessionAccessScope {
+                tenant_id: self.config.identity.tenant_id.clone(),
+                principal_id: self.config.identity.principal_id.clone(),
+            });
+
+        if self.authorization_policy_explicit
+            || AgentBuilder::authorization_policy_is_custom(
+                &self.config.security.authorization_policy,
+            )
+        {
+            builder = builder.policy(self.config.security.authorization_policy.clone());
+        }
 
         if let Some(ref manager) = self.session_manager {
             builder = builder.session_manager(manager.clone());
         }
 
         if let Some(sr) = subagent_registry {
-            builder = builder.subagent_registry(sr);
+            builder = builder
+                .subagent_registry(sr)
+                .delegation_runtime(delegation_runtime.clone());
+        } else {
+            builder = builder.delegation_runtime(delegation_runtime);
         }
         if let Some(sc) = sandbox_config {
             builder = builder.sandbox_config(sc);
@@ -430,13 +464,39 @@ impl AgentBuilder {
         }
 
         if let Some(ref mcp_manager) = self.mcp_manager {
-            let mcp_tools = crate::tools::create_mcp_tools(Arc::clone(mcp_manager)).await;
+            let mcp_tools = crate::tools::create_mcp_tools_with_access(
+                Arc::clone(mcp_manager),
+                &self.config.security.tool_surface,
+            )
+            .await;
             for tool in mcp_tools {
                 tools.register(tool);
             }
         }
 
         Arc::new(tools)
+    }
+
+    async fn build_delegation_runtime(&self) -> crate::agent::DelegationRuntime {
+        let memory_content = match self.memory_provider.as_ref() {
+            Some(provider) => provider.load().await.unwrap_or_default(),
+            None => crate::context::MemoryContent::default(),
+        };
+
+        crate::agent::DelegationRuntime::new(crate::agent::DelegationRuntimeConfig {
+            config: self.config.clone(),
+            auth: self.auth_type.clone(),
+            provider_config: self.provider_config.clone(),
+            model_config: self.model_config.clone(),
+            skill_registry: self.skill_registry.clone().unwrap_or_default(),
+            subagent_registry: self.subagent_registry.clone().unwrap_or_default(),
+            hooks: self.hooks.clone(),
+            memory_content,
+            sandbox_settings: self.sandbox_settings.clone(),
+            session_manager: self.session_manager.clone(),
+            mcp_manager: self.mcp_manager.clone(),
+            tool_search_manager: self.tool_search_manager.clone(),
+        })
     }
 
     async fn build_client(&mut self) -> crate::Result<crate::Client> {

@@ -1,7 +1,5 @@
 //! Helper types for message requests.
 
-use std::collections::HashMap;
-
 use serde::{Deserialize, Serialize};
 
 use crate::types::{ToolDefinition, ToolSearchTool, WebFetchTool, WebSearchTool};
@@ -10,8 +8,12 @@ use crate::types::{ToolDefinition, ToolSearchTool, WebFetchTool, WebSearchTool};
 pub struct RequestMetadata {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub user_id: Option<String>,
-    #[serde(flatten)]
-    pub extra: HashMap<String, serde_json::Value>,
+    /// Tenant ID — preserved for SDK-level audit/attribution, not sent to API.
+    #[serde(skip)]
+    pub tenant_id: Option<String>,
+    /// Session ID — preserved for SDK-level correlation, not sent to API.
+    #[serde(skip)]
+    pub session_id: Option<String>,
 }
 
 impl RequestMetadata {
@@ -21,22 +23,10 @@ impl RequestMetadata {
         session_id: Option<&str>,
     ) -> Option<Self> {
         let principal_id = principal_id?;
-        let mut extra = HashMap::new();
-        if let Some(tenant_id) = tenant_id {
-            extra.insert(
-                "tenant_id".to_string(),
-                serde_json::Value::String(tenant_id.to_string()),
-            );
-        }
-        if let Some(session_id) = session_id {
-            extra.insert(
-                "session_id".to_string(),
-                serde_json::Value::String(session_id.to_string()),
-            );
-        }
         Some(Self {
             user_id: Some(principal_id.to_string()),
-            extra,
+            tenant_id: tenant_id.map(String::from),
+            session_id: session_id.map(String::from),
         })
     }
 }
@@ -117,13 +107,29 @@ mod tests {
             RequestMetadata::from_identity(Some("tenant-a"), Some("user-1"), Some("session-1"))
                 .unwrap();
         assert_eq!(metadata.user_id.as_deref(), Some("user-1"));
-        assert_eq!(
-            metadata.extra.get("tenant_id"),
-            Some(&serde_json::json!("tenant-a"))
+        assert_eq!(metadata.tenant_id.as_deref(), Some("tenant-a"));
+        assert_eq!(metadata.session_id.as_deref(), Some("session-1"));
+
+        // Without tenant/session, fields should be None
+        let metadata = RequestMetadata::from_identity(None, Some("user-1"), None).unwrap();
+        assert_eq!(metadata.user_id.as_deref(), Some("user-1"));
+        assert!(metadata.tenant_id.is_none());
+        assert!(metadata.session_id.is_none());
+
+        // Without principal, returns None
+        assert!(RequestMetadata::from_identity(Some("t"), None, None).is_none());
+
+        // Verify serialization only includes user_id (not tenant/session)
+        let metadata = RequestMetadata::from_identity(Some("t"), Some("u"), Some("s")).unwrap();
+        let json = serde_json::to_value(&metadata).unwrap();
+        assert!(json.get("user_id").is_some());
+        assert!(
+            json.get("tenant_id").is_none(),
+            "tenant_id must not be serialized to API"
         );
-        assert_eq!(
-            metadata.extra.get("session_id"),
-            Some(&serde_json::json!("session-1"))
+        assert!(
+            json.get("session_id").is_none(),
+            "session_id must not be serialized to API"
         );
     }
 }

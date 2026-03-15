@@ -193,18 +193,15 @@ impl CompactExecutor {
                 "content": [ContentBlock::text(format!("[Previous conversation summary]\n\n{}", summary))],
                 "summary": summary,
             }),
-        );
-        session.graph.create_checkpoint(
-            branch_id,
+        ).expect("compaction should append summary to an existing primary branch");
+        session.checkpoint_current_head(
             "compaction",
             Some("Context compaction summary appended".to_string()),
             vec!["compaction".to_string()],
-            session.principal_id.clone(),
-            None,
         );
 
         // Projection replacement only; graph history remains intact.
-        let summary_msg = SessionMessage::user(vec![ContentBlock::text(format!(
+        let summary_msg = SessionMessage::assistant(vec![ContentBlock::text(format!(
             "[Previous conversation summary]\n\n{}",
             summary
         ))])
@@ -213,7 +210,7 @@ impl CompactExecutor {
         let new_leaf_id = Some(summary_msg.id.clone());
         session.messages = vec![summary_msg];
         session.current_leaf_id = new_leaf_id;
-        session.summary = Some(summary.clone());
+        session.refresh_summary_cache();
         session.updated_at = chrono::Utc::now();
 
         CompactResult::Compacted {
@@ -467,7 +464,7 @@ mod tests {
                 SessionMessage::assistant(vec![ContentBlock::text(content)])
             };
 
-            session.add_message(msg);
+            session.add_message(msg).unwrap();
         }
 
         session

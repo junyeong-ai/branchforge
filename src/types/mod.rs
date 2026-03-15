@@ -1,4 +1,4 @@
-//! Core types for the Claude Agent SDK.
+//! Core types for the Branchforge SDK.
 
 pub mod citations;
 pub mod content;
@@ -22,9 +22,9 @@ pub use content::{
 pub use document::{DocumentBlock, DocumentContentBlock, DocumentSource};
 pub use message::{CacheControl, CacheTtl, CacheType, Message, Role, SystemBlock, SystemPrompt};
 pub use response::{
-    ApiResponse, CompactResult, ContentDelta, MessageDeltaData, MessageStartData, ModelUsage,
-    PermissionDenial, ServerToolUse, ServerToolUseUsage, StopReason, StreamError, StreamEvent,
-    TokenUsage, Usage,
+    ApiResponse, AuthorizationDenied, CompactResult, ContentDelta, MessageDeltaData,
+    MessageStartData, ModelUsage, ServerToolUse, ServerToolUseUsage, StopReason, StreamError,
+    StreamEvent, TokenUsage, Usage,
 };
 pub use search::{SearchResultBlock, SearchResultContentBlock};
 pub use tool::{

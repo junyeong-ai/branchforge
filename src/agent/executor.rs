@@ -9,7 +9,7 @@ use crate::Client;
 use crate::budget::{BudgetTracker, TenantBudget};
 use crate::context::PromptOrchestrator;
 use crate::hooks::HookManager;
-use crate::session::ToolState;
+use crate::session::{SessionAccessScope, SessionManager, ToolState};
 use crate::tools::{ToolRegistry, ToolSearchManager};
 use crate::types::Message;
 
@@ -26,6 +26,8 @@ pub struct Agent {
     pub(crate) tenant_budget: Option<Arc<TenantBudget>>,
     pub(crate) mcp_manager: Option<Arc<crate::mcp::McpManager>>,
     pub(crate) tool_search_manager: Option<Arc<ToolSearchManager>>,
+    pub(crate) session_manager: Option<SessionManager>,
+    pub(crate) session_scope: Option<SessionAccessScope>,
 }
 
 impl Agent {
@@ -41,9 +43,9 @@ impl Agent {
         }
 
         let tools = ToolRegistry::default_tools(
-            config.security.tool_access.clone(),
+            config.security.tool_surface.clone(),
             config.working_dir.clone(),
-            Some(config.security.permission_policy.clone()),
+            Some(config.security.authorization_policy.clone()),
         );
         Self::from_parts(
             Arc::new(client),
@@ -101,6 +103,8 @@ impl Agent {
             tenant_budget: None,
             mcp_manager: None,
             tool_search_manager: None,
+            session_manager: None,
+            session_scope: None,
         }
     }
 
@@ -116,6 +120,16 @@ impl Agent {
 
     pub(crate) fn tool_search_manager(mut self, manager: Arc<ToolSearchManager>) -> Self {
         self.tool_search_manager = Some(manager);
+        self
+    }
+
+    pub(crate) fn session_persistence(
+        mut self,
+        manager: SessionManager,
+        scope: Option<SessionAccessScope>,
+    ) -> Self {
+        self.session_manager = Some(manager);
+        self.session_scope = scope;
         self
     }
 
@@ -156,6 +170,17 @@ impl Agent {
     #[must_use]
     pub fn client(&self) -> &Arc<Client> {
         &self.client
+    }
+
+    pub(crate) async fn persist_session_state(&self) -> crate::Result<()> {
+        let Some(manager) = self.session_manager.as_ref() else {
+            return Ok(());
+        };
+        let session = self.state.session().await;
+        manager
+            .persist_snapshot(&session, self.session_scope.as_ref())
+            .await
+            .map_err(|e| crate::Error::Session(e.to_string()))
     }
 
     pub fn orchestrator(&self) -> Option<&Arc<RwLock<PromptOrchestrator>>> {

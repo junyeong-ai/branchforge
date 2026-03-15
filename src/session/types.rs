@@ -182,7 +182,7 @@ impl PlanStatus {
     }
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Plan {
     pub id: Uuid,
     pub session_id: SessionId,
@@ -269,7 +269,7 @@ impl TodoStatus {
     }
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TodoItem {
     pub id: Uuid,
     pub session_id: SessionId,
@@ -345,7 +345,7 @@ impl CompactTrigger {
     }
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CompactRecord {
     pub id: Uuid,
     pub session_id: SessionId,
@@ -411,32 +411,6 @@ impl CompactRecord {
     }
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct SummarySnapshot {
-    pub id: Uuid,
-    pub session_id: SessionId,
-    pub summary: String,
-    pub leaf_message_id: Option<MessageId>,
-    pub created_at: DateTime<Utc>,
-}
-
-impl SummarySnapshot {
-    pub fn new(session_id: SessionId, summary: impl Into<String>) -> Self {
-        Self {
-            id: Uuid::new_v4(),
-            session_id,
-            summary: summary.into(),
-            leaf_message_id: None,
-            created_at: Utc::now(),
-        }
-    }
-
-    pub fn leaf(mut self, leaf_id: MessageId) -> Self {
-        self.leaf_message_id = Some(leaf_id);
-        self
-    }
-}
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum QueueOperation {
@@ -453,7 +427,7 @@ pub enum QueueStatus {
     Cancelled,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct QueueItem {
     pub id: Uuid,
     pub session_id: SessionId,
@@ -644,15 +618,6 @@ mod tests {
         assert_eq!(record.saved_tokens, 80_000);
         assert_eq!(record.original_count, 50);
         assert_eq!(record.new_count, 5);
-    }
-
-    #[test]
-    fn test_summary_snapshot() {
-        let session_id = SessionId::new();
-        let snapshot = SummarySnapshot::new(session_id, "Working on feature X");
-
-        assert!(!snapshot.summary.is_empty());
-        assert!(snapshot.leaf_message_id.is_none());
     }
 
     #[test]

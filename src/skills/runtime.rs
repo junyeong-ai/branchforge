@@ -1,13 +1,14 @@
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
+use tracing::instrument;
 
-use super::{SkillIndex, SkillResult};
-use crate::auth::Auth;
-use crate::client::CloudProvider;
-use crate::common::{Index, IndexRegistry, Named};
-use crate::subagents::{SubagentIndex, builtin_subagents};
-use crate::tools::ToolAccess;
+use super::{
+    SkillIndex, SkillResult, build_model_invocable_summary, extract_trigger_args,
+    find_explicit_command, find_first_trigger_match, list_model_invocable_skills,
+    parse_explicit_command,
+};
+use crate::common::{IndexRegistry, Named};
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -30,16 +31,14 @@ pub struct SkillSpec {
 
 pub struct SkillRuntime {
     registry: IndexRegistry<SkillIndex>,
-    subagent_registry: IndexRegistry<SubagentIndex>,
+    delegation_runtime: Option<crate::agent::DelegationRuntime>,
 }
 
 impl SkillRuntime {
     pub fn new(registry: IndexRegistry<SkillIndex>) -> Self {
-        let mut subagent_registry = IndexRegistry::new();
-        subagent_registry.register_all(builtin_subagents());
         Self {
             registry,
-            subagent_registry,
+            delegation_runtime: None,
         }
     }
 
@@ -47,8 +46,8 @@ impl SkillRuntime {
         Self::new(IndexRegistry::new())
     }
 
-    pub fn subagent_registry(mut self, subagent_registry: IndexRegistry<SubagentIndex>) -> Self {
-        self.subagent_registry = subagent_registry;
+    pub(crate) fn delegation_runtime(mut self, runtime: crate::agent::DelegationRuntime) -> Self {
+        self.delegation_runtime = Some(runtime);
         self
     }
 
@@ -60,6 +59,7 @@ impl SkillRuntime {
         &mut self.registry
     }
 
+    #[instrument(skip(self, args), fields(skill = %name))]
     pub async fn load_spec(&self, name: &str, args: Option<&str>) -> Result<SkillSpec, String> {
         let skill = self
             .registry
@@ -90,7 +90,22 @@ impl SkillRuntime {
         })
     }
 
+    #[instrument(skip(self, args), fields(skill = %name))]
     pub async fn execute(&self, name: &str, args: Option<&str>) -> SkillResult {
+        if let Some(skill) = self.registry.get(name)
+            && skill.disable_model_invocation
+        {
+            return SkillResult::error(format!(
+                "Skill '{}' is manual-only and must be invoked explicitly via /{}",
+                skill.name, skill.name
+            ));
+        }
+
+        self.execute_explicit(name, args).await
+    }
+
+    #[instrument(skip(self, args), fields(skill = %name))]
+    pub async fn execute_explicit(&self, name: &str, args: Option<&str>) -> SkillResult {
         let spec = match self.load_spec(name, args).await {
             Ok(spec) => spec,
             Err(error) => return SkillResult::error(error),
@@ -104,57 +119,32 @@ impl SkillRuntime {
 
     pub async fn execute_by_trigger(&self, input: &str) -> Option<SkillResult> {
         let skill = self.find_by_trigger(input)?.clone();
-        let args = self.extract_args(input, &skill);
+        let args = extract_trigger_args(input, &skill);
         Some(self.execute(skill.name(), args.as_deref()).await)
     }
 
     pub fn list_model_invocable_skills(&self) -> Vec<&SkillIndex> {
-        self.registry
-            .iter()
-            .filter(|skill| !skill.disable_model_invocation)
-            .collect()
-    }
-
-    pub fn list_user_invocable_skills(&self) -> Vec<&SkillIndex> {
-        self.registry
-            .iter()
-            .filter(|skill| skill.user_invocable)
-            .collect()
+        list_model_invocable_skills(&self.registry)
     }
 
     pub fn has_skill(&self, name: &str) -> bool {
         self.registry.contains(name)
     }
 
-    pub fn find_by_trigger(&self, input: &str) -> Option<&SkillIndex> {
-        self.registry
-            .iter()
-            .find(|skill| !skill.disable_model_invocation && skill.matches_triggers(input))
+    pub fn find_by_command(&self, input: &str) -> Option<&SkillIndex> {
+        find_explicit_command(&self.registry, input)
     }
 
-    fn extract_args(&self, input: &str, skill: &SkillIndex) -> Option<String> {
-        let input_lower = input.to_lowercase();
-        for trigger in &skill.triggers {
-            let trigger_lower = trigger.to_lowercase();
-            if let Some(byte_pos) = input_lower.find(&trigger_lower) {
-                let end_byte = byte_pos + trigger_lower.len();
-                if end_byte <= input.len() && input.is_char_boundary(end_byte) {
-                    let after_trigger = input[end_byte..].trim();
-                    if !after_trigger.is_empty() {
-                        return Some(after_trigger.to_string());
-                    }
-                }
-            }
-        }
-        None
+    pub fn parse_explicit_command(&self, input: &str) -> Option<(String, Option<String>)> {
+        parse_explicit_command(&self.registry, input)
+    }
+
+    pub fn find_by_trigger(&self, input: &str) -> Option<&SkillIndex> {
+        find_first_trigger_match(&self.registry, input)
     }
 
     pub fn build_summary(&self) -> String {
-        self.list_model_invocable_skills()
-            .into_iter()
-            .map(|skill| skill.to_summary_line())
-            .collect::<Vec<_>>()
-            .join("\n")
+        build_model_invocable_summary(&self.registry)
     }
 
     fn execute_inline(&self, spec: SkillSpec) -> SkillResult {
@@ -167,53 +157,17 @@ impl SkillRuntime {
     }
 
     async fn execute_fork(&self, spec: SkillSpec) -> SkillResult {
-        let provider = CloudProvider::from_env();
-        let model_config = provider.default_models();
-        let subagent_name = spec.agent.as_deref().unwrap_or("general-purpose");
-        let subagent = self.subagent_registry.get(subagent_name);
-        let model = spec
-            .model
-            .clone()
-            .or_else(|| subagent.map(|agent| agent.resolve_model(&model_config).to_string()))
-            .unwrap_or_else(|| model_config.primary.clone());
-
-        let mut builder = crate::agent::AgentBuilder::new();
-        let auth_builder = match builder.auth(Auth::FromEnv).await {
-            Ok(b) => b,
-            Err(error) => return SkillResult::error(error.to_string()),
-        };
-
-        builder = auth_builder.model(&model).max_iterations(50);
-        if !spec.allowed_tools.is_empty() {
-            builder = builder.tools(ToolAccess::only(
-                spec.allowed_tools.iter().map(String::as_str),
-            ));
-        } else if let Some(agent) = subagent
-            && !agent.allowed_tools.is_empty()
-        {
-            builder = builder.tools(ToolAccess::only(
-                agent.allowed_tools.iter().map(String::as_str),
-            ));
+        if let Some(ref runtime) = self.delegation_runtime {
+            return match runtime.execute_skill_fork(&spec).await {
+                Ok(result) => result,
+                Err(error) => SkillResult::error(error.to_string())
+                    .execution_kind(SkillExecutionKind::Fork)
+                    .agent(spec.agent.clone()),
+            };
         }
-        if let Some(base_dir) = spec.base_dir.clone() {
-            builder = builder.working_dir(base_dir);
-        }
-
-        let agent = match builder.build().await {
-            Ok(agent) => agent,
-            Err(error) => return SkillResult::error(error.to_string()),
-        };
-        match agent.execute(&spec.prompt).await {
-            Ok(result) => SkillResult::success(result.text().to_string())
-                .execution_kind(SkillExecutionKind::Fork)
-                .allowed_tools(spec.allowed_tools)
-                .model(Some(model))
-                .base_dir(spec.base_dir)
-                .agent(Some(subagent_name.to_string())),
-            Err(error) => SkillResult::error(error.to_string())
-                .execution_kind(SkillExecutionKind::Fork)
-                .agent(Some(subagent_name.to_string())),
-        }
+        SkillResult::error("Forked skills require a bound delegation runtime")
+            .execution_kind(SkillExecutionKind::Fork)
+            .agent(spec.agent)
     }
 }
 
@@ -263,5 +217,37 @@ mod tests {
         let spec = runtime.load_spec("research", Some("topic")).await.unwrap();
         assert_eq!(spec.execution_kind, SkillExecutionKind::Fork);
         assert_eq!(spec.agent.as_deref(), Some("Explore"));
+    }
+
+    #[tokio::test]
+    async fn manual_only_skill_requires_explicit_execution() {
+        let mut registry = IndexRegistry::new();
+        let mut skill =
+            SkillIndex::new("internal", "Internal skill").source(ContentSource::in_memory("X"));
+        skill.disable_model_invocation = true;
+        registry.register(skill);
+
+        let runtime = SkillRuntime::new(registry);
+        let result = runtime.execute("internal", None).await;
+        assert!(!result.success);
+
+        let result = runtime.execute_explicit("internal", None).await;
+        assert!(result.success);
+    }
+
+    #[test]
+    fn parse_explicit_command_extracts_name_and_args() {
+        let mut registry = IndexRegistry::new();
+        registry.register(
+            SkillIndex::new("commit", "Commit helper")
+                .source(ContentSource::in_memory("Commit: $ARGUMENTS")),
+        );
+
+        let runtime = SkillRuntime::new(registry);
+        let parsed = runtime.parse_explicit_command("/commit -m test");
+        assert_eq!(
+            parsed,
+            Some(("commit".to_string(), Some("-m test".to_string())))
+        );
     }
 }

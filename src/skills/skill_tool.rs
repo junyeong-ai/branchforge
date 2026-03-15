@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use schemars::JsonSchema;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
 
 use super::{SkillIndex, SkillRuntime};
@@ -54,6 +54,20 @@ impl SkillTool {
     pub async fn description_with_skills(&self) -> String {
         let runtime = self.runtime.read().await;
         Self::build_description(runtime.list_model_invocable_skills())
+    }
+
+    pub async fn resolve_explicit_command(&self, input: &str) -> Option<SkillInput> {
+        let runtime = self.runtime.read().await;
+        let (skill, args) = runtime.parse_explicit_command(input)?;
+        Some(SkillInput { skill, args })
+    }
+
+    pub async fn execute_explicit_input(&self, input: SkillInput) -> ToolResult {
+        let runtime = self.runtime.read().await;
+        let result = runtime
+            .execute_explicit(&input.skill, input.args.as_deref())
+            .await;
+        Self::tool_result_from_skill_result(result)
     }
 
     /// Build the full dynamic description from a registry snapshot.
@@ -121,6 +135,18 @@ Important:
         )
     }
 
+    fn tool_result_from_skill_result(result: super::SkillResult) -> ToolResult {
+        if result.success {
+            ToolResult::success(result.output)
+        } else {
+            ToolResult::error(
+                result
+                    .error
+                    .unwrap_or_else(|| "Skill execution failed".to_string()),
+            )
+        }
+    }
+
     /// Register a skill in the executor's registry.
     pub async fn register_skill(&self, skill: SkillIndex) {
         let mut runtime = self.runtime.write().await;
@@ -140,7 +166,7 @@ impl Default for SkillTool {
     }
 }
 
-#[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
 #[schemars(deny_unknown_fields)]
 pub struct SkillInput {
     /// The skill name. E.g., "commit", "review-pr", or "pdf"
@@ -169,17 +195,16 @@ impl SchemaTool for SkillTool {
 
     async fn handle(&self, input: SkillInput, _context: &ExecutionContext) -> ToolResult {
         let runtime = self.runtime.read().await;
-        let result = runtime.execute(&input.skill, input.args.as_deref()).await;
-
-        if result.success {
-            ToolResult::success(result.output)
-        } else {
-            ToolResult::error(
-                result
-                    .error
-                    .unwrap_or_else(|| "Skill execution failed".to_string()),
-            )
+        if let Some(skill) = runtime.registry().get(&input.skill)
+            && skill.disable_model_invocation
+        {
+            return ToolResult::error(format!(
+                "Skill '{}' is manual-only and must be invoked explicitly via /{}",
+                skill.name, skill.name
+            ));
         }
+        let result = runtime.execute(&input.skill, input.args.as_deref()).await;
+        Self::tool_result_from_skill_result(result)
     }
 }
 
@@ -240,6 +265,23 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_manual_only_skill_is_rejected_by_tool_handle() {
+        let mut registry = IndexRegistry::new();
+        let mut skill = test_skill("internal", "Internal skill", "Do internal work");
+        skill.disable_model_invocation = true;
+        registry.register(skill);
+
+        let tool = SkillTool::registry(registry);
+        let context = test_context();
+
+        let result = tool
+            .execute(serde_json::json!({ "skill": "internal" }), &context)
+            .await;
+
+        assert!(result.is_error());
+    }
+
+    #[tokio::test]
     async fn test_skill_tool_with_defaults() {
         let tool = SkillTool::defaults();
         let runtime = tool.runtime.read().await;
@@ -289,6 +331,19 @@ mod tests {
 
         let runtime = tool.runtime.read().await;
         assert!(runtime.has_skill("dynamic"));
+    }
+
+    #[tokio::test]
+    async fn test_resolve_explicit_command() {
+        let mut registry = IndexRegistry::new();
+        registry.register(test_skill("commit", "Commit helper", "Commit: $ARGUMENTS"));
+        let tool = SkillTool::registry(registry);
+
+        let input = tool.resolve_explicit_command("/commit -m test").await;
+        assert!(input.is_some());
+        let input = input.unwrap();
+        assert_eq!(input.skill, "commit");
+        assert_eq!(input.args.as_deref(), Some("-m test"));
     }
 
     #[test]

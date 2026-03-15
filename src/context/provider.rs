@@ -28,7 +28,7 @@ pub trait MemoryProvider: Send + Sync {
 ///
 /// # Example
 /// ```
-/// use claude_agent::context::MemoryContextProvider;
+/// use branchforge::context::MemoryContextProvider;
 ///
 /// let provider = MemoryContextProvider::new()
 ///     .claude_md("# Project Rules\nUse async/await for all I/O.");
@@ -82,7 +82,7 @@ impl MemoryProvider for MemoryContextProvider {
 ///
 /// # Example
 /// ```no_run
-/// use claude_agent::context::FileMemoryProvider;
+/// use branchforge::context::FileMemoryProvider;
 ///
 /// let provider = FileMemoryProvider::new("/path/to/project");
 /// ```

@@ -8,13 +8,13 @@
 //! # Example
 //!
 //! ```rust,no_run
-//! use claude_agent::{Agent, ToolAccess, Auth};
+//! use branchforge::{Agent, Auth, ToolSurface};
 //!
-//! # async fn example() -> claude_agent::Result<()> {
+//! # async fn example() -> branchforge::Result<()> {
 //! let agent = Agent::builder()
 //!     .auth(Auth::from_env()).await?
 //!     .model("claude-sonnet-4-5")
-//!     .tools(ToolAccess::all())
+//!     .tools(ToolSurface::core())
 //!     .working_dir("./project")
 //!     .max_iterations(50)
 //!     .build()
@@ -30,16 +30,16 @@ use std::time::Duration;
 use rust_decimal::Decimal;
 
 use crate::auth::{Credential, OAuthConfig};
+use crate::authorization::{AuthorizationMode, AuthorizationPolicy, AuthorizationRule};
 use crate::budget::TenantBudgetManager;
 use crate::client::{CloudProvider, FallbackConfig, ModelConfig, ProviderConfig};
 use crate::common::IndexRegistry;
 use crate::context::{LeveledMemoryProvider, RuleIndex};
 use crate::hooks::{Hook, HookManager};
 use crate::output_style::OutputStyle;
-use crate::permissions::{PermissionMode, PermissionPolicy, PermissionRule};
 use crate::skills::SkillIndex;
 use crate::subagents::{SubagentIndex, builtin_subagents};
-use crate::tools::{Tool, ToolAccess};
+use crate::tools::{Tool, ToolSurface};
 
 use crate::agent::config::{AgentConfig, CacheConfig, SystemPromptMode};
 
@@ -77,6 +77,7 @@ pub struct AgentBuilder {
     pub(super) tool_search_config: Option<crate::tools::ToolSearchConfig>,
     pub(super) tool_search_manager: Option<std::sync::Arc<crate::tools::ToolSearchManager>>,
     pub(super) session_manager: Option<crate::session::SessionManager>,
+    pub(super) authorization_policy_explicit: bool,
 
     // Resource level flags - loaded in fixed order during build()
     // Order: Enterprise → User → Project → Local (later overrides earlier)
@@ -99,6 +100,22 @@ pub struct AgentBuilder {
 }
 
 impl AgentBuilder {
+    pub(super) fn authorization_policy_is_custom(policy: &AuthorizationPolicy) -> bool {
+        !matches!(policy.mode, AuthorizationMode::Rules)
+            || !policy.rules.is_empty()
+            || !policy.tool_limits.is_empty()
+    }
+
+    fn parse_session_id(
+        value: impl AsRef<str>,
+        operation: &str,
+    ) -> crate::Result<crate::session::SessionId> {
+        let value = value.as_ref();
+        crate::session::SessionId::parse(value).ok_or_else(|| {
+            crate::Error::Session(format!("Invalid session ID for {operation}: {value}"))
+        })
+    }
+
     /// Creates a new builder with default configuration.
     pub fn new() -> Self {
         Self::default()
@@ -110,7 +127,18 @@ impl AgentBuilder {
 
     /// Sets the complete agent configuration, replacing all defaults.
     pub fn agent_config(mut self, config: AgentConfig) -> Self {
+        self.authorization_policy_explicit =
+            Self::authorization_policy_is_custom(&config.security.authorization_policy);
         self.config = config;
+        self
+    }
+
+    /// Disables automatic resource loading for delegated runtimes.
+    pub fn skip_resource_loading(mut self) -> Self {
+        self.load_enterprise = false;
+        self.load_user = false;
+        self.load_project = false;
+        self.load_local = false;
         self
     }
 
@@ -135,8 +163,8 @@ impl AgentBuilder {
     ///
     /// # Example
     /// ```rust,no_run
-    /// # use claude_agent::{Agent, Auth};
-    /// # async fn example() -> claude_agent::Result<()> {
+    /// # use branchforge::{Agent, Auth};
+    /// # async fn example() -> branchforge::Result<()> {
     /// let agent = Agent::builder()
     ///     .auth(Auth::from_env()).await?
     ///     .build().await?;
@@ -195,7 +223,7 @@ impl AgentBuilder {
 
     /// Returns whether server-side tools should be enabled.
     ///
-    /// Requires both auth support and ToolAccess allowing "WebSearch" or "WebFetch".
+    /// Requires both auth support and ToolSurface allowing "WebSearch" or "WebFetch".
     pub fn supports_server_tools(&self) -> bool {
         let auth_supports = self
             .auth_type
@@ -203,8 +231,8 @@ impl AgentBuilder {
             .map(|a| a.supports_server_tools())
             .unwrap_or(true);
 
-        let access_allows = self.config.security.tool_access.is_allowed("WebSearch")
-            || self.config.security.tool_access.is_allowed("WebFetch");
+        let access_allows = self.config.security.tool_surface.is_allowed("WebSearch")
+            || self.config.security.tool_surface.is_allowed("WebFetch");
 
         auth_supports && access_allows
     }
@@ -277,12 +305,13 @@ impl AgentBuilder {
     /// Sets tool access policy.
     ///
     /// # Options
-    /// - `ToolAccess::all()` - Enable all built-in tools
-    /// - `ToolAccess::none()` - Disable all tools
-    /// - `ToolAccess::only(["Read", "Write"])` - Enable specific tools
-    /// - `ToolAccess::except(["Bash"])` - Enable all except specific tools
-    pub fn tools(mut self, access: ToolAccess) -> Self {
-        self.config.security.tool_access = access;
+    /// - `ToolSurface::core()` - Enable the minimal core tool surface
+    /// - `ToolSurface::all()` - Enable all built-in and workflow tools
+    /// - `ToolSurface::none()` - Disable all tools
+    /// - `ToolSurface::only(["Read", "Write"])` - Enable specific tools
+    /// - `ToolSurface::except(["Bash"])` - Enable all except specific tools
+    pub fn tools(mut self, access: ToolSurface) -> Self {
+        self.config.security.tool_surface = access;
         self
     }
 
@@ -406,38 +435,42 @@ impl AgentBuilder {
     }
 
     // =========================================================================
-    // Permissions
+    // Authorization
     // =========================================================================
 
     /// Sets the complete permission policy.
-    pub fn permission_policy(mut self, policy: PermissionPolicy) -> Self {
-        self.config.security.permission_policy = policy;
+    pub fn authorization_policy(mut self, policy: AuthorizationPolicy) -> Self {
+        self.authorization_policy_explicit = true;
+        self.config.security.authorization_policy = policy;
         self
     }
 
-    /// Sets the permission mode (permissive, default, or strict).
-    pub fn permission_mode(mut self, mode: PermissionMode) -> Self {
-        self.config.security.permission_policy.mode = mode;
+    /// Sets the authorization mode (permissive, default, or strict).
+    pub fn authorization_mode(mut self, mode: AuthorizationMode) -> Self {
+        self.authorization_policy_explicit = true;
+        self.config.security.authorization_policy.mode = mode;
         self
     }
 
     /// Adds a rule to allow a tool or pattern (e.g., `"Read"` or `"Bash(git:*)"`)
     pub fn allow_tool(mut self, pattern: impl Into<String>) -> Self {
+        self.authorization_policy_explicit = true;
         self.config
             .security
-            .permission_policy
+            .authorization_policy
             .rules
-            .push(PermissionRule::allow_pattern(pattern));
+            .push(AuthorizationRule::allow_pattern(pattern));
         self
     }
 
     /// Adds a rule to deny a tool or pattern (e.g., `"Write"` or `"Bash(rm:*)"`)
     pub fn deny_tool(mut self, pattern: impl Into<String>) -> Self {
+        self.authorization_policy_explicit = true;
         self.config
             .security
-            .permission_policy
+            .authorization_policy
             .rules
-            .push(PermissionRule::deny_pattern(pattern));
+            .push(AuthorizationRule::deny_pattern(pattern));
         self
     }
 
@@ -547,7 +580,7 @@ impl AgentBuilder {
     // Session
     // =========================================================================
 
-    /// Sets a custom session manager for persistence.
+    /// Sets a custom session manager for live session and delegated task persistence.
     pub fn session_manager(mut self, manager: crate::session::SessionManager) -> Self {
         self.session_manager = Some(manager);
         self
@@ -557,7 +590,7 @@ impl AgentBuilder {
     pub async fn fork_session(mut self, session_id: impl Into<String>) -> crate::Result<Self> {
         let manager = self.session_manager.take().unwrap_or_default();
         let session_id_str: String = session_id.into();
-        let original_id = crate::session::SessionId::from(session_id_str);
+        let original_id = Self::parse_session_id(&session_id_str, "fork_session")?;
         let forked = manager
             .fork(&original_id)
             .await
@@ -565,6 +598,7 @@ impl AgentBuilder {
 
         self.initial_messages = Some(forked.to_api_messages());
         self.resume_session_id = Some(forked.id.to_string());
+        self.resumed_session = Some(forked);
         self.session_manager = Some(manager);
         Ok(self)
     }
@@ -575,7 +609,8 @@ impl AgentBuilder {
         from_node: crate::graph::NodeId,
     ) -> crate::Result<Self> {
         let manager = self.session_manager.take().unwrap_or_default();
-        let original_id = crate::session::SessionId::from(session_id.into());
+        let session_id = session_id.into();
+        let original_id = Self::parse_session_id(&session_id, "fork_session_from_node")?;
         let forked = manager
             .fork_from_node(&original_id, from_node)
             .await
@@ -583,6 +618,7 @@ impl AgentBuilder {
 
         self.initial_messages = Some(forked.to_api_messages());
         self.resume_session_id = Some(forked.id.to_string());
+        self.resumed_session = Some(forked);
         self.session_manager = Some(manager);
         Ok(self)
     }
@@ -590,7 +626,7 @@ impl AgentBuilder {
     /// Resumes an existing session by ID.
     pub async fn resume_session(mut self, session_id: impl Into<String>) -> crate::Result<Self> {
         let session_id_str: String = session_id.into();
-        let id = crate::session::SessionId::from(session_id_str);
+        let id = Self::parse_session_id(&session_id_str, "resume_session")?;
         let manager = self.session_manager.take().unwrap_or_default();
         let session = manager.get(&id).await?;
 
@@ -615,10 +651,11 @@ impl AgentBuilder {
         session_id: impl Into<String>,
         from_node: crate::graph::NodeId,
     ) -> crate::Result<Self> {
-        let id = crate::session::SessionId::from(session_id.into());
+        let session_id = session_id.into();
+        let id = Self::parse_session_id(&session_id, "resume_session_from_node")?;
         let manager = self.session_manager.take().unwrap_or_default();
         let session = manager.get(&id).await?;
-        let replay = session.replay_input(Some(from_node));
+        let replay = session.replay_input(Some(from_node))?;
 
         self.initial_messages = Some(replay.messages);
         self.resume_session_id = Some(id.to_string());
@@ -831,6 +868,18 @@ impl AgentBuilder {
         self.hooks.register(hook);
         self
     }
+
+    /// Replaces the complete hook manager.
+    pub fn hooks_manager(mut self, hooks: HookManager) -> Self {
+        self.hooks = hooks;
+        self
+    }
+
+    /// Replaces sandbox settings directly.
+    pub fn sandbox_settings(mut self, settings: crate::config::SandboxSettings) -> Self {
+        self.sandbox_settings = Some(settings);
+        self
+    }
 }
 
 #[cfg(test)]
@@ -841,13 +890,13 @@ mod tests {
     use crate::types::ContentBlock;
 
     #[test]
-    fn test_tool_access() {
-        assert!(ToolAccess::all().is_allowed("Read"));
-        assert!(!ToolAccess::none().is_allowed("Read"));
-        assert!(ToolAccess::only(["Read", "Write"]).is_allowed("Read"));
-        assert!(!ToolAccess::only(["Read", "Write"]).is_allowed("Bash"));
-        assert!(!ToolAccess::except(["Bash"]).is_allowed("Bash"));
-        assert!(ToolAccess::except(["Bash"]).is_allowed("Read"));
+    fn test_tool_surface() {
+        assert!(ToolSurface::all().is_allowed("Read"));
+        assert!(!ToolSurface::none().is_allowed("Read"));
+        assert!(ToolSurface::only(["Read", "Write"]).is_allowed("Read"));
+        assert!(!ToolSurface::only(["Read", "Write"]).is_allowed("Bash"));
+        assert!(!ToolSurface::except(["Bash"]).is_allowed("Bash"));
+        assert!(ToolSurface::except(["Bash"]).is_allowed("Read"));
     }
 
     #[test]
@@ -911,6 +960,27 @@ mod tests {
                 .initial_messages
                 .as_ref()
                 .is_some_and(|messages| messages.len() == 1)
+        );
+        let resumed_id = forked.resumed_session.as_ref().unwrap().id.to_string();
+        assert_eq!(
+            forked.resume_session_id.as_deref(),
+            Some(resumed_id.as_str())
+        );
+    }
+
+    #[tokio::test]
+    async fn test_resume_session_rejects_invalid_uuid() {
+        let result = AgentBuilder::new()
+            .session_manager(SessionManager::in_memory())
+            .resume_session("not-a-uuid")
+            .await;
+
+        assert!(result.is_err());
+        let error = result.err().unwrap();
+        assert!(
+            error
+                .to_string()
+                .contains("Invalid session ID for resume_session")
         );
     }
 }

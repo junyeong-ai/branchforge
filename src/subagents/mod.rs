@@ -21,8 +21,8 @@
 //! # Example
 //!
 //! ```rust,ignore
-//! use claude_agent::common::{ContentSource, IndexRegistry};
-//! use claude_agent::subagents::SubagentIndex;
+//! use branchforge::common::{ContentSource, IndexRegistry};
+//! use branchforge::subagents::SubagentIndex;
 //!
 //! // Create subagent with metadata only (prompt loaded lazily)
 //! let subagent = SubagentIndex::new("Explore", "Fast codebase exploration")

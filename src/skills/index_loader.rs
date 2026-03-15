@@ -26,8 +26,6 @@ pub struct SkillFrontmatter {
     pub argument_hint: Option<String>,
     #[serde(default, alias = "disable-model-invocation")]
     pub disable_model_invocation: bool,
-    #[serde(default = "default_true", alias = "user-invocable")]
-    pub user_invocable: bool,
     #[serde(default)]
     pub context: Option<String>,
     #[serde(default)]
@@ -35,8 +33,6 @@ pub struct SkillFrontmatter {
     #[serde(default)]
     pub hooks: Option<HashMap<String, Vec<HookRule>>>,
 }
-
-use crate::common::serde_defaults::default_true;
 
 /// Loader for creating SkillIndex entries from files.
 ///
@@ -80,7 +76,6 @@ impl SkillIndexLoader {
         }
 
         index.disable_model_invocation = fm.disable_model_invocation;
-        index.user_invocable = fm.user_invocable;
         index.context = fm.context;
         index.agent = fm.agent;
         index.hooks = fm.hooks;
@@ -310,25 +305,6 @@ Content"#;
             .unwrap();
 
         assert!(index.disable_model_invocation);
-        assert!(index.user_invocable);
-    }
-
-    #[test]
-    fn test_parse_user_invocable_false() {
-        let content = r#"---
-name: internal
-description: Internal skill
-user-invocable: false
----
-Content"#;
-
-        let loader = SkillIndexLoader::new();
-        let index = loader
-            .parse_index(content, Path::new("/skills/internal.skill.md"))
-            .unwrap();
-
-        assert!(!index.user_invocable);
-        assert!(!index.disable_model_invocation);
     }
 
     #[test]
@@ -364,7 +340,6 @@ Content"#;
             .unwrap();
 
         assert!(!index.disable_model_invocation);
-        assert!(index.user_invocable);
         assert!(index.context.is_none());
         assert!(index.agent.is_none());
     }

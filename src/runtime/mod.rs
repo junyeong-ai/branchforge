@@ -37,7 +37,9 @@ impl RuntimeEventRecorder {
         graph: &mut SessionGraph,
         kind: NodeKind,
         payload: serde_json::Value,
-    ) -> NodeId {
-        graph.append_node(self.branch_id, kind, payload)
+    ) -> crate::Result<NodeId> {
+        graph
+            .append_node(self.branch_id, kind, payload)
+            .map_err(Into::into)
     }
 }

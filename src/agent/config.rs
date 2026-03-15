@@ -8,10 +8,10 @@ use std::time::Duration;
 
 use rust_decimal::Decimal;
 
+use crate::authorization::AuthorizationPolicy;
 use crate::client::messages::DEFAULT_MAX_TOKENS;
 use crate::output_style::OutputStyle;
-use crate::permissions::PermissionPolicy;
-use crate::tools::ToolAccess;
+use crate::tools::ToolSurface;
 
 /// Model-related configuration.
 #[derive(Debug, Clone)]
@@ -124,9 +124,9 @@ impl ExecutionConfig {
 #[derive(Debug, Clone, Default)]
 pub struct SecurityConfig {
     /// Tool permission policy
-    pub permission_policy: PermissionPolicy,
+    pub authorization_policy: AuthorizationPolicy,
     /// Tool access control
-    pub tool_access: ToolAccess,
+    pub tool_surface: ToolSurface,
     /// Environment variables for tool execution
     pub env: HashMap<String, String>,
 }
@@ -134,27 +134,27 @@ pub struct SecurityConfig {
 impl SecurityConfig {
     pub fn permissive() -> Self {
         Self {
-            permission_policy: PermissionPolicy::permissive(),
-            tool_access: ToolAccess::All,
+            authorization_policy: AuthorizationPolicy::permissive(),
+            tool_surface: ToolSurface::All,
             ..Default::default()
         }
     }
 
     pub fn read_only() -> Self {
         Self {
-            permission_policy: PermissionPolicy::read_only(),
-            tool_access: ToolAccess::only(["Read", "Glob", "Grep", "Task", "TaskOutput"]),
+            authorization_policy: AuthorizationPolicy::read_only(),
+            tool_surface: ToolSurface::only(["Read", "Glob", "Grep", "WebSearch", "WebFetch"]),
             ..Default::default()
         }
     }
 
-    pub fn permission_policy(mut self, policy: PermissionPolicy) -> Self {
-        self.permission_policy = policy;
+    pub fn authorization_policy(mut self, policy: AuthorizationPolicy) -> Self {
+        self.authorization_policy = policy;
         self
     }
 
-    pub fn tool_access(mut self, access: ToolAccess) -> Self {
-        self.tool_access = access;
+    pub fn tool_surface(mut self, access: ToolSurface) -> Self {
+        self.tool_surface = access;
         self
     }
 
@@ -446,7 +446,7 @@ impl CacheConfig {
 /// Server-side tools configuration.
 ///
 /// Anthropic's built-in server-side tools (Brave Search, web fetch).
-/// These are automatically enabled when "WebSearch" or "WebFetch" are in ToolAccess.
+/// These are automatically enabled when "WebSearch" or "WebFetch" are in ToolSurface.
 #[derive(Debug, Clone, Default)]
 pub struct ServerToolsConfig {
     pub web_search: Option<crate::types::WebSearchTool>,

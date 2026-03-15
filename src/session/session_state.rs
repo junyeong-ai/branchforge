@@ -168,7 +168,7 @@ impl ToolState {
         self.0.session.read().await.todos_in_progress_count()
     }
 
-    pub async fn record_tool_execution(&self, mut exec: ToolExecution) {
+    pub async fn record_tool_execution(&self, mut exec: ToolExecution) -> crate::Result<()> {
         let plan_id = {
             let mut session = self.0.session.write().await;
             let branch_id = session.graph.primary_branch;
@@ -191,17 +191,25 @@ impl ToolState {
                     "duration_ms": exec.duration_ms,
                     "message_id": exec.message_id,
                 }),
-            );
+            )?;
             plan_id
         };
         exec.plan_id = plan_id;
         self.0.executions.append(exec).await;
+        Ok(())
     }
 
-    pub async fn append_graph_node(&self, kind: NodeKind, payload: serde_json::Value) -> NodeId {
+    pub async fn append_graph_node(
+        &self,
+        kind: NodeKind,
+        payload: serde_json::Value,
+    ) -> crate::Result<NodeId> {
         let mut session = self.0.session.write().await;
         let branch_id = session.graph.primary_branch;
-        session.graph.append_node(branch_id, kind, payload)
+        session
+            .graph
+            .append_node(branch_id, kind, payload)
+            .map_err(Into::into)
     }
 
     pub async fn with_tool_executions<F, R>(&self, f: F) -> R
@@ -249,29 +257,6 @@ impl ToolState {
             session.is_in_plan_mode(),
             session.todos_in_progress_count(),
         )
-    }
-
-    pub async fn record_execution_with_todos(
-        &self,
-        mut exec: ToolExecution,
-        todos: Option<Vec<TodoItem>>,
-    ) {
-        let plan_id = {
-            let mut session = self.0.session.write().await;
-            let plan_id = if let Some(ref plan) = session.current_plan
-                && plan.status == PlanStatus::Executing
-            {
-                Some(plan.id)
-            } else {
-                None
-            };
-            if let Some(todos) = todos {
-                session.set_todos(todos);
-            }
-            plan_id
-        };
-        exec.plan_id = plan_id;
-        self.0.executions.append(exec).await;
     }
 
     pub async fn enqueue(&self, content: impl Into<String>) -> Result<Uuid, QueueError> {
@@ -423,7 +408,7 @@ mod tests {
             .output("file1\nfile2", false)
             .duration(100);
 
-        state.record_tool_execution(exec).await;
+        state.record_tool_execution(exec).await.unwrap();
 
         let count = state.with_tool_executions(|e| e.len()).await;
         assert_eq!(count, 1);
@@ -488,7 +473,7 @@ mod tests {
                 tokio::spawn(async move {
                     let exec =
                         ToolExecution::new(sid, format!("Tool{}", i), serde_json::json!({"id": i}));
-                    state.record_tool_execution(exec).await;
+                    state.record_tool_execution(exec).await.unwrap();
                 })
             })
             .collect();
@@ -508,7 +493,7 @@ mod tests {
 
         for i in 0..MAX_EXECUTION_LOG_SIZE + 100 {
             let exec = ToolExecution::new(session_id, format!("Tool{}", i), serde_json::json!({}));
-            state.record_tool_execution(exec).await;
+            state.record_tool_execution(exec).await.unwrap();
         }
 
         let count = state.with_tool_executions(|e| e.len()).await;

@@ -4,8 +4,8 @@ use thiserror::Error;
 
 #[derive(Debug, Clone, Error)]
 pub enum ToolError {
-    #[error("permission denied: {tool} requires {permission}")]
-    PermissionDenied { tool: String, permission: String },
+    #[error("authorization denied: {tool} requires {permission}")]
+    AuthorizationDenied { tool: String, permission: String },
 
     #[error("timeout after {timeout_ms}ms")]
     Timeout { timeout_ms: u64 },
@@ -33,8 +33,8 @@ pub enum ToolError {
 }
 
 impl ToolError {
-    pub fn permission_denied(tool: impl Into<String>, permission: impl Into<String>) -> Self {
-        Self::PermissionDenied {
+    pub fn authorization_denied(tool: impl Into<String>, permission: impl Into<String>) -> Self {
+        Self::AuthorizationDenied {
             tool: tool.into(),
             permission: permission.into(),
         }

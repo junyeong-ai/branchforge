@@ -12,13 +12,36 @@ pub struct SessionManager {
     persistence: Arc<dyn Persistence>,
 }
 
+#[derive(Clone)]
+pub struct ScopedSessionManager {
+    manager: SessionManager,
+    scope: SessionAccessScope,
+}
+
 impl SessionManager {
+    pub(crate) fn parse_session_id(id: &str) -> SessionResult<SessionId> {
+        SessionId::parse(id).ok_or_else(|| SessionError::Storage {
+            message: format!("Session IDs must be valid UUIDs, got '{id}'"),
+        })
+    }
+
     pub fn new(persistence: Arc<dyn Persistence>) -> Self {
         Self { persistence }
     }
 
     pub fn in_memory() -> Self {
         Self::new(Arc::new(MemoryPersistence::new()))
+    }
+
+    pub(crate) fn persistence(&self) -> Arc<dyn Persistence> {
+        self.persistence.clone()
+    }
+
+    pub fn scoped(&self, scope: SessionAccessScope) -> ScopedSessionManager {
+        ScopedSessionManager {
+            manager: self.clone(),
+            scope,
+        }
     }
 
     pub async fn create(&self, config: SessionConfig) -> SessionResult<Session> {
@@ -77,11 +100,133 @@ impl SessionManager {
     }
 
     pub async fn get_by_str(&self, id: &str) -> SessionResult<Session> {
-        self.get(&SessionId::from(id)).await
+        let session_id = Self::parse_session_id(id)?;
+        self.get(&session_id).await
     }
 
     pub async fn update(&self, session: &Session) -> SessionResult<()> {
         self.persistence.save(session).await
+    }
+
+    pub async fn persist_snapshot(
+        &self,
+        session: &Session,
+        scope: Option<&SessionAccessScope>,
+    ) -> SessionResult<()> {
+        match scope {
+            Some(scope) => self.persist_scoped_snapshot(session, scope).await,
+            None => self.persistence.save(session).await,
+        }
+    }
+
+    async fn persist_scoped_snapshot(
+        &self,
+        session: &Session,
+        scope: &SessionAccessScope,
+    ) -> SessionResult<()> {
+        match self.persistence.load(&session.id).await? {
+            Some(stored) => {
+                if !scope.allows(stored.tenant_id.as_deref(), stored.principal_id.as_deref()) {
+                    return Err(SessionError::Storage {
+                        message: format!(
+                            "Session {} is outside the requested tenant/principal scope",
+                            session.id
+                        ),
+                    });
+                }
+
+                let mut candidate = session.clone();
+                match (&candidate.tenant_id, &stored.tenant_id) {
+                    (Some(current), Some(stored)) if current != stored => {
+                        return Err(SessionError::Storage {
+                            message: format!(
+                                "Scoped persistence cannot change tenant for session {}",
+                                session.id
+                            ),
+                        });
+                    }
+                    (None, Some(stored)) => candidate.tenant_id = Some(stored.clone()),
+                    _ => {}
+                }
+                match (&candidate.principal_id, &stored.principal_id) {
+                    (Some(current), Some(stored)) if current != stored => {
+                        return Err(SessionError::Storage {
+                            message: format!(
+                                "Scoped persistence cannot change principal for session {}",
+                                session.id
+                            ),
+                        });
+                    }
+                    (None, Some(stored)) => candidate.principal_id = Some(stored.clone()),
+                    _ => {}
+                }
+
+                if !scope.allows(
+                    candidate.tenant_id.as_deref(),
+                    candidate.principal_id.as_deref(),
+                ) {
+                    return Err(SessionError::Storage {
+                        message: format!(
+                            "Scoped persistence produced an out-of-scope identity for session {}",
+                            session.id
+                        ),
+                    });
+                }
+
+                self.persistence.save(&candidate).await
+            }
+            None => {
+                let mut candidate = session.clone();
+                if let Some(expected) = scope.tenant_id.as_ref() {
+                    if candidate
+                        .tenant_id
+                        .as_deref()
+                        .is_some_and(|current| current != expected)
+                    {
+                        return Err(SessionError::Storage {
+                            message: format!(
+                                "Scoped persistence cannot create session {} with tenant {} outside scope {}",
+                                session.id,
+                                candidate.tenant_id.as_deref().unwrap_or_default(),
+                                expected
+                            ),
+                        });
+                    }
+                    candidate.tenant_id = Some(expected.clone());
+                }
+                if let Some(expected) = scope.principal_id.as_ref() {
+                    if candidate
+                        .principal_id
+                        .as_deref()
+                        .is_some_and(|current| current != expected)
+                    {
+                        return Err(SessionError::Storage {
+                            message: format!(
+                                "Scoped persistence cannot create session {} with principal {} outside scope {}",
+                                session.id,
+                                candidate.principal_id.as_deref().unwrap_or_default(),
+                                expected
+                            ),
+                        });
+                    }
+                    candidate.principal_id = Some(expected.clone());
+                }
+
+                if !scope.allows(
+                    candidate.tenant_id.as_deref(),
+                    candidate.principal_id.as_deref(),
+                ) {
+                    return Err(SessionError::Storage {
+                        message: format!(
+                            "Scoped persistence produced an out-of-scope identity for new session {}",
+                            session.id
+                        ),
+                    });
+                }
+
+                self.persistence.save(&candidate).await
+            }
+        }
     }
 
     pub async fn add_message(
@@ -111,14 +256,14 @@ impl SessionManager {
         forked.parent_id = Some(original.id);
         forked.tenant_id = original.tenant_id.clone();
         forked.principal_id = original.principal_id.clone();
-        forked.summary = original.summary.clone();
 
         // Copy messages up to current leaf
         for msg in original.current_branch_messages() {
             let mut cloned = msg;
             cloned.is_sidechain = true;
-            forked.add_message(cloned);
+            forked.add_message(cloned)?;
         }
+        forked.refresh_summary_cache();
 
         self.persistence.save(&forked).await?;
         Ok(forked)
@@ -130,13 +275,12 @@ impl SessionManager {
         from_node: crate::graph::NodeId,
     ) -> SessionResult<Session> {
         let original = self.get(id).await?;
-        let replay = original.replay_input(Some(from_node));
+        let replay = original.replay_input(Some(from_node))?;
 
         let mut forked = Session::new(original.config.clone());
         forked.parent_id = Some(original.id);
         forked.tenant_id = original.tenant_id.clone();
         forked.principal_id = original.principal_id.clone();
-        forked.summary = original.summary.clone();
 
         for message in replay.messages {
             let mut session_message = match message.role {
@@ -144,33 +288,68 @@ impl SessionManager {
                 crate::types::Role::Assistant => SessionMessage::assistant(message.content),
             };
             session_message.is_sidechain = true;
-            forked.add_message(session_message);
+            forked.add_message(session_message)?;
         }
+        forked.refresh_summary_cache();
 
         self.persistence.save(&forked).await?;
         Ok(forked)
     }
 
-    pub async fn export_branch(
+    pub async fn fork_from_node_scoped(
         &self,
         id: &SessionId,
-    ) -> SessionResult<Option<crate::graph::BranchExport>> {
+        scope: &SessionAccessScope,
+        from_node: crate::graph::NodeId,
+    ) -> SessionResult<Session> {
+        let original = self.get_scoped(id, scope).await?;
+        let replay = original.replay_input(Some(from_node))?;
+
+        let mut forked = Session::new(original.config.clone());
+        forked.parent_id = Some(original.id);
+        forked.tenant_id = original.tenant_id.clone();
+        forked.principal_id = original.principal_id.clone();
+
+        for message in replay.messages {
+            let mut session_message = match message.role {
+                crate::types::Role::User => SessionMessage::user(message.content),
+                crate::types::Role::Assistant => SessionMessage::assistant(message.content),
+            };
+            session_message.is_sidechain = true;
+            forked.add_message(session_message)?;
+        }
+        forked.refresh_summary_cache();
+
+        self.persistence.save(&forked).await?;
+        Ok(forked)
+    }
+
+    #[cfg(test)]
+    pub async fn export_branch(&self, id: &SessionId) -> SessionResult<crate::graph::BranchExport> {
         let session = self.get(id).await?;
-        Ok(session.export_current_branch())
+        session.export_current_branch()
     }
 
     pub async fn replay_input(
         &self,
         id: &SessionId,
         from_node: Option<crate::graph::NodeId>,
-    ) -> SessionResult<Option<crate::graph::ReplayInput>> {
+    ) -> SessionResult<crate::graph::ReplayInput> {
         let session = self.get(id).await?;
-        Ok(Some(crate::session::ReplayService::replay_input(
-            &session.graph,
-            from_node,
-        )))
+        crate::session::ReplayService::replay_input(&session.graph, from_node)
     }
 
+    pub async fn replay_input_scoped(
+        &self,
+        id: &SessionId,
+        scope: &SessionAccessScope,
+        from_node: Option<crate::graph::NodeId>,
+    ) -> SessionResult<crate::graph::ReplayInput> {
+        let session = self.get_scoped(id, scope).await?;
+        crate::session::ReplayService::replay_input(&session.graph, from_node)
+    }
+
+    #[cfg(test)]
     pub async fn graph_branches(
         &self,
         id: &SessionId,
@@ -179,6 +358,7 @@ impl SessionManager {
         Ok(crate::graph::GraphExplorer::list_branches(&session.graph))
     }
 
+    #[cfg(test)]
     pub async fn graph_tree(
         &self,
         id: &SessionId,
@@ -192,21 +372,7 @@ impl SessionManager {
         ))
     }
 
-    pub async fn graph_tree_rendered(
-        &self,
-        id: &SessionId,
-        branch_id: Option<crate::graph::BranchId>,
-        mode: crate::graph::TreeRenderMode,
-    ) -> SessionResult<String> {
-        let session = self.get(id).await?;
-        let branch_id = branch_id.unwrap_or(session.graph.primary_branch);
-        Ok(crate::graph::GraphExplorer::render_tree(
-            &session.graph,
-            branch_id,
-            mode,
-        ))
-    }
-
+    #[cfg(test)]
     pub async fn graph_bookmarks(
         &self,
         id: &SessionId,
@@ -219,30 +385,7 @@ impl SessionManager {
         ))
     }
 
-    pub async fn graph_checkpoints(
-        &self,
-        id: &SessionId,
-        branch_id: Option<crate::graph::BranchId>,
-    ) -> SessionResult<Vec<crate::graph::Checkpoint>> {
-        let session = self.get(id).await?;
-        Ok(crate::graph::GraphExplorer::checkpoints(
-            &session.graph,
-            branch_id,
-        ))
-    }
-
-    pub async fn graph_node(
-        &self,
-        id: &SessionId,
-        node_id: crate::graph::NodeId,
-    ) -> SessionResult<Option<crate::graph::NodeSummary>> {
-        let session = self.get(id).await?;
-        Ok(crate::graph::GraphExplorer::node_summary(
-            &session.graph,
-            node_id,
-        ))
-    }
-
+    #[cfg(test)]
     pub async fn graph_search(
         &self,
         id: &SessionId,
@@ -268,6 +411,7 @@ impl SessionManager {
         ))
     }
 
+    #[cfg(test)]
     pub async fn graph_stats(
         &self,
         id: &SessionId,
@@ -285,20 +429,22 @@ impl SessionManager {
         Ok(crate::graph::GraphSearchService::stats(&session.graph))
     }
 
+    #[cfg(test)]
     pub async fn graph_branch_diff(
         &self,
         id: &SessionId,
         left: crate::graph::BranchId,
         right: crate::graph::BranchId,
-    ) -> SessionResult<Option<crate::graph::BranchDiffSummary>> {
+    ) -> SessionResult<crate::graph::BranchDiffSummary> {
         let session = self.get(id).await?;
-        Ok(crate::graph::GraphDiffService::branch_diff(
-            &session.graph,
-            left,
-            right,
-        ))
+        crate::graph::GraphDiffService::branch_diff(&session.graph, left, right).map_err(|error| {
+            SessionError::Storage {
+                message: error.to_string(),
+            }
+        })
     }
 
+    #[cfg(test)]
     pub async fn replay_from_bookmark(
         &self,
         id: &SessionId,
@@ -312,12 +458,13 @@ impl SessionManager {
             branch_id,
         )
         .map_err(|message| SessionError::Storage { message })?;
-        Ok(crate::session::ReplayService::replay_input(
+        crate::session::ReplayService::replay_input(
             &session.graph,
             Some(crate::graph::GraphReferenceResolver::node_id(&reference)),
-        ))
+        )
     }
 
+    #[cfg(test)]
     pub async fn replay_from_checkpoint(
         &self,
         id: &SessionId,
@@ -331,12 +478,13 @@ impl SessionManager {
             branch_id,
         )
         .map_err(|message| SessionError::Storage { message })?;
-        Ok(crate::session::ReplayService::replay_input(
+        crate::session::ReplayService::replay_input(
             &session.graph,
             Some(crate::graph::GraphReferenceResolver::node_id(&reference)),
-        ))
+        )
     }
 
+    #[cfg(test)]
     pub async fn fork_from_bookmark(
         &self,
         id: &SessionId,
@@ -357,6 +505,7 @@ impl SessionManager {
         .await
     }
 
+    #[cfg(test)]
     pub async fn fork_from_checkpoint(
         &self,
         id: &SessionId,
@@ -377,65 +526,30 @@ impl SessionManager {
         .await
     }
 
-    pub async fn export_branch_json(&self, id: &SessionId) -> SessionResult<Option<String>> {
+    #[cfg(test)]
+    pub async fn export_branch_json(&self, id: &SessionId) -> SessionResult<String> {
         let export = self.export_branch(id).await?;
-        export
-            .as_ref()
-            .map(crate::session::SessionExporter::branch_to_json)
-            .transpose()
-            .map_err(|e| SessionError::Storage {
+        crate::session::SessionExporter::branch_to_json(&export).map_err(|e| {
+            SessionError::Storage {
                 message: e.to_string(),
-            })
+            }
+        })
     }
 
-    pub async fn export_branch_html(&self, id: &SessionId) -> SessionResult<Option<String>> {
+    #[cfg(test)]
+    pub async fn export_branch_html(&self, id: &SessionId) -> SessionResult<String> {
         let export = self.export_branch(id).await?;
-        Ok(export
-            .as_ref()
-            .map(crate::session::SessionExporter::branch_to_html))
+        Ok(crate::session::SessionExporter::branch_to_html(&export))
     }
 
+    #[cfg(test)]
     pub async fn audit_bundle(
         &self,
         id: &SessionId,
         policy: &crate::session::ExportPolicy,
-    ) -> SessionResult<Option<crate::session::AuditBundle>> {
+    ) -> SessionResult<crate::session::AuditBundle> {
         let session = self.get(id).await?;
-        Ok(crate::session::SessionExporter::audit_bundle(
-            &session, policy,
-        ))
-    }
-
-    pub async fn archive_bundle(
-        &self,
-        id: &SessionId,
-        export_policy: &crate::session::ExportPolicy,
-        archive_policy: &crate::session::ArchivePolicy,
-    ) -> SessionResult<Option<crate::session::SessionArchiveBundle>> {
-        let session = self.get(id).await?;
-        Ok(crate::session::SessionArchiveService::export_bundle(
-            &session,
-            export_policy,
-            archive_policy,
-        ))
-    }
-
-    pub async fn import_archive_bundle(
-        &self,
-        bundle: &crate::session::SessionArchiveBundle,
-    ) -> SessionResult<Session> {
-        let session = crate::session::SessionArchiveService::import_bundle(bundle);
-        self.persistence.save(&session).await?;
-        Ok(session)
-    }
-
-    pub async fn verify_restored_archive(
-        &self,
-        bundle: &crate::session::SessionArchiveBundle,
-        id: &SessionId,
-    ) -> SessionResult<crate::session::RestoreVerificationReport> {
-        let restored = self.get(id).await?;
-        Ok(crate::session::RestoreVerifier::verify(bundle, &restored))
+        crate::session::SessionExporter::audit_bundle(&session, policy)
     }
 
     pub async fn bookmark_current_head(
@@ -446,20 +560,28 @@ impl SessionManager {
     ) -> SessionResult<Option<uuid::Uuid>> {
         let mut session = self.get(id).await?;
         let bookmark = session.bookmark_current_head(label, note);
-        self.persistence.save(&session).await?;
-        Ok(bookmark)
+        let Some(event) = bookmark.and_then(|bookmark_id| {
+            session
+                .graph
+                .events
+                .last()
+                .cloned()
+                .map(|event| (bookmark_id, event))
+        }) else {
+            return Ok(None);
+        };
+        self.persistence.append_graph_event(id, event.1).await?;
+        Ok(Some(event.0))
     }
 
     pub async fn complete(&self, id: &SessionId) -> SessionResult<()> {
-        let mut session = self.get(id).await?;
-        session.set_state(SessionState::Completed);
-        self.persistence.save(&session).await
+        self.persistence
+            .set_state(id, SessionState::Completed)
+            .await
     }
 
     pub async fn set_error(&self, id: &SessionId) -> SessionResult<()> {
-        let mut session = self.get(id).await?;
-        session.set_state(SessionState::Failed);
-        self.persistence.save(&session).await
+        self.persistence.set_state(id, SessionState::Failed).await
     }
 
     pub async fn cleanup_expired(&self) -> SessionResult<usize> {
@@ -477,6 +599,402 @@ impl SessionManager {
 impl Default for SessionManager {
     fn default() -> Self {
         Self::in_memory()
+    }
+}
+
+impl ScopedSessionManager {
+    pub fn scope(&self) -> &SessionAccessScope {
+        &self.scope
+    }
+
+    pub async fn create(&self, config: SessionConfig) -> SessionResult<Session> {
+        let mut session = Session::new(config);
+        session.tenant_id = self.scope.tenant_id.clone();
+        session.principal_id = self.scope.principal_id.clone();
+        self.manager.persistence.save(&session).await?;
+        Ok(session)
+    }
+
+    pub async fn get(&self, id: &SessionId) -> SessionResult<Session> {
+        self.manager.get_scoped(id, &self.scope).await
+    }
+
+    pub async fn get_by_str(&self, id: &str) -> SessionResult<Session> {
+        let session_id = SessionManager::parse_session_id(id)?;
+        self.get(&session_id).await
+    }
+
+    pub async fn list(&self) -> SessionResult<Vec<SessionId>> {
+        let ids = self
+            .manager
+            .persistence
+            .list(self.scope.tenant_id.as_deref())
+            .await?;
+
+        if self.scope.principal_id.is_none() {
+            return Ok(ids);
+        }
+
+        let mut visible = Vec::with_capacity(ids.len());
+        for id in ids {
+            let session = self.manager.get(&id).await?;
+            if self.scope.allows(
+                session.tenant_id.as_deref(),
+                session.principal_id.as_deref(),
+            ) {
+                visible.push(id);
+            }
+        }
+        Ok(visible)
+    }
+
+    pub async fn update(&self, session: &Session) -> SessionResult<()> {
+        let stored = self.manager.get_scoped(&session.id, &self.scope).await?;
+        if session.tenant_id != stored.tenant_id || session.principal_id != stored.principal_id {
+            return Err(SessionError::Storage {
+                message: format!(
+                    "Scoped update cannot change identity for session {}",
+                    session.id
+                ),
+            });
+        }
+        self.manager.persistence.save(session).await
+    }
+
+    pub async fn persist_snapshot(&self, session: &Session) -> SessionResult<()> {
+        self.manager
+            .persist_snapshot(session, Some(&self.scope))
+            .await
+    }
+
+    pub async fn add_message(
+        &self,
+        session_id: &SessionId,
+        message: SessionMessage,
+    ) -> SessionResult<()> {
+        self.manager.get_scoped(session_id, &self.scope).await?;
+        self.manager
+            .persistence
+            .add_message(session_id, message)
+            .await
+    }
+
+    pub async fn delete(&self, id: &SessionId) -> SessionResult<bool> {
+        self.manager.get_scoped(id, &self.scope).await?;
+        self.manager.persistence.delete(id).await
+    }
+
+    pub async fn exists(&self, id: &SessionId) -> SessionResult<bool> {
+        match self.manager.get(id).await {
+            Ok(session) => Ok(self.scope.allows(
+                session.tenant_id.as_deref(),
+                session.principal_id.as_deref(),
+            )),
+            Err(SessionError::NotFound { .. } | SessionError::Expired { .. }) => Ok(false),
+            Err(err) => Err(err),
+        }
+    }
+
+    pub async fn replay_input(
+        &self,
+        id: &SessionId,
+        from_node: Option<crate::graph::NodeId>,
+    ) -> SessionResult<crate::graph::ReplayInput> {
+        self.manager
+            .replay_input_scoped(id, &self.scope, from_node)
+            .await
+    }
+
+    pub async fn replay_from_bookmark(
+        &self,
+        id: &SessionId,
+        label: &str,
+        branch_id: Option<crate::graph::BranchId>,
+    ) -> SessionResult<crate::graph::ReplayInput> {
+        let session = self.manager.get_scoped(id, &self.scope).await?;
+        let reference = crate::graph::GraphReferenceResolver::bookmark_by_label(
+            &session.graph,
+            label,
+            branch_id,
+        )
+        .map_err(|message| SessionError::Storage { message })?;
+        crate::session::ReplayService::replay_input(
+            &session.graph,
+            Some(crate::graph::GraphReferenceResolver::node_id(&reference)),
+        )
+    }
+
+    pub async fn replay_from_checkpoint(
+        &self,
+        id: &SessionId,
+        label: &str,
+        branch_id: Option<crate::graph::BranchId>,
+    ) -> SessionResult<crate::graph::ReplayInput> {
+        let session = self.manager.get_scoped(id, &self.scope).await?;
+        let reference = crate::graph::GraphReferenceResolver::checkpoint_by_label(
+            &session.graph,
+            label,
+            branch_id,
+        )
+        .map_err(|message| SessionError::Storage { message })?;
+        crate::session::ReplayService::replay_input(
+            &session.graph,
+            Some(crate::graph::GraphReferenceResolver::node_id(&reference)),
+        )
+    }
+
+    pub async fn fork_from_node(
+        &self,
+        id: &SessionId,
+        from_node: crate::graph::NodeId,
+    ) -> SessionResult<Session> {
+        self.manager
+            .fork_from_node_scoped(id, &self.scope, from_node)
+            .await
+    }
+
+    pub async fn fork_from_bookmark(
+        &self,
+        id: &SessionId,
+        label: &str,
+        branch_id: Option<crate::graph::BranchId>,
+    ) -> SessionResult<Session> {
+        let session = self.manager.get_scoped(id, &self.scope).await?;
+        let reference = crate::graph::GraphReferenceResolver::bookmark_by_label(
+            &session.graph,
+            label,
+            branch_id,
+        )
+        .map_err(|message| SessionError::Storage { message })?;
+        self.manager
+            .fork_from_node_scoped(
+                id,
+                &self.scope,
+                crate::graph::GraphReferenceResolver::node_id(&reference),
+            )
+            .await
+    }
+
+    pub async fn fork_from_checkpoint(
+        &self,
+        id: &SessionId,
+        label: &str,
+        branch_id: Option<crate::graph::BranchId>,
+    ) -> SessionResult<Session> {
+        let session = self.manager.get_scoped(id, &self.scope).await?;
+        let reference = crate::graph::GraphReferenceResolver::checkpoint_by_label(
+            &session.graph,
+            label,
+            branch_id,
+        )
+        .map_err(|message| SessionError::Storage { message })?;
+        self.manager
+            .fork_from_node_scoped(
+                id,
+                &self.scope,
+                crate::graph::GraphReferenceResolver::node_id(&reference),
+            )
+            .await
+    }
+
+    pub async fn graph_branches(
+        &self,
+        id: &SessionId,
+    ) -> SessionResult<Vec<crate::graph::BranchSummary>> {
+        let session = self.manager.get_scoped(id, &self.scope).await?;
+        Ok(crate::graph::GraphExplorer::list_branches(&session.graph))
+    }
+
+    pub async fn graph_tree(
+        &self,
+        id: &SessionId,
+        branch_id: Option<crate::graph::BranchId>,
+    ) -> SessionResult<Vec<crate::graph::TreeNodeSummary>> {
+        let session = self.manager.get_scoped(id, &self.scope).await?;
+        let branch_id = branch_id.unwrap_or(session.graph.primary_branch);
+        Ok(crate::graph::GraphExplorer::tree_view(
+            &session.graph,
+            branch_id,
+        ))
+    }
+
+    pub async fn graph_tree_rendered(
+        &self,
+        id: &SessionId,
+        branch_id: Option<crate::graph::BranchId>,
+        mode: crate::graph::TreeRenderMode,
+    ) -> SessionResult<String> {
+        let session = self.manager.get_scoped(id, &self.scope).await?;
+        let branch_id = branch_id.unwrap_or(session.graph.primary_branch);
+        Ok(crate::graph::GraphExplorer::render_tree(
+            &session.graph,
+            branch_id,
+            mode,
+        ))
+    }
+
+    pub async fn graph_bookmarks(
+        &self,
+        id: &SessionId,
+        branch_id: Option<crate::graph::BranchId>,
+    ) -> SessionResult<Vec<crate::graph::Bookmark>> {
+        let session = self.manager.get_scoped(id, &self.scope).await?;
+        Ok(crate::graph::GraphExplorer::bookmarks(
+            &session.graph,
+            branch_id,
+        ))
+    }
+
+    pub async fn graph_checkpoints(
+        &self,
+        id: &SessionId,
+        branch_id: Option<crate::graph::BranchId>,
+    ) -> SessionResult<Vec<crate::graph::Checkpoint>> {
+        let session = self.manager.get_scoped(id, &self.scope).await?;
+        Ok(crate::graph::GraphExplorer::checkpoints(
+            &session.graph,
+            branch_id,
+        ))
+    }
+
+    pub async fn graph_node(
+        &self,
+        id: &SessionId,
+        node_id: crate::graph::NodeId,
+    ) -> SessionResult<Option<crate::graph::NodeSummary>> {
+        let session = self.manager.get_scoped(id, &self.scope).await?;
+        Ok(crate::graph::GraphExplorer::node_summary(
+            &session.graph,
+            node_id,
+        ))
+    }
+
+    pub async fn graph_search(
+        &self,
+        id: &SessionId,
+        query: &crate::graph::GraphSearchQuery,
+    ) -> SessionResult<Vec<crate::graph::NodeSummary>> {
+        self.manager
+            .graph_search_scoped(id, &self.scope, query)
+            .await
+    }
+
+    pub async fn graph_stats(
+        &self,
+        id: &SessionId,
+    ) -> SessionResult<crate::graph::GraphSessionStats> {
+        self.manager.graph_stats_scoped(id, &self.scope).await
+    }
+
+    pub async fn graph_branch_diff(
+        &self,
+        id: &SessionId,
+        left: crate::graph::BranchId,
+        right: crate::graph::BranchId,
+    ) -> SessionResult<crate::graph::BranchDiffSummary> {
+        let session = self.manager.get_scoped(id, &self.scope).await?;
+        crate::graph::GraphDiffService::branch_diff(&session.graph, left, right).map_err(|error| {
+            SessionError::Storage {
+                message: error.to_string(),
+            }
+        })
+    }
+
+    pub async fn export_branch(&self, id: &SessionId) -> SessionResult<crate::graph::BranchExport> {
+        let session = self.manager.get_scoped(id, &self.scope).await?;
+        session.export_current_branch()
+    }
+
+    pub async fn export_branch_json(&self, id: &SessionId) -> SessionResult<String> {
+        let export = self.export_branch(id).await?;
+        crate::session::SessionExporter::branch_to_json(&export).map_err(|e| {
+            SessionError::Storage {
+                message: e.to_string(),
+            }
+        })
+    }
+
+    pub async fn export_branch_html(&self, id: &SessionId) -> SessionResult<String> {
+        let export = self.export_branch(id).await?;
+        Ok(crate::session::SessionExporter::branch_to_html(&export))
+    }
+
+    pub async fn audit_bundle(
+        &self,
+        id: &SessionId,
+        policy: &crate::session::ExportPolicy,
+    ) -> SessionResult<crate::session::AuditBundle> {
+        let session = self.manager.get_scoped(id, &self.scope).await?;
+        crate::session::SessionExporter::audit_bundle(&session, policy)
+    }
+
+    pub async fn archive_bundle(
+        &self,
+        id: &SessionId,
+        export_policy: &crate::session::ExportPolicy,
+        archive_policy: &crate::session::ArchivePolicy,
+    ) -> SessionResult<crate::session::SessionArchiveBundle> {
+        let session = self.manager.get_scoped(id, &self.scope).await?;
+        let queue_state = if archive_policy.include_queue_state {
+            self.manager.persistence.pending_queue(id).await?
+        } else {
+            Vec::new()
+        };
+        crate::session::SessionArchiveService::export_bundle(
+            &session,
+            export_policy,
+            archive_policy,
+            queue_state,
+        )
+    }
+
+    pub async fn import_archive_bundle(
+        &self,
+        bundle: &crate::session::SessionArchiveBundle,
+    ) -> SessionResult<Session> {
+        if !self
+            .scope
+            .allows(bundle.tenant_id.as_deref(), bundle.principal_id.as_deref())
+        {
+            return Err(SessionError::Storage {
+                message: format!(
+                    "Archive bundle for session {} is outside scoped access",
+                    bundle.session_id
+                ),
+            });
+        }
+
+        crate::session::SessionArchiveService::restore_into(
+            bundle,
+            self.manager.persistence.as_ref(),
+        )
+        .await
+    }
+
+    pub async fn bookmark_current_head(
+        &self,
+        id: &SessionId,
+        label: impl Into<String>,
+        note: Option<String>,
+    ) -> SessionResult<Option<uuid::Uuid>> {
+        self.manager.get_scoped(id, &self.scope).await?;
+        self.manager.bookmark_current_head(id, label, note).await
+    }
+
+    pub async fn complete(&self, id: &SessionId) -> SessionResult<()> {
+        self.manager.get_scoped(id, &self.scope).await?;
+        self.manager
+            .persistence
+            .set_state(id, SessionState::Completed)
+            .await
+    }
+
+    pub async fn set_error(&self, id: &SessionId) -> SessionResult<()> {
+        self.manager.get_scoped(id, &self.scope).await?;
+        self.manager
+            .persistence
+            .set_state(id, SessionState::Failed)
+            .await
     }
 }
 
@@ -587,16 +1105,8 @@ mod tests {
             .await
             .unwrap();
 
-        let export = manager
-            .export_branch_json(&session_id)
-            .await
-            .unwrap()
-            .unwrap();
-        let replay = manager
-            .replay_input(&session_id, None)
-            .await
-            .unwrap()
-            .unwrap();
+        let export = manager.export_branch_json(&session_id).await.unwrap();
+        let replay = manager.replay_input(&session_id, None).await.unwrap();
 
         assert!(export.contains("hello"));
         assert_eq!(replay.messages.len(), 2);
@@ -606,24 +1116,61 @@ mod tests {
     async fn test_session_manager_replay_survives_projection_refresh() {
         let manager = SessionManager::in_memory();
         let mut session = manager.create(SessionConfig::default()).await.unwrap();
-        session.add_message(SessionMessage::user(vec![ContentBlock::text("hello")]));
-        session.add_message(SessionMessage::assistant(vec![ContentBlock::text("world")]));
+        session
+            .add_message(SessionMessage::user(vec![ContentBlock::text("hello")]))
+            .unwrap();
+        session
+            .add_message(SessionMessage::assistant(vec![ContentBlock::text("world")]))
+            .unwrap();
         session.clear_messages();
         manager.persistence.save(&session).await.unwrap();
 
-        let replay = manager
-            .replay_input(&session.id, None)
-            .await
-            .unwrap()
-            .unwrap();
-        let export = manager
-            .export_branch_json(&session.id)
-            .await
-            .unwrap()
-            .unwrap();
+        let replay = manager.replay_input(&session.id, None).await.unwrap();
+        let export = manager.export_branch_json(&session.id).await.unwrap();
 
         assert_eq!(replay.messages.len(), 2);
         assert!(export.contains("hello"));
+    }
+
+    #[tokio::test]
+    async fn test_session_manager_replay_scoped_enforces_identity() {
+        let manager = SessionManager::in_memory();
+        let session = manager
+            .create_with_identity(SessionConfig::default(), "tenant-a", "user-1")
+            .await
+            .unwrap();
+        let session_id = session.id;
+
+        manager
+            .add_message(
+                &session_id,
+                SessionMessage::user(vec![ContentBlock::text("hello")]),
+            )
+            .await
+            .unwrap();
+
+        let allowed = manager
+            .replay_input_scoped(
+                &session_id,
+                &SessionAccessScope::default()
+                    .tenant("tenant-a")
+                    .principal("user-1"),
+                None,
+            )
+            .await
+            .unwrap();
+        let denied = manager
+            .replay_input_scoped(
+                &session_id,
+                &SessionAccessScope::default()
+                    .tenant("tenant-a")
+                    .principal("user-2"),
+                None,
+            )
+            .await;
+
+        assert_eq!(allowed.messages.len(), 1);
+        assert!(denied.is_err());
     }
 
     #[tokio::test]
@@ -640,11 +1187,7 @@ mod tests {
             .await
             .unwrap();
 
-        let html = manager
-            .export_branch_html(&session_id)
-            .await
-            .unwrap()
-            .unwrap();
+        let html = manager.export_branch_html(&session_id).await.unwrap();
         assert!(html.contains("Branch:"));
         assert!(html.contains("Timeline"));
     }
@@ -708,11 +1251,7 @@ mod tests {
             .await
             .unwrap();
 
-        let html = manager
-            .export_branch_html(&session_id)
-            .await
-            .unwrap()
-            .unwrap();
+        let html = manager.export_branch_html(&session_id).await.unwrap();
         assert!(html.contains("Bookmarks"));
         assert!(html.contains("mark"));
     }
@@ -753,7 +1292,9 @@ mod tests {
             SessionConfig::default(),
         );
         subagent.set_identity(Some("tenant-a".to_string()), Some("user-1".to_string()));
-        subagent.add_message(SessionMessage::user(vec![ContentBlock::text("alpha")]));
+        subagent
+            .add_message(SessionMessage::user(vec![ContentBlock::text("alpha")]))
+            .unwrap();
 
         let node = subagent.current_branch_graph_nodes()[0];
         let provenance = node.provenance.clone().expect("provenance should exist");
@@ -790,7 +1331,6 @@ mod tests {
                 },
             )
             .await
-            .unwrap()
             .unwrap();
 
         assert!(bundle.tenant_id.is_none());
@@ -919,11 +1459,15 @@ mod tests {
                 .current_branch_nodes(session.graph.primary_branch)[0]
                 .id;
             let branch = session.graph.fork_branch(Some(root), "right");
-            session.graph.append_node(
-                branch,
-                crate::graph::NodeKind::Assistant,
-                serde_json::json!({"content": [{"type": "text", "text": "right"}]}),
-            );
+            let branch = branch.unwrap();
+            session
+                .graph
+                .append_node(
+                    branch,
+                    crate::graph::NodeKind::Assistant,
+                    serde_json::json!({"content": [{"type": "text", "text": "right"}]}),
+                )
+                .unwrap();
             manager.persistence.save(&session).await.unwrap();
             branch
         };
@@ -932,7 +1476,6 @@ mod tests {
         let diff = manager
             .graph_branch_diff(&session_id, left_branch, right_branch)
             .await
-            .unwrap()
             .unwrap();
 
         assert_eq!(diff.left_only_count, 1);
@@ -958,14 +1501,7 @@ mod tests {
             .unwrap();
         {
             let mut session = manager.get(&session_id).await.unwrap();
-            session.graph.create_checkpoint(
-                session.graph.primary_branch,
-                "stable",
-                None,
-                vec![],
-                session.principal_id.clone(),
-                None,
-            );
+            session.checkpoint_current_head("stable", None, vec![]);
             manager.persistence.save(&session).await.unwrap();
         }
         manager
@@ -997,6 +1533,133 @@ mod tests {
         assert_eq!(checkpoint_replay.messages.len(), 1);
         assert_eq!(bookmark_fork.current_branch_messages().len(), 2);
         assert_eq!(checkpoint_fork.current_branch_messages().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_scoped_manager_restricts_graph_and_export_access() {
+        let manager = SessionManager::in_memory();
+        let session = manager
+            .create_with_identity(SessionConfig::default(), "tenant-a", "user-1")
+            .await
+            .unwrap();
+        let session_id = session.id;
+
+        manager
+            .add_message(
+                &session_id,
+                SessionMessage::user(vec![ContentBlock::text("alpha")]),
+            )
+            .await
+            .unwrap();
+
+        let allowed = manager
+            .scoped(
+                SessionAccessScope::default()
+                    .tenant("tenant-a")
+                    .principal("user-1"),
+            )
+            .export_branch_json(&session_id)
+            .await
+            .unwrap();
+        let denied = manager
+            .scoped(
+                SessionAccessScope::default()
+                    .tenant("tenant-a")
+                    .principal("user-2"),
+            )
+            .graph_branches(&session_id)
+            .await;
+
+        assert!(allowed.contains("alpha"));
+        assert!(denied.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_scoped_manager_create_applies_scope_identity() {
+        let manager = SessionManager::in_memory();
+        let scoped = manager.scoped(
+            SessionAccessScope::default()
+                .tenant("tenant-a")
+                .principal("user-1"),
+        );
+
+        let session = scoped.create(SessionConfig::default()).await.unwrap();
+
+        assert_eq!(session.tenant_id.as_deref(), Some("tenant-a"));
+        assert_eq!(session.principal_id.as_deref(), Some("user-1"));
+    }
+
+    #[tokio::test]
+    async fn test_scoped_manager_update_rejects_identity_change() {
+        let manager = SessionManager::in_memory();
+        let scoped = manager.scoped(
+            SessionAccessScope::default()
+                .tenant("tenant-a")
+                .principal("user-1"),
+        );
+        let mut session = scoped.create(SessionConfig::default()).await.unwrap();
+        session.principal_id = Some("user-2".to_string());
+
+        let result = scoped.update(&session).await;
+
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_scoped_manager_update_rejects_out_of_scope_session_id() {
+        let manager = SessionManager::in_memory();
+        let scoped = manager.scoped(
+            SessionAccessScope::default()
+                .tenant("tenant-a")
+                .principal("user-1"),
+        );
+
+        let session = scoped.create(SessionConfig::default()).await.unwrap();
+        let foreign = manager
+            .create_with_identity(SessionConfig::default(), "tenant-b", "user-2")
+            .await
+            .unwrap();
+
+        let mut forged = session.clone();
+        forged.id = foreign.id;
+
+        let result = scoped.update(&forged).await;
+
+        assert!(result.is_err());
+
+        let stored = manager.get(&foreign.id).await.unwrap();
+        assert_eq!(stored.tenant_id.as_deref(), Some("tenant-b"));
+        assert_eq!(stored.principal_id.as_deref(), Some("user-2"));
+    }
+
+    #[tokio::test]
+    async fn test_session_manager_get_by_str_rejects_invalid_uuid() {
+        let manager = SessionManager::in_memory();
+        let error = manager.get_by_str("not-a-uuid").await.unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("Session IDs must be valid UUIDs")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_scoped_manager_get_by_str_rejects_invalid_uuid() {
+        let manager = SessionManager::in_memory();
+        let scoped = manager.scoped(
+            SessionAccessScope::default()
+                .tenant("tenant-a")
+                .principal("user-1"),
+        );
+
+        let error = scoped.get_by_str("not-a-uuid").await.unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("Session IDs must be valid UUIDs")
+        );
     }
 
     #[tokio::test]
@@ -1036,6 +1699,34 @@ mod tests {
 
         let tenant_b = manager.list_for_tenant("tenant-b").await.unwrap();
         assert_eq!(tenant_b.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_scoped_manager_list_filters_by_scope() {
+        let manager = SessionManager::in_memory();
+
+        manager
+            .create_with_identity(SessionConfig::default(), "tenant-a", "user-1")
+            .await
+            .unwrap();
+        manager
+            .create_with_identity(SessionConfig::default(), "tenant-a", "user-2")
+            .await
+            .unwrap();
+        manager
+            .create_with_identity(SessionConfig::default(), "tenant-b", "user-3")
+            .await
+            .unwrap();
+
+        let tenant_scope = manager.scoped(SessionAccessScope::default().tenant("tenant-a"));
+        let principal_scope = manager.scoped(
+            SessionAccessScope::default()
+                .tenant("tenant-a")
+                .principal("user-1"),
+        );
+
+        assert_eq!(tenant_scope.list().await.unwrap().len(), 2);
+        assert_eq!(principal_scope.list().await.unwrap().len(), 1);
     }
 
     #[tokio::test]
