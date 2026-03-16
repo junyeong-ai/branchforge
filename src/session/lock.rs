@@ -23,7 +23,9 @@
 use async_trait::async_trait;
 use std::time::Duration;
 
-use super::{SessionError, SessionResult};
+#[cfg(any(feature = "redis-backend", feature = "postgres"))]
+use super::SessionError;
+use super::SessionResult;
 
 /// Default lock TTL in seconds.
 pub const DEFAULT_LOCK_TTL_SECS: u64 = 30;
@@ -410,6 +412,14 @@ pub use postgres_impl::PostgresLock;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::session::SessionError;
+    use std::collections::HashMap;
+    use std::sync::Arc;
+    use tokio::sync::Mutex;
+
+    // -----------------------------------------------------------------------
+    // Original LockGuard unit tests
+    // -----------------------------------------------------------------------
 
     #[test]
     fn lock_guard_new_sets_fields() {
@@ -422,7 +432,8 @@ mod tests {
     #[test]
     fn lock_guard_is_expired_after_zero_ttl() {
         let guard = LockGuard::new("r".to_string(), "t".to_string());
-        // A TTL of zero means the lock is immediately considered expired.
+        // Ensure some time elapses so elapsed() > Duration::ZERO.
+        std::thread::sleep(Duration::from_millis(1));
         assert!(guard.is_expired(Duration::ZERO));
     }
 
@@ -446,5 +457,338 @@ mod tests {
         assert_eq!(DEFAULT_RETRY_DELAY_MS, 100);
         assert_eq!(DEFAULT_MAX_RETRIES, 50);
         // 50 retries * 100ms = 5s total max wait
+    }
+
+    // -----------------------------------------------------------------------
+    // New LockGuard tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_lock_guard_mark_released() {
+        let mut guard = LockGuard::new("r".to_string(), "t".to_string());
+        // Initially not released; Drop would warn.
+        // Mark released to prevent the warning.
+        guard.mark_released();
+        // Verify by checking the internal state through Drop behavior:
+        // if mark_released works, dropping should not warn.
+        // We can't inspect the private field directly, so we just confirm
+        // the method runs without panic and the guard can be dropped cleanly.
+        drop(guard);
+    }
+
+    #[test]
+    fn test_lock_guard_expired_after_ttl() {
+        let guard = LockGuard::new("r".to_string(), "t".to_string());
+        // Ensure some time elapses so elapsed() > Duration::ZERO.
+        std::thread::sleep(Duration::from_millis(2));
+        assert!(guard.is_expired(Duration::ZERO));
+        // Also expired with a very short TTL after a longer sleep.
+        let guard2 = LockGuard::new("r2".to_string(), "t2".to_string());
+        std::thread::sleep(Duration::from_millis(5));
+        assert!(guard2.is_expired(Duration::from_millis(1)));
+    }
+
+    #[test]
+    fn test_lock_guard_not_expired_within_ttl() {
+        let guard = LockGuard::new("r".to_string(), "t".to_string());
+        // With a generous TTL, should not be expired immediately.
+        assert!(!guard.is_expired(Duration::from_secs(60)));
+    }
+
+    #[test]
+    fn test_lock_guard_token_uniqueness() {
+        let g1 = LockGuard::new("r".to_string(), uuid::Uuid::new_v4().to_string());
+        let g2 = LockGuard::new("r".to_string(), uuid::Uuid::new_v4().to_string());
+        assert_ne!(g1.token, g2.token);
+    }
+
+    #[test]
+    fn test_lock_config_defaults() {
+        assert!(DEFAULT_LOCK_TTL_SECS > 0);
+        assert!(DEFAULT_RETRY_DELAY_MS > 0);
+        assert!(DEFAULT_MAX_RETRIES > 0);
+        // Total max wait should be reasonable (under 60 seconds).
+        let max_wait_ms = DEFAULT_RETRY_DELAY_MS as u64 * DEFAULT_MAX_RETRIES as u64;
+        assert!(max_wait_ms <= 60_000);
+    }
+
+    #[test]
+    fn test_lock_config_custom() {
+        // Verify custom config values can be used (compile-time check).
+        let ttl = Duration::from_secs(10);
+        let retry_delay = Duration::from_millis(50);
+        let max_retries: u32 = 100;
+        assert_eq!(ttl.as_secs(), 10);
+        assert_eq!(retry_delay.as_millis(), 50);
+        assert_eq!(max_retries, 100);
+    }
+
+    // -----------------------------------------------------------------------
+    // InMemoryLock: test-only DistributedLock implementation
+    // -----------------------------------------------------------------------
+
+    /// Represents a held lock in the in-memory store.
+    struct HeldLock {
+        token: String,
+        expires_at: tokio::time::Instant,
+    }
+
+    /// A simple in-memory distributed lock for testing the DistributedLock trait.
+    ///
+    /// Uses a `HashMap` protected by a `Mutex` to track held locks.
+    /// Supports TTL-based expiry and a notify mechanism for acquire blocking.
+    struct InMemoryLock {
+        locks: Arc<Mutex<HashMap<String, HeldLock>>>,
+        notify: Arc<tokio::sync::Notify>,
+        retry_delay: Duration,
+        max_retries: u32,
+    }
+
+    impl InMemoryLock {
+        fn new() -> Self {
+            Self {
+                locks: Arc::new(Mutex::new(HashMap::new())),
+                notify: Arc::new(tokio::sync::Notify::new()),
+                retry_delay: Duration::from_millis(10),
+                max_retries: 200,
+            }
+        }
+
+        /// Purge expired locks from the map.
+        async fn purge_expired(&self) {
+            let mut locks = self.locks.lock().await;
+            let now = tokio::time::Instant::now();
+            locks.retain(|_, held| held.expires_at > now);
+        }
+    }
+
+    #[async_trait]
+    impl DistributedLock for InMemoryLock {
+        async fn acquire(&self, resource: &str, ttl: Duration) -> SessionResult<LockGuard> {
+            let mut attempt = 0u32;
+            loop {
+                if let Some(guard) = self.try_acquire(resource, ttl).await? {
+                    return Ok(guard);
+                }
+                attempt += 1;
+                if attempt > self.max_retries {
+                    return Err(SessionError::Storage {
+                        message: format!(
+                            "Failed to acquire lock on '{}' after {} retries",
+                            resource, self.max_retries
+                        ),
+                    });
+                }
+                // Wait for a notification or timeout.
+                let _ = tokio::time::timeout(self.retry_delay, self.notify.notified()).await;
+            }
+        }
+
+        async fn try_acquire(
+            &self,
+            resource: &str,
+            ttl: Duration,
+        ) -> SessionResult<Option<LockGuard>> {
+            self.purge_expired().await;
+            let mut locks = self.locks.lock().await;
+            let now = tokio::time::Instant::now();
+
+            // Check if already held (and not expired).
+            if let Some(held) = locks.get(resource) {
+                if held.expires_at > now {
+                    return Ok(None);
+                }
+            }
+
+            let token = uuid::Uuid::new_v4().to_string();
+            locks.insert(
+                resource.to_string(),
+                HeldLock {
+                    token: token.clone(),
+                    expires_at: now + ttl,
+                },
+            );
+
+            Ok(Some(LockGuard::new(resource.to_string(), token)))
+        }
+
+        async fn extend(&self, guard: &LockGuard, ttl: Duration) -> SessionResult<bool> {
+            let mut locks = self.locks.lock().await;
+            if let Some(held) = locks.get_mut(&guard.resource) {
+                if held.token == guard.token {
+                    held.expires_at = tokio::time::Instant::now() + ttl;
+                    return Ok(true);
+                }
+            }
+            Ok(false)
+        }
+
+        async fn release(&self, guard: &mut LockGuard) -> SessionResult<()> {
+            let mut locks = self.locks.lock().await;
+            if let Some(held) = locks.get(&guard.resource) {
+                if held.token == guard.token {
+                    locks.remove(&guard.resource);
+                }
+            }
+            guard.mark_released();
+            // Notify any waiters that a lock was released.
+            self.notify.notify_waiters();
+            Ok(())
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // DistributedLock trait tests using InMemoryLock
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_acquire_and_release() {
+        let lock = InMemoryLock::new();
+        let ttl = Duration::from_secs(5);
+
+        let mut guard = lock.acquire("res-1", ttl).await.unwrap();
+        assert_eq!(guard.resource, "res-1");
+
+        lock.release(&mut guard).await.unwrap();
+        // After release, we should be able to re-acquire.
+        let mut guard2 = lock.acquire("res-1", ttl).await.unwrap();
+        assert_eq!(guard2.resource, "res-1");
+        lock.release(&mut guard2).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_try_acquire_when_free() {
+        let lock = InMemoryLock::new();
+        let ttl = Duration::from_secs(5);
+
+        let result = lock.try_acquire("free-resource", ttl).await.unwrap();
+        assert!(result.is_some());
+        let mut guard = result.unwrap();
+        assert_eq!(guard.resource, "free-resource");
+        lock.release(&mut guard).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_try_acquire_when_locked() {
+        let lock = InMemoryLock::new();
+        let ttl = Duration::from_secs(5);
+
+        let mut guard = lock.acquire("contested", ttl).await.unwrap();
+
+        // Second try_acquire should return None.
+        let result = lock.try_acquire("contested", ttl).await.unwrap();
+        assert!(result.is_none());
+
+        lock.release(&mut guard).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_extend_refreshes_ttl() {
+        let lock = InMemoryLock::new();
+        let short_ttl = Duration::from_millis(50);
+
+        let guard = lock.acquire("extend-me", short_ttl).await.unwrap();
+
+        // Extend with a long TTL.
+        let extended = lock.extend(&guard, Duration::from_secs(60)).await.unwrap();
+        assert!(extended);
+
+        // After the original short TTL, try_acquire should still fail
+        // because we extended.
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let result = lock
+            .try_acquire("extend-me", Duration::from_secs(5))
+            .await
+            .unwrap();
+        assert!(result.is_none(), "Lock should still be held after extend");
+    }
+
+    #[tokio::test]
+    async fn test_release_idempotent() {
+        let lock = InMemoryLock::new();
+        let ttl = Duration::from_secs(5);
+
+        let mut guard = lock.acquire("idem", ttl).await.unwrap();
+
+        // First release.
+        lock.release(&mut guard).await.unwrap();
+        // Second release should be a safe no-op (already removed + already marked released).
+        lock.release(&mut guard).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_acquire_blocks_until_released() {
+        let lock = Arc::new(InMemoryLock::new());
+        let ttl = Duration::from_secs(5);
+
+        let mut guard = lock.acquire("blocking", ttl).await.unwrap();
+
+        let lock2 = Arc::clone(&lock);
+        let handle = tokio::spawn(async move {
+            // This should block until the lock is released.
+            let mut g = lock2.acquire("blocking", ttl).await.unwrap();
+            lock2.release(&mut g).await.unwrap();
+        });
+
+        // Give the spawned task a moment to start waiting.
+        tokio::time::sleep(Duration::from_millis(20)).await;
+
+        // Release the lock, unblocking the waiter.
+        lock.release(&mut guard).await.unwrap();
+
+        // The spawned task should complete promptly.
+        tokio::time::timeout(Duration::from_secs(2), handle)
+            .await
+            .expect("Timed out waiting for blocked acquire")
+            .expect("Spawned task panicked");
+    }
+
+    #[tokio::test]
+    async fn test_contention_two_holders() {
+        let lock = Arc::new(InMemoryLock::new());
+        let ttl = Duration::from_secs(5);
+        let counter = Arc::new(std::sync::atomic::AtomicU32::new(0));
+
+        let mut handles = Vec::new();
+        for _ in 0..2 {
+            let l = Arc::clone(&lock);
+            let c = Arc::clone(&counter);
+            handles.push(tokio::spawn(async move {
+                let mut guard = l.acquire("shared", ttl).await.unwrap();
+                // Simulate some work in the critical section.
+                let prev = c.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                // Only one task should be in the critical section at a time.
+                assert!(prev < 1, "Two tasks held the lock simultaneously");
+                tokio::time::sleep(Duration::from_millis(10)).await;
+                c.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+                l.release(&mut guard).await.unwrap();
+            }));
+        }
+
+        for h in handles {
+            h.await.unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn test_lock_expires_allowing_reacquire() {
+        let lock = InMemoryLock::new();
+        let short_ttl = Duration::from_millis(5);
+
+        let _guard = lock.acquire("ephemeral", short_ttl).await.unwrap();
+        // Guard is held but we intentionally don't release it.
+
+        // Wait for the TTL to expire.
+        tokio::time::sleep(Duration::from_millis(10)).await;
+
+        // Now a new caller should be able to acquire (expired lock is purged).
+        let result = lock
+            .try_acquire("ephemeral", Duration::from_secs(5))
+            .await
+            .unwrap();
+        assert!(
+            result.is_some(),
+            "Should be able to acquire after TTL expiry"
+        );
     }
 }
