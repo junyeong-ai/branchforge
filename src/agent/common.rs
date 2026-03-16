@@ -103,6 +103,92 @@ pub(crate) fn accumulate_response_usage(
     cost
 }
 
+/// Emit a [`TokensConsumed`](crate::events::EventKind::TokensConsumed) event
+/// for real-time token tracking.
+pub(crate) fn emit_tokens_consumed(
+    event_bus: Option<&crate::events::EventBus>,
+    usage: &Usage,
+    model: &str,
+) {
+    if let Some(bus) = event_bus {
+        bus.emit_simple(
+            crate::events::EventKind::TokensConsumed,
+            serde_json::json!({
+                "input_tokens": usage.input_tokens,
+                "output_tokens": usage.output_tokens,
+                "model": model,
+            }),
+        );
+    }
+}
+
+/// Emit a [`ToolExecuted`](crate::events::EventKind::ToolExecuted) event
+/// after a tool completes.
+pub(crate) fn emit_tool_executed(
+    event_bus: Option<&crate::events::EventBus>,
+    tool_name: &str,
+    duration_ms: u64,
+    is_error: bool,
+) {
+    if let Some(bus) = event_bus {
+        bus.emit_simple(
+            crate::events::EventKind::ToolExecuted,
+            serde_json::json!({
+                "tool_name": tool_name,
+                "duration_ms": duration_ms,
+                "is_error": is_error,
+            }),
+        );
+    }
+}
+
+/// Emit a [`BudgetAlert`](crate::events::EventKind::BudgetAlert) if the budget
+/// usage exceeds the configured warning threshold.
+pub(crate) fn maybe_emit_budget_alert(
+    budget_tracker: &BudgetTracker,
+    event_bus: Option<&crate::events::EventBus>,
+    alert_threshold_pct: u32,
+) {
+    let Some(bus) = event_bus else { return };
+    let status = budget_tracker.check();
+    match status {
+        crate::budget::BudgetStatus::WithinBudget {
+            used,
+            limit,
+            remaining,
+        } => {
+            let pct = if limit > Decimal::ZERO {
+                (used / limit * Decimal::from(100)).round_dp(1).to_string()
+            } else {
+                "0".to_string()
+            };
+            if used >= limit * Decimal::from(alert_threshold_pct) / Decimal::from(100) {
+                bus.emit_simple(
+                    crate::events::EventKind::BudgetAlert,
+                    serde_json::json!({
+                        "used_usd": used.to_string(),
+                        "limit_usd": limit.to_string(),
+                        "remaining_usd": remaining.to_string(),
+                        "percentage": pct,
+                    }),
+                );
+            }
+        }
+        crate::budget::BudgetStatus::Exceeded { used, limit, .. } => {
+            bus.emit_simple(
+                crate::events::EventKind::BudgetAlert,
+                serde_json::json!({
+                    "used_usd": used.to_string(),
+                    "limit_usd": limit.to_string(),
+                    "remaining_usd": "0",
+                    "percentage": "100",
+                }),
+            );
+        }
+        crate::budget::BudgetStatus::Unlimited { .. } => {}
+    }
+}
+
 /// Accumulate inner usage from a tool result (e.g., subagent calls).
 pub(crate) async fn accumulate_inner_usage(
     tool_state: &ToolState,

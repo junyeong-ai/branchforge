@@ -15,11 +15,13 @@ pub use message::{
 pub use policy::{SessionAuthorization, SessionExecutionMode, SessionToolLimits};
 
 use std::collections::VecDeque;
+use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 
+use crate::events::EventBus;
 use crate::graph::{GraphNode, NodeKind, NodeProvenance, SessionGraph};
 use crate::session::types::{CompactRecord, Plan, TodoItem, TodoStatus};
 use crate::session::{SessionError, SessionResult};
@@ -57,6 +59,8 @@ pub struct Session {
     pub current_plan: Option<Plan>,
     #[serde(default)]
     pub compact_history: VecDeque<CompactRecord>,
+    #[serde(skip)]
+    pub(crate) event_bus: Option<Arc<EventBus>>,
 }
 
 impl Session {
@@ -89,6 +93,12 @@ impl Session {
             description: description.into(),
         };
         Self::init(id, Some(parent_id), session_type, config)
+    }
+
+    /// Attach an [`EventBus`] for non-blocking observability events.
+    pub fn with_event_bus(&mut self, bus: Arc<EventBus>) {
+        self.graph.with_event_bus(Arc::clone(&bus));
+        self.event_bus = Some(bus);
     }
 
     fn init(
@@ -131,6 +141,7 @@ impl Session {
             todos: Vec::with_capacity(8),
             current_plan: None,
             compact_history: VecDeque::new(),
+            event_bus: None,
         }
     }
 
@@ -168,6 +179,17 @@ impl Session {
         }
         self.messages.push(message);
         self.updated_at = Utc::now();
+
+        if let Some(ref bus) = self.event_bus {
+            bus.emit_simple(
+                crate::events::EventKind::SessionChanged,
+                serde_json::json!({
+                    "session_id": self.id.to_string(),
+                    "message_count": self.messages.len(),
+                }),
+            );
+        }
+
         Ok(())
     }
 

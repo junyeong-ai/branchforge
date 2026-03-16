@@ -10,7 +10,8 @@ use tokio::sync::RwLock;
 use tracing::{debug, warn};
 
 use super::common::{
-    BudgetContext, accumulate_inner_usage, accumulate_response_usage, handle_compaction,
+    BudgetContext, accumulate_inner_usage, accumulate_response_usage, emit_tokens_consumed,
+    emit_tool_executed, handle_compaction, maybe_emit_budget_alert,
     maybe_invoke_explicit_skill_command, run_post_tool_hooks, run_stop_hooks,
     try_activate_dynamic_rules,
 };
@@ -303,6 +304,13 @@ impl StreamState {
     async fn do_start_request(&mut self) -> Option<crate::Result<AgentEvent>> {
         if !self.session_started {
             self.session_started = true;
+
+            // Propagate EventBus to Session/Graph for SessionChanged,
+            // BranchForked, and CheckpointCreated events.
+            if let Some(ref bus) = self.cfg.event_bus {
+                self.cfg.tool_state.with_event_bus(Arc::clone(bus)).await;
+            }
+
             let session_start_input = HookInput::session_start(&*self.cfg.session_id);
             if let Err(e) = self
                 .cfg
@@ -565,15 +573,42 @@ impl StreamState {
             StreamItem::Text(text) => {
                 self.final_text.push_str(&text);
                 self.fire_post_stream_chunk_sync(&text, "text");
+                if let Some(ref bus) = self.cfg.event_bus {
+                    bus.emit_simple(
+                        crate::events::EventKind::StreamChunk,
+                        serde_json::json!({
+                            "chunk_type": "text",
+                            "length": text.len(),
+                        }),
+                    );
+                }
                 StreamPollResult::Event(Ok(AgentEvent::Text(text)))
             }
             StreamItem::Thinking(thinking) => {
                 self.fire_post_stream_chunk_sync(&thinking, "thinking");
+                if let Some(ref bus) = self.cfg.event_bus {
+                    bus.emit_simple(
+                        crate::events::EventKind::StreamChunk,
+                        serde_json::json!({
+                            "chunk_type": "thinking",
+                            "length": thinking.len(),
+                        }),
+                    );
+                }
                 StreamPollResult::Event(Ok(AgentEvent::Thinking(thinking)))
             }
             StreamItem::Citation(_) => StreamPollResult::Continue,
             StreamItem::ToolUseComplete(tool_use) => {
                 self.fire_post_stream_chunk_sync(&tool_use.name, "tool_use");
+                if let Some(ref bus) = self.cfg.event_bus {
+                    bus.emit_simple(
+                        crate::events::EventKind::StreamChunk,
+                        serde_json::json!({
+                            "chunk_type": "tool_use",
+                            "tool_name": &tool_use.name,
+                        }),
+                    );
+                }
                 self.pending_tool_uses.push(tool_use);
                 StreamPollResult::Continue
             }
@@ -659,17 +694,17 @@ impl StreamState {
             &accumulated_usage,
         );
 
-        // Emit per-turn usage event for real-time token tracking
-        if let Some(ref bus) = self.cfg.event_bus {
-            bus.emit_simple(
-                crate::events::EventKind::TokensConsumed,
-                serde_json::json!({
-                    "input_tokens": accumulated_usage.input_tokens,
-                    "output_tokens": accumulated_usage.output_tokens,
-                    "model": self.cfg.config.model.primary,
-                }),
-            );
-        }
+        emit_tokens_consumed(
+            self.cfg.event_bus.as_deref(),
+            &accumulated_usage,
+            &self.cfg.config.model.primary,
+        );
+
+        maybe_emit_budget_alert(
+            &self.cfg.budget_tracker,
+            self.cfg.event_bus.as_deref(),
+            self.cfg.config.budget.alert_threshold_pct,
+        );
 
         let structured_output = self.extract_structured_output(&self.final_text);
 
@@ -898,17 +933,7 @@ impl StreamState {
             )
             .await;
 
-            // Emit to EventBus for observability
-            if let Some(ref bus) = self.cfg.event_bus {
-                bus.emit_simple(
-                    crate::events::EventKind::ToolExecuted,
-                    serde_json::json!({
-                        "tool_name": &name,
-                        "duration_ms": duration_ms,
-                        "is_error": is_error,
-                    }),
-                );
-            }
+            emit_tool_executed(self.cfg.event_bus.as_deref(), &name, duration_ms, is_error);
 
             self.cfg
                 .tool_state

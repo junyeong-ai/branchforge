@@ -7,7 +7,8 @@ use tracing::{debug, info, instrument, warn};
 
 use super::AgentMetrics;
 use super::common::{
-    self, BudgetContext, accumulate_inner_usage, accumulate_response_usage, handle_compaction,
+    self, BudgetContext, accumulate_inner_usage, accumulate_response_usage, emit_tokens_consumed,
+    emit_tool_executed, handle_compaction, maybe_emit_budget_alert,
     maybe_invoke_explicit_skill_command, run_post_tool_hooks, run_stop_hooks,
     try_activate_dynamic_rules,
 };
@@ -108,6 +109,13 @@ impl Agent {
     #[instrument(skip(self, prompt), fields(session_id = %self.session_id))]
     async fn execute_inner(&self, prompt: &str) -> crate::Result<AgentResult> {
         let _guard = self.state.acquire_execution().await;
+
+        // Propagate EventBus to Session and its inner Graph so that
+        // SessionChanged, BranchForked, and CheckpointCreated events fire.
+        if let Some(ref bus) = self.event_bus {
+            self.state.with_event_bus(Arc::clone(bus)).await;
+        }
+
         let execution_start = Instant::now();
         let hook_ctx = self.hook_context();
 
@@ -323,6 +331,18 @@ impl Agent {
                 &response.usage,
             );
 
+            emit_tokens_consumed(
+                self.event_bus.as_deref(),
+                &response.usage,
+                &self.config.model.primary,
+            );
+
+            maybe_emit_budget_alert(
+                &self.budget_tracker,
+                self.event_bus.as_deref(),
+                self.config.budget.alert_threshold_pct,
+            );
+
             final_text = response.text();
             final_stop_reason = response.stop_reason.unwrap_or(StopReason::EndTurn);
             let assistant_metadata = MessageMetadata {
@@ -446,6 +466,8 @@ impl Agent {
                     &result,
                 )
                 .await;
+
+                emit_tool_executed(self.event_bus.as_deref(), &name, duration_ms, is_error);
 
                 self.state
                     .record_tool_execution(

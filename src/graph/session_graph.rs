@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
@@ -10,6 +11,7 @@ use super::types::{
     Bookmark, Branch, BranchId, Checkpoint, GraphNode, NodeId, NodeKind, NodeProvenance,
     SessionGraphId,
 };
+use crate::events::EventBus;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionGraph {
@@ -21,9 +23,16 @@ pub struct SessionGraph {
     pub checkpoints: HashMap<NodeId, Checkpoint>,
     pub bookmarks: HashMap<Uuid, Bookmark>,
     pub primary_branch: BranchId,
+    #[serde(skip)]
+    pub(crate) event_bus: Option<Arc<EventBus>>,
 }
 
 impl SessionGraph {
+    /// Attach an [`EventBus`] for non-blocking observability events.
+    pub fn with_event_bus(&mut self, bus: Arc<EventBus>) {
+        self.event_bus = Some(bus);
+    }
+
     /// Walk up the parent chain from a node to compute its depth in the tree.
     pub fn node_depth(&self, node_id: NodeId) -> usize {
         let mut depth = 0;
@@ -116,6 +125,7 @@ impl SessionGraph {
             checkpoints: HashMap::new(),
             bookmarks: HashMap::new(),
             primary_branch: branch_id,
+            event_bus: None,
         }
     }
 
@@ -268,9 +278,21 @@ impl SessionGraph {
         self.events
             .push(GraphEvent::new(GraphEventBody::BranchForked {
                 branch_id,
-                name: branch.name,
+                name: branch.name.clone(),
                 forked_from: branch.forked_from,
             }));
+
+        if let Some(ref bus) = self.event_bus {
+            bus.emit_simple(
+                crate::events::EventKind::BranchForked,
+                serde_json::json!({
+                    "branch_id": branch_id.to_string(),
+                    "name": &branch.name,
+                    "forked_from": branch.forked_from.map(|id| id.to_string()),
+                }),
+            );
+        }
+
         Ok(branch_id)
     }
 
@@ -319,6 +341,12 @@ impl SessionGraph {
         if let Some(branch) = self.branches.get_mut(&branch_id) {
             branch.head = Some(checkpoint_id);
         }
+        let checkpoint_label = self
+            .checkpoints
+            .get(&checkpoint_id)
+            .map(|c| c.label.clone())
+            .unwrap_or_default();
+
         self.events.push(GraphEvent::with_metadata(
             EventMetadata {
                 id: Uuid::new_v4(),
@@ -331,11 +359,7 @@ impl SessionGraph {
             GraphEventBody::CheckpointCreated {
                 checkpoint_id,
                 branch_id,
-                label: self
-                    .checkpoints
-                    .get(&checkpoint_id)
-                    .map(|c| c.label.clone())
-                    .unwrap_or_default(),
+                label: checkpoint_label.clone(),
                 note,
                 tags,
                 provenance: self
@@ -344,6 +368,18 @@ impl SessionGraph {
                     .and_then(|checkpoint| checkpoint.provenance.clone()),
             },
         ));
+
+        if let Some(ref bus) = self.event_bus {
+            bus.emit_simple(
+                crate::events::EventKind::CheckpointCreated,
+                serde_json::json!({
+                    "checkpoint_id": checkpoint_id.to_string(),
+                    "branch_id": branch_id.to_string(),
+                    "label": &checkpoint_label,
+                }),
+            );
+        }
+
         Ok(checkpoint_id)
     }
 

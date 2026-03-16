@@ -36,6 +36,8 @@ pub use resilience::{
     RetryConfig,
 };
 pub use schema::{strict_schema, transform_for_strict};
+#[cfg(feature = "aws")]
+pub use streaming::AwsEventStreamParser;
 pub use streaming::{RecoverableStream, StreamItem, StreamParser, stream_event_to_item};
 
 #[cfg(feature = "aws")]
@@ -53,6 +55,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crate::auth::{Auth, Credential, OAuthConfig};
+use crate::events::EventBus;
 use crate::{Error, Result};
 
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(300);
@@ -63,6 +66,7 @@ pub struct Client {
     http: reqwest::Client,
     fallback_config: Option<FallbackConfig>,
     resilience: Option<Arc<Resilience>>,
+    event_bus: Option<Arc<EventBus>>,
 }
 
 impl Client {
@@ -78,6 +82,7 @@ impl Client {
             http,
             fallback_config: None,
             resilience: None,
+            event_bus: None,
         })
     }
 
@@ -87,7 +92,14 @@ impl Client {
             http,
             fallback_config: None,
             resilience: None,
+            event_bus: None,
         }
+    }
+
+    /// Attach an [`EventBus`] for non-blocking observability events.
+    pub fn with_event_bus(mut self, bus: Arc<EventBus>) -> Self {
+        self.event_bus = Some(bus);
+        self
     }
 
     pub fn fallback(mut self, config: FallbackConfig) -> Self {
@@ -143,8 +155,47 @@ impl Client {
 
     pub async fn send(&self, request: CreateMessageRequest) -> Result<crate::types::ApiResponse> {
         let cb = self.check_circuit_breaker()?;
+
+        if let Some(ref bus) = self.event_bus {
+            bus.emit_simple(
+                crate::events::EventKind::RequestSent,
+                serde_json::json!({
+                    "model": &request.model,
+                    "streaming": false,
+                }),
+            );
+        }
+
         let result = self.send_inner(request).await;
         Self::record_circuit_result(&cb, &result);
+
+        match &result {
+            Ok(response) => {
+                if let Some(ref bus) = self.event_bus {
+                    bus.emit_simple(
+                        crate::events::EventKind::ResponseReceived,
+                        serde_json::json!({
+                            "model": &response.model,
+                            "input_tokens": response.usage.input_tokens,
+                            "output_tokens": response.usage.output_tokens,
+                            "stop_reason": format!("{:?}", response.stop_reason),
+                        }),
+                    );
+                }
+            }
+            Err(e) => {
+                if let Some(ref bus) = self.event_bus {
+                    bus.emit_simple(
+                        crate::events::EventKind::Error,
+                        serde_json::json!({
+                            "error": e.to_string(),
+                            "category": format!("{:?}", e.category()),
+                        }),
+                    );
+                }
+            }
+        }
+
         result
     }
 
@@ -237,8 +288,32 @@ impl Client {
         request: CreateMessageRequest,
     ) -> Result<impl futures::Stream<Item = Result<StreamItem>> + Send + 'static + use<>> {
         let cb = self.check_circuit_breaker()?;
+
+        if let Some(ref bus) = self.event_bus {
+            bus.emit_simple(
+                crate::events::EventKind::RequestSent,
+                serde_json::json!({
+                    "model": &request.model,
+                    "streaming": true,
+                }),
+            );
+        }
+
         let result = self.stream_request_inner(request).await;
         Self::record_circuit_result(&cb, &result);
+
+        if let Err(ref e) = result
+            && let Some(ref bus) = self.event_bus
+        {
+            bus.emit_simple(
+                crate::events::EventKind::Error,
+                serde_json::json!({
+                    "error": e.to_string(),
+                    "category": format!("{:?}", e.category()),
+                }),
+            );
+        }
+
         result
     }
 
@@ -246,27 +321,29 @@ impl Client {
         &self,
         request: CreateMessageRequest,
     ) -> Result<impl futures::Stream<Item = Result<StreamItem>> + Send + 'static + use<>> {
-        use futures::future::Either;
-
         request.validate()?;
 
+        let response = self.adapter.send_stream(&self.http, request).await?;
+
+        #[cfg(feature = "aws")]
         if self.adapter.stream_format() == adapter::StreamFormat::AwsEventStream {
-            // AWS Event Stream binary framing (Bedrock) is not yet handled by
-            // StreamParser.  Fall back to a non-streaming request wrapped as a
-            // single-item stream so callers still get correct results.
-            let response = self.adapter.send(&self.http, request).await?;
-            let items = crate::client::streaming::api_response_to_stream_items(response);
-            return Ok(Either::Left(futures::stream::iter(
-                items.into_iter().map(Ok),
-            )));
+            let stream = AwsEventStreamParser::new(
+                response.bytes_stream(),
+                adapter::bedrock::BedrockAdapter::parse_converse_stream_event,
+            );
+            return Ok(futures::future::Either::Left(stream));
         }
 
-        let response = self.adapter.send_stream(&self.http, request).await?;
         let adapter = Arc::clone(&self.adapter);
         let stream = StreamParser::with_event_parser(response.bytes_stream(), move |json| {
             adapter.parse_stream_event(json)
         });
-        Ok(Either::Right(stream))
+
+        #[cfg(feature = "aws")]
+        return Ok(futures::future::Either::Right(stream));
+
+        #[cfg(not(feature = "aws"))]
+        Ok(stream)
     }
 
     pub async fn stream_recoverable(
@@ -408,6 +485,7 @@ pub struct ClientBuilder {
     timeout: Option<Duration>,
     fallback_config: Option<FallbackConfig>,
     resilience_config: Option<ResilienceConfig>,
+    event_bus: Option<Arc<EventBus>>,
 
     #[cfg(feature = "aws")]
     aws_region: Option<String>,
@@ -574,6 +652,12 @@ impl ClientBuilder {
         self
     }
 
+    /// Attach an [`EventBus`] for non-blocking observability events.
+    pub fn event_bus(mut self, bus: Arc<EventBus>) -> Self {
+        self.event_bus = Some(bus);
+        self
+    }
+
     pub async fn build(self) -> Result<Client> {
         let provider = self.provider.unwrap_or_else(CloudProvider::from_env);
 
@@ -706,6 +790,7 @@ impl ClientBuilder {
             http,
             fallback_config: self.fallback_config,
             resilience,
+            event_bus: self.event_bus,
         })
     }
 }

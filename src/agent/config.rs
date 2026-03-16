@@ -181,12 +181,24 @@ impl SecurityConfig {
 }
 
 /// Budget and cost control configuration.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct BudgetConfig {
     /// Maximum cost in USD
     pub max_cost_usd: Option<Decimal>,
     /// Model to fall back to when budget exceeded
     pub fallback_model: Option<String>,
+    /// Budget usage percentage (0-100) at which to emit a warning alert
+    pub alert_threshold_pct: u32,
+}
+
+impl Default for BudgetConfig {
+    fn default() -> Self {
+        Self {
+            max_cost_usd: None,
+            fallback_model: None,
+            alert_threshold_pct: 80,
+        }
+    }
 }
 
 impl BudgetConfig {
@@ -201,6 +213,11 @@ impl BudgetConfig {
 
     pub fn fallback(mut self, model: impl Into<String>) -> Self {
         self.fallback_model = Some(model.into());
+        self
+    }
+
+    pub fn alert_threshold(mut self, pct: u32) -> Self {
+        self.alert_threshold_pct = pct.min(100);
         self
     }
 }
