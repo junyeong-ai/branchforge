@@ -32,14 +32,22 @@ The runtime provides three complementary observability layers.
 
 `EventBus` provides fire-and-forget event dispatch for metrics/logging:
 
-| EventKind | Emitted When | Payload |
-|-----------|-------------|---------|
-| `ToolExecuted` | Tool completes | tool_name, duration_ms, is_error |
-| `TokensConsumed` | API response received | input/output tokens, model |
-| `SessionCompacted` | Compaction completes | summary text, saved_tokens |
-| `BranchForked` | Branch created | branch_name, ancestor |
-| `CheckpointCreated` | Checkpoint created | label, note |
+| EventKind | Emitted By Runtime | Payload |
+|-----------|-------------------|---------|
+| `ToolExecuted` | Yes — tool completes | tool_name, duration_ms, is_error |
+| `TokensConsumed` | Yes — API response | input/output tokens, model |
+| `SessionCompacted` | Yes — compaction | summary text, saved_tokens |
+| `BranchForked` | Available | branch_name, ancestor |
+| `CheckpointCreated` | Available | label, note |
+| `RequestSent` | Available | request metadata |
+| `ResponseReceived` | Available | response metadata |
+| `StreamChunk` | Available | chunk data |
+| `Error` | Available | error details |
+| `SessionChanged` | Available | session state |
+| `BudgetAlert` | Available | budget threshold |
 | `Custom(&str)` | User-defined | Any JSON |
+
+Events marked "Available" are defined for subscriber use but not yet emitted by the runtime. Use `EventBus::emit()` in hooks or custom code to produce them.
 
 EventBus subscribers never block agent execution. Use for Prometheus metrics, structured logging, or vector store indexing.
 

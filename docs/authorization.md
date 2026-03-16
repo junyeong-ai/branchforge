@@ -58,7 +58,9 @@ let agent = Agent::builder()
 // Supervised for specific tools only
 let agent = Agent::builder()
     .auth(Auth::from_env()).await?
-    .execution_mode(ExecutionMode::supervised_for(["Bash", "Write"]))
+    .execution_mode(ExecutionMode::SupervisedFor(
+        ["Bash", "Write"].into_iter().map(String::from).collect()
+    ))
     .build().await?;
 ```
 
