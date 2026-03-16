@@ -326,13 +326,12 @@ impl Client {
 
         let response = self.adapter.send_stream(&self.http, request).await?;
 
-        #[cfg(feature = "aws")]
-        if self.adapter.stream_format() == adapter::StreamFormat::AwsEventStream {
-            let stream = AwsEventStreamParser::new(
-                response.bytes_stream(),
-                adapter::bedrock::BedrockAdapter::parse_converse_stream_event,
-            );
-            return Ok(futures::future::Either::Left(stream));
+        if self.adapter.stream_format() != adapter::StreamFormat::Sse {
+            let binary_stream = self
+                .adapter
+                .create_binary_stream(Box::pin(response.bytes_stream()))
+                .expect("binary stream provider must return Some from create_binary_stream");
+            return Ok(futures::future::Either::Left(binary_stream));
         }
 
         let adapter = Arc::clone(&self.adapter);
@@ -340,11 +339,7 @@ impl Client {
             adapter.parse_stream_event(json)
         });
 
-        #[cfg(feature = "aws")]
-        return Ok(futures::future::Either::Right(stream));
-
-        #[cfg(not(feature = "aws"))]
-        Ok(stream)
+        Ok(futures::future::Either::Right(stream))
     }
 
     pub async fn stream_recoverable(

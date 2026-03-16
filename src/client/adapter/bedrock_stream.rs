@@ -15,42 +15,11 @@
 
 use bytes::{Buf, BytesMut};
 
-// ---------------------------------------------------------------------------
-// CRC-32 (ISO 3309 / ITU-T V.42) – polynomial 0x04C11DB7
-//
-// AWS EventStream uses standard CRC-32, NOT CRC-32 (Castagnoli).
-// Reversed polynomial: 0xEDB88320
-// ---------------------------------------------------------------------------
-
-/// Precomputed CRC-32 lookup table for byte-at-a-time computation.
-const CRC32_TABLE: [u32; 256] = {
-    let mut table = [0u32; 256];
-    let mut i: usize = 0;
-    while i < 256 {
-        let mut crc = i as u32;
-        let mut j = 0;
-        while j < 8 {
-            if crc & 1 != 0 {
-                crc = (crc >> 1) ^ 0xEDB8_8320; // reversed polynomial (standard CRC-32)
-            } else {
-                crc >>= 1;
-            }
-            j += 1;
-        }
-        table[i] = crc;
-        i += 1;
-    }
-    table
-};
-
-/// Compute CRC-32 over the given byte slice.
+/// Compute CRC-32 (ISO 3309) over the given byte slice.
+///
+/// AWS EventStream uses standard CRC-32, NOT CRC-32C (Castagnoli).
 fn crc32(data: &[u8]) -> u32 {
-    let mut crc: u32 = 0xFFFF_FFFF;
-    for &byte in data {
-        let index = ((crc ^ byte as u32) & 0xFF) as usize;
-        crc = CRC32_TABLE[index] ^ (crc >> 8);
-    }
-    crc ^ 0xFFFF_FFFF
+    crc32fast::hash(data)
 }
 
 /// Minimum frame size: 8 (prelude) + 4 (prelude CRC) + 4 (message CRC) = 16

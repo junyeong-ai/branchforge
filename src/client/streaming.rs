@@ -202,12 +202,15 @@ pin_project! {
     /// Wraps a byte stream from Bedrock's `converse-stream` endpoint and yields
     /// [`StreamItem`]s by decoding the binary Event Stream frames, extracting the
     /// JSON payload from each, and converting them via a caller-supplied closure.
+    ///
+    /// The parser function receives `(event_type, json_payload)` as separate
+    /// arguments so it can dispatch on the event type directly.
     pub struct AwsEventStreamParser<S> {
         #[pin]
         inner: S,
         decoder: crate::client::adapter::bedrock_stream::AwsEventStreamDecoder,
         pending: std::collections::VecDeque<StreamItem>,
-        event_parser: Box<dyn Fn(&str) -> Option<StreamItem> + Send + Sync>,
+        event_parser: Box<dyn Fn(&str, &str) -> Option<StreamItem> + Send + Sync>,
     }
 }
 
@@ -218,7 +221,7 @@ where
 {
     pub fn new(
         inner: S,
-        event_parser: impl Fn(&str) -> Option<StreamItem> + Send + Sync + 'static,
+        event_parser: impl Fn(&str, &str) -> Option<StreamItem> + Send + Sync + 'static,
     ) -> Self {
         Self {
             inner,
@@ -261,17 +264,9 @@ where
                             "event" => {
                                 if let Some(json_str) = msg.payload_str()
                                     && !json_str.is_empty()
+                                    && let Some(item) = (this.event_parser)(event_type, json_str)
                                 {
-                                    // Prepend event type so the parser can dispatch
-                                    // without needing a separate channel for headers.
-                                    let prefixed = if !event_type.is_empty() {
-                                        format!("__event_type={event_type}\n{json_str}")
-                                    } else {
-                                        json_str.to_string()
-                                    };
-                                    if let Some(item) = (this.event_parser)(&prefixed) {
-                                        this.pending.push_back(item);
-                                    }
+                                    this.pending.push_back(item);
                                 }
                             }
                             "exception" => {
@@ -287,7 +282,10 @@ where
                                 })));
                             }
                             _ => {
-                                // Unknown message type; skip.
+                                tracing::debug!(
+                                    message_type,
+                                    "Skipping unknown AWS EventStream message type"
+                                );
                             }
                         }
                     }
@@ -320,12 +318,7 @@ where
                                 && !json_str.is_empty()
                             {
                                 let et = msg.header_str(":event-type").unwrap_or("");
-                                let prefixed = if !et.is_empty() {
-                                    format!("__event_type={et}\n{json_str}")
-                                } else {
-                                    json_str.to_string()
-                                };
-                                if let Some(item) = (this.event_parser)(&prefixed) {
+                                if let Some(item) = (this.event_parser)(et, json_str) {
                                     this.pending.push_back(item);
                                 }
                             }

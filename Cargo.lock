@@ -687,6 +687,7 @@ dependencies = [
  "base64",
  "bytes",
  "chrono",
+ "crc32fast",
  "dashmap",
  "directories",
  "futures",

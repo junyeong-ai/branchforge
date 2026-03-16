@@ -16,12 +16,16 @@ use aws_smithy_runtime_api::client::identity::Identity;
 use secrecy::ExposeSecret;
 use serde_json::{Value, json};
 
+use std::pin::Pin;
+
+use futures::Stream;
+
 use super::base::RequestExecutor;
 use super::config::ProviderConfig;
 use super::token_cache::{AwsCredentialsCache, CachedAwsCredentials, new_aws_credentials_cache};
 use super::traits::ProviderAdapter;
 use crate::client::messages::{ApiTool, CreateMessageRequest};
-use crate::client::streaming::StreamItem;
+use crate::client::streaming::{AwsEventStreamParser, StreamItem};
 use crate::types::{
     ApiResponse, ContentBlock, Role, StopReason, ToolResultContent, ToolUseBlock, Usage,
 };
@@ -522,26 +526,14 @@ impl BedrockAdapter {
 
     /// Parse a Bedrock Converse Stream event.
     ///
-    /// AWS EventStream frames carry the event type in the `:event-type` header,
-    /// and the JSON payload is flat (no wrapper key).  The caller
-    /// (`AwsEventStreamParser`) prepends `__event_type=<type>\n` to the JSON
-    /// string so we can dispatch without modifying the streaming infrastructure.
+    /// AWS EventStream frames carry the event type in the `:event-type` header
+    /// and the JSON payload is flat (no wrapper key). The `AwsEventStreamParser`
+    /// passes these as separate arguments.
     ///
     /// Event types: `contentBlockDelta`, `contentBlockStart`, `contentBlockStop`,
     /// `messageStart`, `messageStop`, `metadata`.
-    pub(crate) fn parse_converse_stream_event(raw: &str) -> Option<StreamItem> {
+    pub(crate) fn parse_converse_stream_event(event_type: &str, json: &str) -> Option<StreamItem> {
         use crate::types::{ContentDelta, MessageDeltaData, StreamEvent};
-
-        // Extract event type prefix if present: "__event_type=<type>\n<json>"
-        let (event_type, json) = if let Some(rest) = raw.strip_prefix("__event_type=") {
-            if let Some(nl_pos) = rest.find('\n') {
-                (&rest[..nl_pos], &rest[nl_pos + 1..])
-            } else {
-                ("", raw)
-            }
-        } else {
-            ("", raw)
-        };
 
         let v: Value = serde_json::from_str(json)
             .inspect_err(|e| {
@@ -618,17 +610,17 @@ impl BedrockAdapter {
                 Some(StreamItem::Event(StreamEvent::ContentBlockStop { index }))
             }
             "messageStop" => {
-                let _stop_reason = v
-                    .get("stopReason")
-                    .and_then(|r| r.as_str())
-                    .map(|reason| match reason {
-                        "end_turn" => StopReason::EndTurn,
-                        "tool_use" => StopReason::ToolUse,
-                        "max_tokens" => StopReason::MaxTokens,
-                        "content_filtered" => StopReason::Refusal,
-                        "stop_sequence" => StopReason::StopSequence,
-                        _ => StopReason::EndTurn,
-                    });
+                let _stop_reason =
+                    v.get("stopReason")
+                        .and_then(|r| r.as_str())
+                        .map(|reason| match reason {
+                            "end_turn" => StopReason::EndTurn,
+                            "tool_use" => StopReason::ToolUse,
+                            "max_tokens" => StopReason::MaxTokens,
+                            "content_filtered" => StopReason::Refusal,
+                            "stop_sequence" => StopReason::StopSequence,
+                            _ => StopReason::EndTurn,
+                        });
                 Some(StreamItem::Event(StreamEvent::MessageStop))
             }
             "messageStart" => None,
@@ -636,7 +628,8 @@ impl BedrockAdapter {
                 let u = v.get("usage")?;
                 let usage = Usage {
                     input_tokens: u.get("inputTokens").and_then(|v| v.as_u64()).unwrap_or(0) as u32,
-                    output_tokens: u.get("outputTokens").and_then(|v| v.as_u64()).unwrap_or(0) as u32,
+                    output_tokens: u.get("outputTokens").and_then(|v| v.as_u64()).unwrap_or(0)
+                        as u32,
                     ..Default::default()
                 };
                 Some(StreamItem::Event(StreamEvent::MessageDelta {
@@ -668,9 +661,20 @@ impl ProviderAdapter for BedrockAdapter {
 
     fn parse_stream_event(&self, _json: &str) -> Option<StreamItem> {
         // Bedrock stream events are parsed through the binary Event Stream
-        // decoder in the custom StreamParser path, not via SSE JSON events.
-        // This method is unused for AwsEventStream format.
+        // decoder via create_binary_stream, not via SSE JSON events.
         None
+    }
+
+    fn create_binary_stream(
+        &self,
+        byte_stream: Pin<
+            Box<dyn Stream<Item = std::result::Result<bytes::Bytes, reqwest::Error>> + Send>,
+        >,
+    ) -> Option<Pin<Box<dyn Stream<Item = crate::Result<StreamItem>> + Send>>> {
+        Some(Box::pin(AwsEventStreamParser::new(
+            byte_stream,
+            Self::parse_converse_stream_event,
+        )))
     }
 
     async fn build_url(&self, model: &str, stream: bool) -> String {
@@ -899,29 +903,21 @@ mod tests {
         assert_eq!(content[0]["toolResult"]["status"], "success");
     }
 
-    /// Helper: build the `__event_type=<type>\n<json>` format that
-    /// `AwsEventStreamParser` produces for `parse_converse_stream_event`.
-    fn prefixed(event_type: &str, json: &str) -> String {
-        format!("__event_type={event_type}\n{json}")
-    }
-
     #[test]
     fn test_parse_stream_text_delta() {
-        let input = prefixed(
+        let item = BedrockAdapter::parse_converse_stream_event(
             "contentBlockDelta",
             r#"{"contentBlockIndex":0,"delta":{"text":"Hello world"}}"#,
         );
-        let item = BedrockAdapter::parse_converse_stream_event(&input);
         assert!(matches!(item, Some(StreamItem::Text(ref t)) if t == "Hello world"));
     }
 
     #[test]
     fn test_parse_stream_tool_use_start() {
-        let input = prefixed(
+        let item = BedrockAdapter::parse_converse_stream_event(
             "contentBlockStart",
             r#"{"contentBlockIndex":1,"start":{"toolUse":{"toolUseId":"tool_abc","name":"get_weather"}}}"#,
         );
-        let item = BedrockAdapter::parse_converse_stream_event(&input);
         match item {
             Some(StreamItem::Event(crate::types::StreamEvent::ContentBlockStart {
                 index,
@@ -937,11 +933,10 @@ mod tests {
 
     #[test]
     fn test_parse_stream_tool_input_delta() {
-        let input = prefixed(
+        let item = BedrockAdapter::parse_converse_stream_event(
             "contentBlockDelta",
             r#"{"contentBlockIndex":1,"delta":{"toolUse":{"input":"{\"loc\":\"NYC\"}"}}}"#,
         );
-        let item = BedrockAdapter::parse_converse_stream_event(&input);
         match item {
             Some(StreamItem::Event(crate::types::StreamEvent::ContentBlockDelta {
                 index,
@@ -956,11 +951,10 @@ mod tests {
 
     #[test]
     fn test_parse_stream_content_block_stop() {
-        let input = prefixed(
+        let item = BedrockAdapter::parse_converse_stream_event(
             "contentBlockStop",
             r#"{"contentBlockIndex":0}"#,
         );
-        let item = BedrockAdapter::parse_converse_stream_event(&input);
         assert!(matches!(
             item,
             Some(StreamItem::Event(
@@ -971,10 +965,15 @@ mod tests {
 
     #[test]
     fn test_parse_stream_message_stop() {
-        let input = prefixed("messageStop", r#"{"stopReason":"end_turn"}"#);
-        let item = BedrockAdapter::parse_converse_stream_event(&input);
+        let item = BedrockAdapter::parse_converse_stream_event(
+            "messageStop",
+            r#"{"stopReason":"end_turn"}"#,
+        );
         assert!(
-            matches!(item, Some(StreamItem::Event(crate::types::StreamEvent::MessageStop))),
+            matches!(
+                item,
+                Some(StreamItem::Event(crate::types::StreamEvent::MessageStop))
+            ),
             "Expected MessageStop, got {:?}",
             item
         );
@@ -982,10 +981,15 @@ mod tests {
 
     #[test]
     fn test_parse_stream_message_stop_tool_use() {
-        let input = prefixed("messageStop", r#"{"stopReason":"tool_use"}"#);
-        let item = BedrockAdapter::parse_converse_stream_event(&input);
+        let item = BedrockAdapter::parse_converse_stream_event(
+            "messageStop",
+            r#"{"stopReason":"tool_use"}"#,
+        );
         assert!(
-            matches!(item, Some(StreamItem::Event(crate::types::StreamEvent::MessageStop))),
+            matches!(
+                item,
+                Some(StreamItem::Event(crate::types::StreamEvent::MessageStop))
+            ),
             "Expected MessageStop, got {:?}",
             item
         );
@@ -993,11 +997,10 @@ mod tests {
 
     #[test]
     fn test_parse_stream_metadata_usage() {
-        let input = prefixed(
+        let item = BedrockAdapter::parse_converse_stream_event(
             "metadata",
             r#"{"usage":{"inputTokens":100,"outputTokens":50},"metrics":{"latencyMs":123}}"#,
         );
-        let item = BedrockAdapter::parse_converse_stream_event(&input);
         match item {
             Some(StreamItem::Event(crate::types::StreamEvent::MessageDelta { usage, .. })) => {
                 assert_eq!(usage.input_tokens, 100);
@@ -1009,23 +1012,25 @@ mod tests {
 
     #[test]
     fn test_parse_stream_message_start_ignored() {
-        let input = prefixed("messageStart", r#"{"role":"assistant"}"#);
-        let item = BedrockAdapter::parse_converse_stream_event(&input);
+        let item =
+            BedrockAdapter::parse_converse_stream_event("messageStart", r#"{"role":"assistant"}"#);
         assert!(item.is_none());
     }
 
     #[test]
     fn test_parse_stream_unknown_event_ignored() {
-        let input = prefixed("unknownEvent", r#"{"data":"something"}"#);
-        let item = BedrockAdapter::parse_converse_stream_event(&input);
+        let item =
+            BedrockAdapter::parse_converse_stream_event("unknownEvent", r#"{"data":"something"}"#);
         assert!(item.is_none());
     }
 
     #[test]
-    fn test_parse_stream_without_prefix_returns_none() {
-        // Raw JSON without __event_type= prefix should return None
-        let json = r#"{"contentBlockDelta":{"delta":{"text":"hi"}}}"#;
-        let item = BedrockAdapter::parse_converse_stream_event(json);
+    fn test_parse_stream_empty_event_type() {
+        // Empty event type should fall through to the catch-all and return None
+        let item = BedrockAdapter::parse_converse_stream_event(
+            "",
+            r#"{"contentBlockDelta":{"delta":{"text":"hi"}}}"#,
+        );
         assert!(item.is_none());
     }
 }

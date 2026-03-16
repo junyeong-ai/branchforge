@@ -27,13 +27,12 @@ use crate::hooks::{HookContext, HookEvent, HookInput, HookManager};
 use crate::session::ToolExecution;
 use crate::session::{MessageMetadata, SessionAccessScope, SessionManager, ToolState};
 use crate::types::{
-    AuthorizationDenied, ContentBlock, ContentDelta, StopReason, StreamEvent, ToolResultBlock, ToolUseBlock,
-    Usage, context_window,
+    AuthorizationDenied, ContentBlock, ContentDelta, StopReason, StreamEvent, ToolResultBlock,
+    ToolUseBlock, Usage, context_window,
 };
 use crate::{Client, ToolRegistry};
 
-type BoxedItemStream =
-    Pin<Box<dyn Stream<Item = crate::Result<StreamItem>> + Send>>;
+type BoxedItemStream = Pin<Box<dyn Stream<Item = crate::Result<StreamItem>> + Send>>;
 
 impl Agent {
     pub async fn execute_stream(
@@ -534,27 +533,18 @@ impl StreamState {
 
         self.metrics.record_api_call();
 
-        // Select the appropriate stream parser based on the provider's wire format.
-        // Bedrock uses AWS EventStream binary framing; Anthropic/others use SSE text.
-        #[cfg(feature = "aws")]
-        let is_aws = self.cfg.client.adapter().stream_format()
-            == crate::client::adapter::StreamFormat::AwsEventStream;
-        #[cfg(not(feature = "aws"))]
-        let is_aws = false;
-
-        let item_stream: BoxedItemStream = if is_aws {
-            #[cfg(feature = "aws")]
-            {
-                Box::pin(crate::client::AwsEventStreamParser::new(
-                    response.bytes_stream(),
-                    crate::client::adapter::bedrock::BedrockAdapter::parse_converse_stream_event,
-                ))
-            }
-            #[cfg(not(feature = "aws"))]
-            unreachable!()
+        // Select the appropriate stream parser based on the provider.
+        // Providers that use a binary format (e.g. Bedrock's AWS EventStream)
+        // return a custom stream from create_binary_stream; others use SSE.
+        let item_stream: BoxedItemStream = if self.cfg.client.adapter().stream_format()
+            != crate::client::adapter::StreamFormat::Sse
+        {
+            self.cfg
+                .client
+                .adapter()
+                .create_binary_stream(Box::pin(response.bytes_stream()))
+                .expect("non-SSE provider must implement create_binary_stream")
         } else {
-            // For SSE-based providers (Anthropic, etc.), use the default SSE parser.
-            // The adapter-specific event parser is passed to handle provider quirks.
             Box::pin(crate::client::StreamParser::new(response.bytes_stream()))
         };
 
@@ -699,8 +689,8 @@ impl StreamState {
             StreamEvent::ContentBlockStop { .. } => {
                 // Finalize accumulated tool_use and push to pending_tool_uses.
                 if let Some((mut tool_use, json_buf)) = self.accumulating_tool_use.take() {
-                    let input: serde_json::Value = serde_json::from_str(&json_buf)
-                        .unwrap_or(serde_json::json!({}));
+                    let input: serde_json::Value =
+                        serde_json::from_str(&json_buf).unwrap_or(serde_json::json!({}));
                     tool_use.input = input;
                     self.pending_tool_uses.push(tool_use);
                 }

@@ -1,8 +1,10 @@
 //! Provider adapter trait definition.
 
 use std::fmt::Debug;
+use std::pin::Pin;
 
 use async_trait::async_trait;
+use futures::Stream;
 
 use super::config::{ModelType, ProviderConfig};
 use crate::client::messages::{CountTokensRequest, CountTokensResponse, CreateMessageRequest};
@@ -77,6 +79,20 @@ pub trait ProviderAdapter: Send + Sync + Debug {
     /// should override this so the client can choose the right decoder.
     fn stream_format(&self) -> StreamFormat {
         StreamFormat::Sse
+    }
+
+    /// Create a provider-specific stream parser for the given byte stream.
+    ///
+    /// Returns `Some(stream)` if the provider uses a binary/non-SSE format
+    /// (e.g. AWS EventStream). Returns `None` if the provider uses the
+    /// default SSE parser.
+    fn create_binary_stream(
+        &self,
+        _byte_stream: Pin<
+            Box<dyn Stream<Item = std::result::Result<bytes::Bytes, reqwest::Error>> + Send>,
+        >,
+    ) -> Option<Pin<Box<dyn Stream<Item = Result<StreamItem>> + Send>>> {
+        None
     }
 
     async fn apply_auth_headers(&self, req: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
