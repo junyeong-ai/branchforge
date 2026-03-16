@@ -233,8 +233,14 @@ mod tests {
         assert_eq!(list.len(), 1);
         assert_eq!(list[0].id, id);
 
-        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-        assert!(!mgr.is_running(&id).await);
+        // Wait for the process to finish; retry to handle CI timing variance.
+        for _ in 0..10 {
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            if !mgr.is_running(&id).await {
+                return;
+            }
+        }
+        panic!("process still running after 1 second");
     }
 
     #[tokio::test]
