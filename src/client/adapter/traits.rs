@@ -19,8 +19,8 @@ use crate::{Error, Result};
 ///   OpenAI, and Gemini (`alt=sse`).  The built-in [`StreamParser`] handles
 ///   this format.
 /// - **AwsEventStream** — AWS binary Event Stream framing.  Used by Bedrock's
-///   `invoke-with-response-stream`.  Requires a dedicated decoder (not yet
-///   implemented — the adapter falls back to non-streaming for now).
+///   `converse-stream`.  The [`AwsEventStreamParser`](crate::client::AwsEventStreamParser)
+///   decodes binary frames and extracts JSON payloads for event parsing.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum StreamFormat {
     /// Standard Server-Sent Events (`data: {json}\n\n`).

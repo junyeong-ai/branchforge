@@ -15,7 +15,9 @@ mod traits;
 mod token_cache;
 
 #[cfg(feature = "aws")]
-mod bedrock;
+pub(crate) mod bedrock;
+#[cfg(feature = "aws")]
+pub(crate) mod bedrock_stream;
 #[cfg(feature = "azure")]
 mod foundry;
 #[cfg(feature = "gcp")]

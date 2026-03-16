@@ -21,6 +21,7 @@ use super::config::ProviderConfig;
 use super::token_cache::{AwsCredentialsCache, CachedAwsCredentials, new_aws_credentials_cache};
 use super::traits::ProviderAdapter;
 use crate::client::messages::{ApiTool, CreateMessageRequest};
+use crate::client::streaming::StreamItem;
 use crate::types::{
     ApiResponse, ContentBlock, Role, StopReason, ToolResultContent, ToolUseBlock, Usage,
 };
@@ -484,6 +485,181 @@ impl BedrockAdapter {
             .await?;
         RequestExecutor::post_bytes(http, url, body_bytes, headers).await
     }
+
+    async fn execute_stream_request(
+        &self,
+        http: &reqwest::Client,
+        url: &str,
+        body_bytes: Vec<u8>,
+        region: &str,
+    ) -> Result<reqwest::Response> {
+        let auth_headers = self
+            .get_auth_headers("POST", url, &body_bytes, region)
+            .await?;
+
+        let mut req = http
+            .post(url)
+            .header("Content-Type", "application/json")
+            .header("Accept", "application/vnd.amazon.eventstream")
+            .body(body_bytes);
+
+        for (name, value) in auth_headers {
+            req = req.header(&name, &value);
+        }
+
+        let response = req.send().await?;
+        if !response.status().is_success() {
+            let status = response.status().as_u16();
+            let text = response.text().await.unwrap_or_default();
+            return Err(Error::Api {
+                message: text,
+                status: Some(status),
+                error_type: None,
+            });
+        }
+        Ok(response)
+    }
+
+    /// Parse a Bedrock Converse stream event JSON payload into a [`StreamItem`].
+    ///
+    /// Bedrock Converse streaming events use a different shape from Anthropic's
+    /// Messages API.  The event type is determined by the outer key name:
+    ///
+    /// - `contentBlockDelta` -> text or tool-use delta
+    /// - `contentBlockStart`  -> start of a content block
+    /// - `contentBlockStop`   -> end of a content block
+    /// - `messageStart`       -> message metadata (role)
+    /// - `messageStop`        -> stop reason
+    /// - `metadata`           -> usage information
+    pub(crate) fn parse_converse_stream_event(json: &str) -> Option<StreamItem> {
+        use crate::types::{ContentDelta, MessageDeltaData, StreamEvent};
+
+        let v: Value = serde_json::from_str(json)
+            .inspect_err(|e| {
+                tracing::warn!(
+                    "Failed to parse Bedrock stream event: {} - data: {}",
+                    e,
+                    json
+                )
+            })
+            .ok()?;
+
+        // contentBlockDelta: text or tool input delta
+        if let Some(delta_obj) = v.get("contentBlockDelta") {
+            let index = delta_obj
+                .get("contentBlockIndex")
+                .and_then(|i| i.as_u64())
+                .unwrap_or(0) as usize;
+
+            if let Some(delta) = delta_obj.get("delta") {
+                if let Some(text) = delta.get("text").and_then(|t| t.as_str()) {
+                    return Some(StreamItem::Text(text.to_string()));
+                }
+                if let Some(partial_json) = delta
+                    .get("toolUse")
+                    .and_then(|tu| tu.get("input"))
+                    .and_then(|i| i.as_str())
+                {
+                    return Some(StreamItem::Event(StreamEvent::ContentBlockDelta {
+                        index,
+                        delta: ContentDelta::InputJsonDelta {
+                            partial_json: partial_json.to_string(),
+                        },
+                    }));
+                }
+            }
+            return None;
+        }
+
+        // contentBlockStart: new content block
+        if let Some(start_obj) = v.get("contentBlockStart") {
+            let index = start_obj
+                .get("contentBlockIndex")
+                .and_then(|i| i.as_u64())
+                .unwrap_or(0) as usize;
+
+            if let Some(start) = start_obj.get("start")
+                && let Some(tu) = start.get("toolUse")
+            {
+                let id = tu
+                    .get("toolUseId")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let name = tu
+                    .get("name")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                return Some(StreamItem::Event(StreamEvent::ContentBlockStart {
+                    index,
+                    content_block: ContentBlock::ToolUse(ToolUseBlock {
+                        id,
+                        name,
+                        input: json!({}),
+                    }),
+                }));
+            }
+            return None;
+        }
+
+        // contentBlockStop
+        if let Some(stop_obj) = v.get("contentBlockStop") {
+            let index = stop_obj
+                .get("contentBlockIndex")
+                .and_then(|i| i.as_u64())
+                .unwrap_or(0) as usize;
+            return Some(StreamItem::Event(StreamEvent::ContentBlockStop { index }));
+        }
+
+        // messageStop: carries the stop reason
+        if let Some(stop_obj) = v.get("messageStop") {
+            let stop_reason = stop_obj
+                .get("stopReason")
+                .and_then(|r| r.as_str())
+                .map(|reason| match reason {
+                    "end_turn" => StopReason::EndTurn,
+                    "tool_use" => StopReason::ToolUse,
+                    "max_tokens" => StopReason::MaxTokens,
+                    "content_filtered" => StopReason::Refusal,
+                    "stop_sequence" => StopReason::StopSequence,
+                    _ => StopReason::EndTurn,
+                });
+            return Some(StreamItem::Event(StreamEvent::MessageDelta {
+                delta: MessageDeltaData {
+                    stop_reason,
+                    stop_sequence: None,
+                },
+                usage: Usage::default(),
+            }));
+        }
+
+        // messageStart: not particularly useful for the caller but emitted
+        // for completeness.
+        if v.get("messageStart").is_some() {
+            return None;
+        }
+
+        // metadata: usage info (emitted at end of stream)
+        if let Some(meta) = v.get("metadata")
+            && let Some(u) = meta.get("usage")
+        {
+            let usage = Usage {
+                input_tokens: u.get("inputTokens").and_then(|v| v.as_u64()).unwrap_or(0) as u32,
+                output_tokens: u.get("outputTokens").and_then(|v| v.as_u64()).unwrap_or(0) as u32,
+                ..Default::default()
+            };
+            return Some(StreamItem::Event(StreamEvent::MessageDelta {
+                delta: MessageDeltaData {
+                    stop_reason: None,
+                    stop_sequence: None,
+                },
+                usage,
+            }));
+        }
+
+        None
+    }
 }
 
 #[async_trait]
@@ -498,6 +674,13 @@ impl ProviderAdapter for BedrockAdapter {
 
     fn stream_format(&self) -> super::traits::StreamFormat {
         super::traits::StreamFormat::AwsEventStream
+    }
+
+    fn parse_stream_event(&self, _json: &str) -> Option<StreamItem> {
+        // Bedrock stream events are parsed through the binary Event Stream
+        // decoder in the custom StreamParser path, not via SSE JSON events.
+        // This method is unused for AwsEventStream format.
+        None
     }
 
     async fn build_url(&self, model: &str, stream: bool) -> String {
@@ -539,7 +722,8 @@ impl ProviderAdapter for BedrockAdapter {
         let body = self.build_converse_body(&request);
         let body_bytes = serde_json::to_vec(&body)?;
 
-        self.execute_request(http, &url, body_bytes, region).await
+        self.execute_stream_request(http, &url, body_bytes, region)
+            .await
     }
 
     async fn refresh_credentials(&self) -> Result<()> {
@@ -723,5 +907,109 @@ mod tests {
         assert!(content[0].get("toolResult").is_some());
         assert_eq!(content[0]["toolResult"]["toolUseId"], "call_123");
         assert_eq!(content[0]["toolResult"]["status"], "success");
+    }
+
+    #[test]
+    fn test_parse_stream_text_delta() {
+        let json =
+            r#"{"contentBlockDelta":{"contentBlockIndex":0,"delta":{"text":"Hello world"}}}"#;
+        let item = BedrockAdapter::parse_converse_stream_event(json);
+        assert!(matches!(item, Some(StreamItem::Text(ref t)) if t == "Hello world"));
+    }
+
+    #[test]
+    fn test_parse_stream_tool_use_start() {
+        let json = r#"{"contentBlockStart":{"contentBlockIndex":1,"start":{"toolUse":{"toolUseId":"tool_abc","name":"get_weather"}}}}"#;
+        let item = BedrockAdapter::parse_converse_stream_event(json);
+        match item {
+            Some(StreamItem::Event(crate::types::StreamEvent::ContentBlockStart {
+                index,
+                content_block: ContentBlock::ToolUse(tu),
+            })) => {
+                assert_eq!(index, 1);
+                assert_eq!(tu.id, "tool_abc");
+                assert_eq!(tu.name, "get_weather");
+            }
+            other => panic!("Expected ContentBlockStart with ToolUse, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_parse_stream_tool_input_delta() {
+        let json = r#"{"contentBlockDelta":{"contentBlockIndex":1,"delta":{"toolUse":{"input":"{\"loc\":\"NYC\"}"}}}}"#;
+        let item = BedrockAdapter::parse_converse_stream_event(json);
+        match item {
+            Some(StreamItem::Event(crate::types::StreamEvent::ContentBlockDelta {
+                index,
+                delta: crate::types::ContentDelta::InputJsonDelta { partial_json },
+            })) => {
+                assert_eq!(index, 1);
+                assert_eq!(partial_json, r#"{"loc":"NYC"}"#);
+            }
+            other => panic!("Expected InputJsonDelta, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_parse_stream_content_block_stop() {
+        let json = r#"{"contentBlockStop":{"contentBlockIndex":0}}"#;
+        let item = BedrockAdapter::parse_converse_stream_event(json);
+        assert!(matches!(
+            item,
+            Some(StreamItem::Event(
+                crate::types::StreamEvent::ContentBlockStop { index: 0 }
+            ))
+        ));
+    }
+
+    #[test]
+    fn test_parse_stream_message_stop() {
+        let json = r#"{"messageStop":{"stopReason":"end_turn"}}"#;
+        let item = BedrockAdapter::parse_converse_stream_event(json);
+        match item {
+            Some(StreamItem::Event(crate::types::StreamEvent::MessageDelta { delta, .. })) => {
+                assert_eq!(delta.stop_reason, Some(StopReason::EndTurn));
+            }
+            other => panic!("Expected MessageDelta with EndTurn, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_parse_stream_message_stop_tool_use() {
+        let json = r#"{"messageStop":{"stopReason":"tool_use"}}"#;
+        let item = BedrockAdapter::parse_converse_stream_event(json);
+        match item {
+            Some(StreamItem::Event(crate::types::StreamEvent::MessageDelta { delta, .. })) => {
+                assert_eq!(delta.stop_reason, Some(StopReason::ToolUse));
+            }
+            other => panic!("Expected MessageDelta with ToolUse, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_parse_stream_metadata_usage() {
+        let json = r#"{"metadata":{"usage":{"inputTokens":100,"outputTokens":50},"metrics":{"latencyMs":123}}}"#;
+        let item = BedrockAdapter::parse_converse_stream_event(json);
+        match item {
+            Some(StreamItem::Event(crate::types::StreamEvent::MessageDelta { usage, .. })) => {
+                assert_eq!(usage.input_tokens, 100);
+                assert_eq!(usage.output_tokens, 50);
+            }
+            other => panic!("Expected MessageDelta with usage, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_parse_stream_message_start_ignored() {
+        let json = r#"{"messageStart":{"role":"assistant"}}"#;
+        let item = BedrockAdapter::parse_converse_stream_event(json);
+        assert!(item.is_none());
+    }
+
+    #[test]
+    fn test_parse_stream_unknown_event_ignored() {
+        let json = r#"{"unknownEvent":{"data":"something"}}"#;
+        let item = BedrockAdapter::parse_converse_stream_event(json);
+        assert!(item.is_none());
     }
 }

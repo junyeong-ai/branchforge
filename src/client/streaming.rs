@@ -195,30 +195,129 @@ where
     }
 }
 
-/// Convert a non-streaming [`ApiResponse`] into a list of [`StreamItem`]s.
-///
-/// This is used as a fallback when the provider's streaming format is not
-/// supported by [`StreamParser`] (e.g. Bedrock's AWS Event Stream).  The
-/// caller wraps the items in a `futures::stream::iter` to present them as
-/// a stream.
-pub fn api_response_to_stream_items(response: crate::types::ApiResponse) -> Vec<StreamItem> {
-    use crate::types::ContentBlock;
-    let mut items = Vec::new();
-    for block in response.content {
-        match block {
-            ContentBlock::Text { text, .. } => {
-                items.push(StreamItem::Text(text));
-            }
-            ContentBlock::Thinking(tb) => {
-                items.push(StreamItem::Thinking(tb.thinking));
-            }
-            ContentBlock::ToolUse(tu) => {
-                items.push(StreamItem::ToolUseComplete(tu));
-            }
-            _ => {}
+#[cfg(feature = "aws")]
+pin_project! {
+    /// AWS Event Stream binary frame parser.
+    ///
+    /// Wraps a byte stream from Bedrock's `converse-stream` endpoint and yields
+    /// [`StreamItem`]s by decoding the binary Event Stream frames, extracting the
+    /// JSON payload from each, and converting them via a caller-supplied closure.
+    pub struct AwsEventStreamParser<S> {
+        #[pin]
+        inner: S,
+        decoder: crate::client::adapter::bedrock_stream::AwsEventStreamDecoder,
+        pending: std::collections::VecDeque<StreamItem>,
+        event_parser: Box<dyn Fn(&str) -> Option<StreamItem> + Send + Sync>,
+    }
+}
+
+#[cfg(feature = "aws")]
+impl<S> AwsEventStreamParser<S>
+where
+    S: Stream<Item = std::result::Result<Bytes, reqwest::Error>>,
+{
+    pub fn new(
+        inner: S,
+        event_parser: impl Fn(&str) -> Option<StreamItem> + Send + Sync + 'static,
+    ) -> Self {
+        Self {
+            inner,
+            decoder: crate::client::adapter::bedrock_stream::AwsEventStreamDecoder::new(),
+            pending: std::collections::VecDeque::new(),
+            event_parser: Box::new(event_parser),
         }
     }
-    items
+}
+
+#[cfg(feature = "aws")]
+impl<S> Stream for AwsEventStreamParser<S>
+where
+    S: Stream<Item = std::result::Result<Bytes, reqwest::Error>>,
+{
+    type Item = Result<StreamItem>;
+
+    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        let mut this = self.project();
+
+        loop {
+            // Yield any already-decoded items first.
+            if let Some(item) = this.pending.pop_front() {
+                return Poll::Ready(Some(Ok(item)));
+            }
+
+            // Try to decode buffered frames.
+            match this.decoder.decode_all() {
+                Ok(messages) => {
+                    for msg in messages {
+                        let message_type = msg.header_str(":message-type").unwrap_or("");
+                        match message_type {
+                            "event" => {
+                                if let Some(json_str) = msg.payload_str()
+                                    && !json_str.is_empty()
+                                    && let Some(item) = (this.event_parser)(json_str)
+                                {
+                                    this.pending.push_back(item);
+                                }
+                            }
+                            "exception" => {
+                                let exc_type = msg
+                                    .header_str(":exception-type")
+                                    .unwrap_or("unknown")
+                                    .to_string();
+                                let detail = msg.payload_str().unwrap_or("").to_string();
+                                return Poll::Ready(Some(Err(crate::Error::Api {
+                                    message: format!("{}: {}", exc_type, detail),
+                                    status: None,
+                                    error_type: Some(exc_type),
+                                })));
+                            }
+                            _ => {
+                                // Unknown message type; skip.
+                            }
+                        }
+                    }
+                }
+                Err(e) => {
+                    return Poll::Ready(Some(Err(crate::Error::Parse(e.to_string()))));
+                }
+            }
+
+            // If we produced items from decoding, yield them next iteration.
+            if !this.pending.is_empty() {
+                continue;
+            }
+
+            // Need more data from the inner stream.
+            match this.inner.as_mut().poll_next(cx) {
+                Poll::Ready(Some(Ok(bytes))) => {
+                    this.decoder.push(&bytes);
+                    // Loop back to attempt decoding.
+                }
+                Poll::Ready(Some(Err(e))) => {
+                    return Poll::Ready(Some(Err(crate::Error::Network(e))));
+                }
+                Poll::Ready(None) => {
+                    // Stream ended. Drain any remaining frames.
+                    if let Ok(messages) = this.decoder.decode_all() {
+                        for msg in messages {
+                            if msg.header_str(":message-type") == Some("event")
+                                && let Some(json_str) = msg.payload_str()
+                                && !json_str.is_empty()
+                                && let Some(item) = (this.event_parser)(json_str)
+                            {
+                                this.pending.push_back(item);
+                            }
+                        }
+                    }
+                    if let Some(item) = this.pending.pop_front() {
+                        return Poll::Ready(Some(Ok(item)));
+                    }
+                    return Poll::Ready(None);
+                }
+                Poll::Pending => return Poll::Pending,
+            }
+        }
+    }
 }
 
 pin_project! {
