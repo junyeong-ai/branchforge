@@ -429,6 +429,7 @@ fn reconstruct_session_from_row(
         current_plan: plan,
         compact_history: VecDeque::from(compacts),
         graph: SessionGraph::default(),
+        event_bus: None,
     };
     session.graph = build_session_graph(
         session_id,
