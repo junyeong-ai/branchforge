@@ -1,6 +1,6 @@
-//! AWS Bedrock adapter using InvokeModel API (Messages API compatible).
+//! AWS Bedrock adapter using the Converse API.
 //!
-//! Uses the official Anthropic Messages API format with SigV4 signing.
+//! Uses the Bedrock Converse API format with SigV4 signing.
 //! Supports global and regional endpoints as documented at:
 //! <https://platform.claude.com/docs/en/build-with-claude/claude-on-amazon-bedrock>
 
@@ -14,17 +14,17 @@ use aws_sigv4::http_request::{SignableBody, SignableRequest, SigningSettings, si
 use aws_sigv4::sign::v4::SigningParams;
 use aws_smithy_runtime_api::client::identity::Identity;
 use secrecy::ExposeSecret;
+use serde_json::{Value, json};
 
 use super::base::RequestExecutor;
 use super::config::ProviderConfig;
-use super::request::build_cloud_request_body;
 use super::token_cache::{AwsCredentialsCache, CachedAwsCredentials, new_aws_credentials_cache};
 use super::traits::ProviderAdapter;
-use crate::client::messages::CreateMessageRequest;
-use crate::types::ApiResponse;
+use crate::client::messages::{ApiTool, CreateMessageRequest};
+use crate::types::{
+    ApiResponse, ContentBlock, Role, StopReason, ToolResultContent, ToolUseBlock, Usage,
+};
 use crate::{Error, Result};
-
-const ANTHROPIC_VERSION: &str = "bedrock-2023-05-31";
 
 #[derive(Debug)]
 pub struct BedrockAdapter {
@@ -110,12 +110,12 @@ impl BedrockAdapter {
         &self.region
     }
 
-    fn build_invoke_url(&self, model: &str, stream: bool) -> String {
+    fn build_converse_url(&self, model: &str, stream: bool) -> String {
         let region = self.region_for_model(model);
         let endpoint = if stream {
-            "invoke-with-response-stream"
+            "converse-stream"
         } else {
-            "invoke"
+            "converse"
         };
         let encoded_model = urlencoding::encode(model);
 
@@ -125,13 +125,254 @@ impl BedrockAdapter {
         )
     }
 
-    fn build_request_body(&self, request: &CreateMessageRequest) -> serde_json::Value {
-        build_cloud_request_body(
-            request,
-            ANTHROPIC_VERSION,
-            self.config.thinking_budget,
-            self.enable_1m_context,
-        )
+    fn build_converse_body(&self, request: &CreateMessageRequest) -> Value {
+        let mut body = json!({});
+
+        // Convert messages
+        let messages = Self::convert_messages(request);
+        body["messages"] = json!(messages);
+
+        // System prompt
+        if let Some(ref system) = request.system {
+            let text = system.as_text();
+            if !text.is_empty() {
+                body["system"] = json!([{"text": text}]);
+            }
+        }
+
+        // InferenceConfig
+        let mut inference_config = json!({
+            "maxTokens": request.max_tokens,
+        });
+        if let Some(temp) = request.temperature {
+            inference_config["temperature"] = json!(temp);
+        }
+        if let Some(top_p) = request.top_p {
+            inference_config["topP"] = json!(top_p);
+        }
+        if let Some(ref stop) = request.stop_sequences {
+            inference_config["stopSequences"] = json!(stop);
+        }
+        body["inferenceConfig"] = inference_config;
+
+        // Tools
+        if let Some(ref tools) = request.tools {
+            let tool_specs = Self::convert_tools(tools);
+            if !tool_specs.is_empty() {
+                body["toolConfig"] = json!({ "tools": tool_specs });
+            }
+        }
+
+        // Thinking / beta / structured output go in additionalModelRequestFields
+        // (Anthropic-specific fields passed through to the underlying model)
+        let mut additional = json!({});
+        if let Some(ref thinking) = request.thinking {
+            additional["thinking"] = json!(thinking);
+        } else if let Some(budget) = self.config.thinking_budget {
+            additional["thinking"] = json!({
+                "type": "enabled",
+                "budget_tokens": budget
+            });
+        }
+        // Structured output — pass as Anthropic-native output_format
+        if let Some(ref fmt) = request.output_format {
+            additional["output_format"] = json!(fmt);
+        }
+        // Beta features
+        let mut beta_features = Vec::new();
+        if self.enable_1m_context {
+            beta_features.push(super::BetaFeature::Context1M.header_value());
+        }
+        if request.output_format.is_some()
+            || request
+                .tools
+                .as_ref()
+                .is_some_and(|t| t.iter().any(|tool| tool.is_strict()))
+        {
+            beta_features.push(super::BetaFeature::StructuredOutputs.header_value());
+        }
+        if !beta_features.is_empty() {
+            additional["anthropic_beta"] = json!(beta_features);
+        }
+        if additional.as_object().is_some_and(|o| !o.is_empty()) {
+            body["additionalModelRequestFields"] = additional;
+        }
+
+        body
+    }
+
+    fn convert_content_block(block: &ContentBlock) -> Option<Value> {
+        match block {
+            ContentBlock::Text { text, .. } => Some(json!({"text": text})),
+            ContentBlock::ToolUse(tu) => Some(json!({
+                "toolUse": {
+                    "toolUseId": tu.id,
+                    "name": tu.name,
+                    "input": tu.input,
+                }
+            })),
+            ContentBlock::ToolResult(tr) => {
+                let content_text = match &tr.content {
+                    Some(ToolResultContent::Text(t)) => t.clone(),
+                    Some(ToolResultContent::Blocks(blocks)) => blocks
+                        .iter()
+                        .filter_map(|b| match b {
+                            crate::types::ToolResultContentBlock::Text { text } => {
+                                Some(text.as_str())
+                            }
+                            _ => None,
+                        })
+                        .collect::<Vec<_>>()
+                        .join("\n"),
+                    None => String::new(),
+                };
+                let status = if tr.is_error == Some(true) {
+                    "error"
+                } else {
+                    "success"
+                };
+                Some(json!({
+                    "toolResult": {
+                        "toolUseId": tr.tool_use_id,
+                        "content": [{"text": content_text}],
+                        "status": status,
+                    }
+                }))
+            }
+            ContentBlock::Image {
+                source: crate::types::ImageSource::Base64 { media_type, data },
+            } => {
+                let format = match media_type.as_str() {
+                    "image/jpeg" => "jpeg",
+                    "image/png" => "png",
+                    "image/gif" => "gif",
+                    "image/webp" => "webp",
+                    other => other,
+                };
+                Some(json!({
+                    "image": {
+                        "format": format,
+                        "source": {"bytes": data},
+                    }
+                }))
+            }
+            // Skip thinking, redacted thinking, and other internal blocks
+            _ => None,
+        }
+    }
+
+    fn convert_messages(request: &CreateMessageRequest) -> Vec<Value> {
+        let mut messages = Vec::new();
+        for msg in &request.messages {
+            let role = match msg.role {
+                Role::User => "user",
+                Role::Assistant => "assistant",
+            };
+            let content: Vec<Value> = msg
+                .content
+                .iter()
+                .filter_map(Self::convert_content_block)
+                .collect();
+            if !content.is_empty() {
+                messages.push(json!({
+                    "role": role,
+                    "content": content,
+                }));
+            }
+        }
+        messages
+    }
+
+    fn convert_tools(tools: &[ApiTool]) -> Vec<Value> {
+        tools
+            .iter()
+            .filter_map(|tool| match tool {
+                ApiTool::Custom(def) => {
+                    let mut spec = json!({
+                        "name": def.name,
+                        "description": def.description,
+                        "inputSchema": {
+                            "json": def.input_schema,
+                        },
+                    });
+                    if def.strict == Some(true) {
+                        spec["strict"] = json!(true);
+                    }
+                    Some(json!({ "toolSpec": spec }))
+                }
+                // Skip server-side tools as they are Anthropic-specific
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn parse_converse_response(json: Value, model: &str) -> Result<ApiResponse> {
+        let mut content = Vec::new();
+
+        // Parse output.message.content
+        if let Some(output) = json.get("output")
+            && let Some(message) = output.get("message")
+            && let Some(blocks) = message.get("content").and_then(|c| c.as_array())
+        {
+            for block in blocks {
+                if let Some(text) = block.get("text").and_then(|t| t.as_str()) {
+                    content.push(ContentBlock::text(text));
+                }
+                if let Some(tu) = block.get("toolUse") {
+                    let id = tu
+                        .get("toolUseId")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    let name = tu
+                        .get("name")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    let input = tu.get("input").cloned().unwrap_or(json!({}));
+                    content.push(ContentBlock::ToolUse(ToolUseBlock { id, name, input }));
+                }
+            }
+        }
+
+        // Parse stopReason
+        let stop_reason =
+            json.get("stopReason")
+                .and_then(|v| v.as_str())
+                .map(|reason| match reason {
+                    "end_turn" => StopReason::EndTurn,
+                    "tool_use" => StopReason::ToolUse,
+                    "max_tokens" => StopReason::MaxTokens,
+                    "content_filtered" => StopReason::Refusal,
+                    "stop_sequence" => StopReason::StopSequence,
+                    _ => StopReason::EndTurn,
+                });
+
+        // Parse usage
+        let usage = if let Some(u) = json.get("usage") {
+            Usage {
+                input_tokens: u.get("inputTokens").and_then(|v| v.as_u64()).unwrap_or(0) as u32,
+                output_tokens: u.get("outputTokens").and_then(|v| v.as_u64()).unwrap_or(0) as u32,
+                ..Default::default()
+            }
+        } else {
+            Usage::default()
+        };
+
+        // Generate an ID (Converse doesn't return one in the same way)
+        let id = format!("bedrock-{}", uuid::Uuid::new_v4().simple());
+
+        Ok(ApiResponse {
+            id,
+            response_type: "message".into(),
+            role: "assistant".into(),
+            content,
+            model: model.to_string(),
+            stop_reason,
+            stop_sequence: None,
+            usage,
+            context_management: None,
+        })
     }
 
     async fn get_credentials(&self) -> Result<CachedAwsCredentials> {
@@ -255,12 +496,20 @@ impl ProviderAdapter for BedrockAdapter {
         "bedrock"
     }
 
+    fn stream_format(&self) -> super::traits::StreamFormat {
+        super::traits::StreamFormat::AwsEventStream
+    }
+
     async fn build_url(&self, model: &str, stream: bool) -> String {
-        self.build_invoke_url(model, stream)
+        self.build_converse_url(model, stream)
     }
 
     async fn transform_request(&self, request: CreateMessageRequest) -> Result<serde_json::Value> {
-        Ok(self.build_request_body(&request))
+        Ok(self.build_converse_body(&request))
+    }
+
+    fn transform_response(&self, response: serde_json::Value) -> Result<ApiResponse> {
+        Self::parse_converse_response(response, &self.config.models.primary)
     }
 
     async fn send(
@@ -270,25 +519,24 @@ impl ProviderAdapter for BedrockAdapter {
     ) -> Result<ApiResponse> {
         let model = request.model.clone();
         let region = self.region_for_model(&model);
-        let url = self.build_invoke_url(&model, false);
-        let body = self.build_request_body(&request);
+        let url = self.build_converse_url(&model, false);
+        let body = self.build_converse_body(&request);
         let body_bytes = serde_json::to_vec(&body)?;
 
         let response = self.execute_request(http, &url, body_bytes, region).await?;
         let json: serde_json::Value = response.json().await?;
-        self.transform_response(json)
+        Self::parse_converse_response(json, &model)
     }
 
     async fn send_stream(
         &self,
         http: &reqwest::Client,
-        mut request: CreateMessageRequest,
+        request: CreateMessageRequest,
     ) -> Result<reqwest::Response> {
-        request.stream = Some(true);
         let model = request.model.clone();
         let region = self.region_for_model(&model);
-        let url = self.build_invoke_url(&model, true);
-        let body = self.build_request_body(&request);
+        let url = self.build_converse_url(&model, true);
+        let body = self.build_converse_body(&request);
         let body_bytes = serde_json::to_vec(&body)?;
 
         self.execute_request(http, &url, body_bytes, region).await
@@ -307,7 +555,7 @@ impl ProviderAdapter for BedrockAdapter {
 mod tests {
     use super::*;
     use crate::client::adapter::{BetaFeature, ModelConfig};
-    use serde_json::json;
+    use crate::types::{Message, ToolResultBlock};
 
     #[test]
     fn test_url_encoding() {
@@ -318,28 +566,28 @@ mod tests {
     }
 
     #[test]
-    fn test_invoke_url_format() {
+    fn test_converse_url_format() {
         let model = "global.anthropic.claude-sonnet-4-5-20250929-v1:0";
         let encoded = urlencoding::encode(model);
         let url = format!(
-            "https://bedrock-runtime.us-east-1.amazonaws.com/model/{}/invoke",
+            "https://bedrock-runtime.us-east-1.amazonaws.com/model/{}/converse",
             encoded
         );
         assert!(url.contains("bedrock-runtime"));
         assert!(url.contains("/model/"));
-        assert!(url.contains("/invoke"));
+        assert!(url.contains("/converse"));
         assert!(url.contains("%3A"));
     }
 
     #[test]
-    fn test_stream_url_format() {
+    fn test_converse_stream_url_format() {
         let model = "global.anthropic.claude-sonnet-4-5-20250929-v1:0";
         let encoded = urlencoding::encode(model);
         let url = format!(
-            "https://bedrock-runtime.us-east-1.amazonaws.com/model/{}/invoke-with-response-stream",
+            "https://bedrock-runtime.us-east-1.amazonaws.com/model/{}/converse-stream",
             encoded
         );
-        assert!(url.contains("/invoke-with-response-stream"));
+        assert!(url.contains("/converse-stream"));
     }
 
     #[test]
@@ -350,27 +598,130 @@ mod tests {
     }
 
     #[test]
-    fn test_request_body() {
-        let body = json!({
-            "anthropic_version": ANTHROPIC_VERSION,
-            "max_tokens": 1024,
-            "messages": [{"role": "user", "content": "Hello"}],
-        });
-        assert_eq!(body["anthropic_version"], "bedrock-2023-05-31");
-        assert_eq!(body["max_tokens"], 1024);
+    fn test_converse_request_body() {
+        let request = CreateMessageRequest::new(
+            "global.anthropic.claude-sonnet-4-5-20250929-v1:0",
+            vec![Message::user("Hello")],
+        )
+        .max_tokens(1024);
+
+        let body = BedrockAdapter::convert_messages(&request);
+        assert_eq!(body.len(), 1);
+        assert_eq!(body[0]["role"], "user");
+        let content = body[0]["content"].as_array().unwrap();
+        assert_eq!(content.len(), 1);
+        assert_eq!(content[0]["text"], "Hello");
     }
 
     #[test]
-    fn test_beta_header() {
-        let beta_value = BetaFeature::Context1M.header_value();
-        let mut body = json!({
-            "anthropic_version": ANTHROPIC_VERSION,
-            "max_tokens": 1024,
-            "messages": [],
+    fn test_converse_response_parsing() {
+        let response = json!({
+            "output": {
+                "message": {
+                    "role": "assistant",
+                    "content": [
+                        {"text": "Hello there!"},
+                    ]
+                }
+            },
+            "stopReason": "end_turn",
+            "usage": {
+                "inputTokens": 100,
+                "outputTokens": 50,
+                "totalTokens": 150
+            }
         });
-        if let Some(obj) = body.as_object_mut() {
-            obj.insert("anthropic_beta".to_string(), json!([beta_value]));
-        }
-        assert_eq!(body["anthropic_beta"][0], beta_value);
+
+        let api_response = BedrockAdapter::parse_converse_response(response, "test-model").unwrap();
+        assert_eq!(api_response.text(), "Hello there!");
+        assert_eq!(api_response.stop_reason, Some(StopReason::EndTurn));
+        assert_eq!(api_response.usage.input_tokens, 100);
+        assert_eq!(api_response.usage.output_tokens, 50);
+    }
+
+    #[test]
+    fn test_converse_response_with_tool_use() {
+        let response = json!({
+            "output": {
+                "message": {
+                    "role": "assistant",
+                    "content": [
+                        {"toolUse": {
+                            "toolUseId": "tool_123",
+                            "name": "get_weather",
+                            "input": {"location": "NYC"}
+                        }}
+                    ]
+                }
+            },
+            "stopReason": "tool_use",
+            "usage": {
+                "inputTokens": 50,
+                "outputTokens": 30
+            }
+        });
+
+        let api_response = BedrockAdapter::parse_converse_response(response, "test-model").unwrap();
+        assert_eq!(api_response.stop_reason, Some(StopReason::ToolUse));
+        let tool_uses = api_response.tool_uses();
+        assert_eq!(tool_uses.len(), 1);
+        assert_eq!(tool_uses[0].name, "get_weather");
+        assert_eq!(tool_uses[0].id, "tool_123");
+        assert_eq!(tool_uses[0].input["location"], "NYC");
+    }
+
+    #[test]
+    fn test_converse_tool_conversion() {
+        use crate::types::ToolDefinition;
+
+        let tool = ToolDefinition::new(
+            "get_weather",
+            "Get weather for a location",
+            json!({
+                "type": "object",
+                "properties": {
+                    "location": {"type": "string"}
+                },
+                "required": ["location"]
+            }),
+        );
+        let api_tools = vec![ApiTool::Custom(tool)];
+        let specs = BedrockAdapter::convert_tools(&api_tools);
+
+        assert_eq!(specs.len(), 1);
+        assert_eq!(specs[0]["toolSpec"]["name"], "get_weather");
+        assert_eq!(
+            specs[0]["toolSpec"]["description"],
+            "Get weather for a location"
+        );
+        assert!(specs[0]["toolSpec"]["inputSchema"]["json"].is_object());
+    }
+
+    #[test]
+    fn test_beta_feature_in_additional_fields() {
+        let beta_value = BetaFeature::Context1M.header_value();
+        let additional = json!({
+            "anthropic_beta": [beta_value],
+        });
+        assert_eq!(additional["anthropic_beta"][0], beta_value);
+    }
+
+    #[test]
+    fn test_convert_tool_result_message() {
+        let tool_result_msg =
+            Message::tool_results(vec![ToolResultBlock::success("call_123", "Sunny, 22C")]);
+        let request = CreateMessageRequest::new(
+            "global.anthropic.claude-sonnet-4-5-20250929-v1:0",
+            vec![tool_result_msg],
+        );
+        let messages = BedrockAdapter::convert_messages(&request);
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0]["role"], "user");
+        let content = messages[0]["content"].as_array().unwrap();
+        assert_eq!(content.len(), 1);
+        assert!(content[0].get("toolResult").is_some());
+        assert_eq!(content[0]["toolResult"]["toolUseId"], "call_123");
+        assert_eq!(content[0]["toolResult"]["status"], "success");
     }
 }

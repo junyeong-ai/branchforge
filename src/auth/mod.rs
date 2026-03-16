@@ -69,6 +69,14 @@ pub enum Auth {
     Foundry {
         resource: String,
     },
+    #[cfg(feature = "openai")]
+    OpenAi {
+        api_key: SecretString,
+    },
+    #[cfg(feature = "gemini")]
+    Gemini {
+        api_key: SecretString,
+    },
 }
 
 impl Auth {
@@ -113,6 +121,20 @@ impl Auth {
         }
     }
 
+    #[cfg(feature = "openai")]
+    pub fn openai(api_key: impl Into<String>) -> Self {
+        Self::OpenAi {
+            api_key: SecretString::from(api_key.into()),
+        }
+    }
+
+    #[cfg(feature = "gemini")]
+    pub fn gemini(api_key: impl Into<String>) -> Self {
+        Self::Gemini {
+            api_key: SecretString::from(api_key.into()),
+        }
+    }
+
     pub fn resolved(credential: Credential) -> Self {
         Self::Resolved(credential)
     }
@@ -131,6 +153,10 @@ impl Auth {
             Self::Vertex { .. } => Ok(Credential::placeholder()),
             #[cfg(feature = "azure")]
             Self::Foundry { .. } => Ok(Credential::placeholder()),
+            #[cfg(feature = "openai")]
+            Self::OpenAi { api_key } => Ok(Credential::api_key(api_key.expose_secret())),
+            #[cfg(feature = "gemini")]
+            Self::Gemini { api_key } => Ok(Credential::api_key(api_key.expose_secret())),
         }
     }
 
@@ -159,6 +185,10 @@ impl Auth {
             Self::Vertex { .. } => Ok((Credential::placeholder(), None)),
             #[cfg(feature = "azure")]
             Self::Foundry { .. } => Ok((Credential::placeholder(), None)),
+            #[cfg(feature = "openai")]
+            Self::OpenAi { api_key } => Ok((Credential::api_key(api_key.expose_secret()), None)),
+            #[cfg(feature = "gemini")]
+            Self::Gemini { api_key } => Ok((Credential::api_key(api_key.expose_secret()), None)),
         }
     }
 
@@ -171,6 +201,10 @@ impl Auth {
             Self::Vertex { .. } => true,
             #[cfg(feature = "azure")]
             Self::Foundry { .. } => true,
+            #[cfg(feature = "openai")]
+            Self::OpenAi { .. } => true,
+            #[cfg(feature = "gemini")]
+            Self::Gemini { .. } => true,
             _ => false,
         }
     }

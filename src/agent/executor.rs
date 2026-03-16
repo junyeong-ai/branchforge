@@ -6,8 +6,10 @@ use tokio::sync::RwLock;
 
 use super::config::AgentConfig;
 use crate::Client;
+use crate::authorization::ExecutionMode;
 use crate::budget::{BudgetTracker, TenantBudget};
 use crate::context::PromptOrchestrator;
+use crate::events::EventBus;
 use crate::hooks::HookManager;
 use crate::session::{SessionAccessScope, SessionManager, ToolState};
 use crate::tools::{ToolRegistry, ToolSearchManager};
@@ -28,6 +30,8 @@ pub struct Agent {
     pub(crate) tool_search_manager: Option<Arc<ToolSearchManager>>,
     pub(crate) session_manager: Option<SessionManager>,
     pub(crate) session_scope: Option<SessionAccessScope>,
+    pub(crate) event_bus: Option<Arc<EventBus>>,
+    pub(crate) execution_mode: ExecutionMode,
 }
 
 impl Agent {
@@ -105,6 +109,8 @@ impl Agent {
             tool_search_manager: None,
             session_manager: None,
             session_scope: None,
+            event_bus: None,
+            execution_mode: ExecutionMode::Auto,
         }
     }
 
@@ -131,6 +137,18 @@ impl Agent {
         self.session_manager = Some(manager);
         self.session_scope = scope;
         self
+    }
+
+    /// Attach an [`EventBus`] for non-blocking observability events.
+    pub fn with_event_bus(mut self, bus: Arc<EventBus>) -> Self {
+        self.event_bus = Some(bus);
+        self
+    }
+
+    /// Returns the event bus, if one was configured.
+    #[must_use]
+    pub fn event_bus(&self) -> Option<&Arc<EventBus>> {
+        self.event_bus.as_ref()
     }
 
     pub(crate) fn initial_messages(mut self, messages: Vec<Message>) -> Self {

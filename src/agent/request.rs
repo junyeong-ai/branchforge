@@ -67,6 +67,14 @@ impl RequestBuilder {
         self
     }
 
+    pub fn current_model(&self) -> &str {
+        &self.model
+    }
+
+    pub fn has_tools(&self) -> bool {
+        !self.tools.names().is_empty()
+    }
+
     pub fn set_model(&mut self, model: &str) {
         self.model = model.to_string();
     }
@@ -155,8 +163,9 @@ impl RequestBuilder {
         }
 
         // Tool-conditional guidelines (cached with static context)
-        let active_tool_names: Vec<&str> = self.tools.names();
-        let guidelines = crate::prompts::build_guidelines_section(&active_tool_names);
+        let active_tool_names: Vec<String> = self.tools.names();
+        let active_tool_refs: Vec<&str> = active_tool_names.iter().map(|s| s.as_str()).collect();
+        let guidelines = crate::prompts::build_guidelines_section(&active_tool_refs);
         if !guidelines.is_empty() {
             blocks.push(self.make_block(
                 &guidelines,

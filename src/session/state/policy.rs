@@ -1,29 +1,35 @@
 //! Session-level authorization configuration for storage.
 //!
 //! These types are simplified serializable versions for session persistence.
-//! For runtime authorization checking with rules, see `crate::authorization::AuthorizationPolicy`.
+//! For runtime tool policy checking with rules, see `crate::authorization::ToolPolicy`.
+//! For runtime execution mode, see `crate::authorization::ExecutionMode`.
 
 use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
 
+/// Serializable execution mode for session persistence.
+///
+/// Maps to [`crate::authorization::ExecutionMode`] at runtime.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum SessionAuthorizationMode {
+pub enum SessionExecutionMode {
+    /// Tools execute automatically when policy allows.
     #[default]
-    Rules,
-    AutoApproveFiles,
-    AllowAll,
-    ReadOnly,
+    Auto,
+    /// Exploration only — read/navigation tools only.
+    Plan,
+    /// All tools require user review.
+    Supervised,
 }
 
 /// Session-level authorization configuration.
 ///
 /// This is a simplified, serializable version for session storage.
-/// For runtime authorization checking with rule patterns, use `crate::authorization::AuthorizationPolicy`.
+/// For runtime tool policy checking with rule patterns, use `crate::authorization::ToolPolicy`.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionAuthorization {
-    pub mode: SessionAuthorizationMode,
+    pub mode: SessionExecutionMode,
     #[serde(default)]
     pub allow: Vec<String>,
     #[serde(default)]

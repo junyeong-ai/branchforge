@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use rust_decimal::Decimal;
 
-use crate::authorization::AuthorizationPolicy;
+use crate::authorization::ToolPolicy;
 use crate::client::messages::DEFAULT_MAX_TOKENS;
 use crate::output_style::OutputStyle;
 use crate::tools::ToolSurface;
@@ -124,7 +124,7 @@ impl ExecutionConfig {
 #[derive(Debug, Clone, Default)]
 pub struct SecurityConfig {
     /// Tool permission policy
-    pub authorization_policy: AuthorizationPolicy,
+    pub authorization_policy: ToolPolicy,
     /// Tool access control
     pub tool_surface: ToolSurface,
     /// Environment variables for tool execution
@@ -134,7 +134,7 @@ pub struct SecurityConfig {
 impl SecurityConfig {
     pub fn permissive() -> Self {
         Self {
-            authorization_policy: AuthorizationPolicy::permissive(),
+            authorization_policy: ToolPolicy::permissive(),
             tool_surface: ToolSurface::All,
             ..Default::default()
         }
@@ -142,13 +142,19 @@ impl SecurityConfig {
 
     pub fn read_only() -> Self {
         Self {
-            authorization_policy: AuthorizationPolicy::read_only(),
+            authorization_policy: ToolPolicy::builder()
+                .allow("Read")
+                .allow("Glob")
+                .allow("Grep")
+                .allow("WebSearch")
+                .allow("WebFetch")
+                .build(),
             tool_surface: ToolSurface::only(["Read", "Glob", "Grep", "WebSearch", "WebFetch"]),
             ..Default::default()
         }
     }
 
-    pub fn authorization_policy(mut self, policy: AuthorizationPolicy) -> Self {
+    pub fn authorization_policy(mut self, policy: ToolPolicy) -> Self {
         self.authorization_policy = policy;
         self
     }

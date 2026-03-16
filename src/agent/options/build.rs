@@ -51,6 +51,8 @@ impl AgentBuilder {
             orchestrator,
         );
 
+        agent.execution_mode = self.execution_mode;
+
         if let Some(messages) = self.initial_messages {
             agent = agent.initial_messages(messages);
         }
@@ -435,9 +437,7 @@ impl AgentBuilder {
             });
 
         if self.authorization_policy_explicit
-            || AgentBuilder::authorization_policy_is_custom(
-                &self.config.security.authorization_policy,
-            )
+            || AgentBuilder::tool_policy_is_custom(&self.config.security.authorization_policy)
         {
             builder = builder.policy(self.config.security.authorization_policy.clone());
         }
@@ -457,7 +457,7 @@ impl AgentBuilder {
             builder = builder.sandbox_config(sc);
         }
 
-        let mut tools = builder.build();
+        let tools = builder.build();
 
         for tool in std::mem::take(&mut self.custom_tools) {
             tools.register(tool);
@@ -573,6 +573,20 @@ impl AgentBuilder {
                     crate::Error::Config("Foundry requires azure_resource".into())
                 })?;
                 builder = builder.azure_resource(resource);
+            }
+            #[cfg(feature = "openai")]
+            CloudProvider::OpenAi => {
+                builder = builder.openai();
+                if let Some(cred) = self.credential.take() {
+                    builder = builder.auth(cred).await?;
+                }
+            }
+            #[cfg(feature = "gemini")]
+            CloudProvider::Gemini => {
+                builder = builder.gemini();
+                if let Some(cred) = self.credential.take() {
+                    builder = builder.auth(cred).await?;
+                }
             }
         }
 

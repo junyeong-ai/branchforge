@@ -184,7 +184,7 @@ pub(crate) async fn maybe_invoke_explicit_skill_command(
         .get_context()
         .check_explicit_skill_permission(&actual_input);
     if !permission.is_allowed() {
-        return Err(crate::Error::Authorization(permission.reason));
+        return Err(crate::Error::Authorization(permission.reason().to_string()));
     }
 
     let typed_input: crate::skills::SkillInput = serde_json::from_value(actual_input.clone())
@@ -302,6 +302,7 @@ pub(crate) async fn handle_compaction(
     config: &ExecutionConfig,
     max_tokens: u64,
     metrics: &mut AgentMetrics,
+    event_bus: Option<&crate::events::EventBus>,
 ) {
     let should_compact = tool_state
         .with_session(|session| {
@@ -325,9 +326,23 @@ pub(crate) async fn handle_compaction(
     let compact_result = tool_state.compact(client).await;
 
     match compact_result {
-        Ok(CompactResult::Compacted { saved_tokens, .. }) => {
+        Ok(CompactResult::Compacted {
+            saved_tokens,
+            ref summary,
+            ..
+        }) => {
             info!(saved_tokens, "Session context compacted");
             metrics.record_compaction();
+            if let Some(bus) = event_bus {
+                bus.emit_simple(
+                    crate::events::EventKind::SessionCompacted,
+                    serde_json::json!({
+                        "session_id": session_id,
+                        "saved_tokens": saved_tokens,
+                        "summary": summary,
+                    }),
+                );
+            }
 
             let state_sections = collect_compaction_state(tools).await;
             if !state_sections.is_empty() {

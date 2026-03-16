@@ -30,7 +30,7 @@ use std::time::Duration;
 use rust_decimal::Decimal;
 
 use crate::auth::{Credential, OAuthConfig};
-use crate::authorization::{AuthorizationMode, AuthorizationPolicy, AuthorizationRule};
+use crate::authorization::{ExecutionMode, ToolPolicy, ToolRule};
 use crate::budget::TenantBudgetManager;
 use crate::client::{CloudProvider, FallbackConfig, ModelConfig, ProviderConfig};
 use crate::common::IndexRegistry;
@@ -62,6 +62,7 @@ pub struct AgentBuilder {
     pub(super) subagent_registry: Option<IndexRegistry<SubagentIndex>>,
     pub(super) rule_indices: Vec<RuleIndex>,
     pub(super) hooks: HookManager,
+    pub(super) execution_mode: ExecutionMode,
     pub(super) custom_tools: Vec<Arc<dyn Tool>>,
     pub(super) memory_provider: Option<LeveledMemoryProvider>,
     pub(super) sandbox_settings: Option<crate::config::SandboxSettings>,
@@ -100,10 +101,8 @@ pub struct AgentBuilder {
 }
 
 impl AgentBuilder {
-    pub(super) fn authorization_policy_is_custom(policy: &AuthorizationPolicy) -> bool {
-        !matches!(policy.mode, AuthorizationMode::Rules)
-            || !policy.rules.is_empty()
-            || !policy.tool_limits.is_empty()
+    pub(super) fn tool_policy_is_custom(policy: &ToolPolicy) -> bool {
+        !policy.rules.is_empty() || !policy.tool_limits.is_empty()
     }
 
     fn parse_session_id(
@@ -128,7 +127,7 @@ impl AgentBuilder {
     /// Sets the complete agent configuration, replacing all defaults.
     pub fn agent_config(mut self, config: AgentConfig) -> Self {
         self.authorization_policy_explicit =
-            Self::authorization_policy_is_custom(&config.security.authorization_policy);
+            Self::tool_policy_is_custom(&config.security.authorization_policy);
         self.config = config;
         self
     }
@@ -198,6 +197,18 @@ impl AgentBuilder {
                 self.model_config = Some(ModelConfig::foundry());
                 self = self.apply_provider_models();
             }
+            #[cfg(feature = "openai")]
+            crate::auth::Auth::OpenAi { .. } => {
+                self.cloud_provider = Some(CloudProvider::OpenAi);
+                self.model_config = Some(ModelConfig::openai());
+                self = self.apply_provider_models();
+            }
+            #[cfg(feature = "gemini")]
+            crate::auth::Auth::Gemini { .. } => {
+                self.cloud_provider = Some(CloudProvider::Gemini);
+                self.model_config = Some(ModelConfig::gemini());
+                self = self.apply_provider_models();
+            }
             _ => {}
         }
 
@@ -249,7 +260,13 @@ impl AgentBuilder {
         self
     }
 
-    #[cfg(any(feature = "aws", feature = "gcp", feature = "azure"))]
+    #[cfg(any(
+        feature = "aws",
+        feature = "gcp",
+        feature = "azure",
+        feature = "openai",
+        feature = "gemini"
+    ))]
     fn apply_provider_models(mut self) -> Self {
         if let Some(ref config) = self.model_config {
             if self.config.model.primary
@@ -438,17 +455,16 @@ impl AgentBuilder {
     // Authorization
     // =========================================================================
 
-    /// Sets the complete permission policy.
-    pub fn authorization_policy(mut self, policy: AuthorizationPolicy) -> Self {
+    /// Sets the complete tool policy.
+    pub fn authorization_policy(mut self, policy: ToolPolicy) -> Self {
         self.authorization_policy_explicit = true;
         self.config.security.authorization_policy = policy;
         self
     }
 
-    /// Sets the authorization mode (permissive, default, or strict).
-    pub fn authorization_mode(mut self, mode: AuthorizationMode) -> Self {
-        self.authorization_policy_explicit = true;
-        self.config.security.authorization_policy.mode = mode;
+    /// Sets the execution mode.
+    pub fn execution_mode(mut self, mode: ExecutionMode) -> Self {
+        self.execution_mode = mode;
         self
     }
 
@@ -459,7 +475,7 @@ impl AgentBuilder {
             .security
             .authorization_policy
             .rules
-            .push(AuthorizationRule::allow_pattern(pattern));
+            .push(ToolRule::allow_pattern(pattern));
         self
     }
 
@@ -470,7 +486,7 @@ impl AgentBuilder {
             .security
             .authorization_policy
             .rules
-            .push(AuthorizationRule::deny_pattern(pattern));
+            .push(ToolRule::deny_pattern(pattern));
         self
     }
 

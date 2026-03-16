@@ -136,8 +136,14 @@ aws = ["aws-config", "aws-credential-types", "aws-sigv4", "aws-smithy-runtime-ap
 gcp = ["gcp_auth"]
 azure = ["azure_identity", "azure_core"]
 
+# OpenAI-compatible providers (GPT-4o, o3, Together, Groq, Ollama, vLLM)
+openai = []
+
+# Google Gemini API
+gemini = []
+
 # All cloud providers
-cloud-all = ["aws", "gcp", "azure"]
+cloud-all = ["aws", "gcp", "azure", "openai", "gemini"]
 
 # Persistence backends
 jsonl = []

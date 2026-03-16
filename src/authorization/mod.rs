@@ -3,10 +3,9 @@
 mod modes;
 mod rules;
 
-pub use modes::AuthorizationMode;
+pub use modes::ExecutionMode;
 pub use rules::{
-    AuthorizationDecision, AuthorizationPolicy, AuthorizationPolicyBuilder, AuthorizationResult,
-    AuthorizationRule, ToolLimits,
+    ToolDecision, ToolLimits, ToolPolicy, ToolPolicyBuilder, ToolRule, ToolRuleDecision,
 };
 
 pub const READ_ONLY_TOOLS: &[&str] = &["Read", "Glob", "Grep", "WebSearch", "WebFetch"];

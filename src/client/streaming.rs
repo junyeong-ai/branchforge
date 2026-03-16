@@ -19,12 +19,35 @@ pub enum StreamItem {
     ToolUseComplete(crate::types::ToolUseBlock),
 }
 
+/// Convert a [`StreamEvent`] into the corresponding [`StreamItem`].
+///
+/// This is used by both [`StreamParser`]'s default path and by provider
+/// adapters that map their wire events to `StreamEvent` first.
+pub fn stream_event_to_item(event: StreamEvent) -> StreamItem {
+    match &event {
+        StreamEvent::ContentBlockDelta {
+            delta: ContentDelta::TextDelta { text },
+            ..
+        } => StreamItem::Text(text.clone()),
+        StreamEvent::ContentBlockDelta {
+            delta: ContentDelta::ThinkingDelta { thinking },
+            ..
+        } => StreamItem::Thinking(thinking.clone()),
+        StreamEvent::ContentBlockDelta {
+            delta: ContentDelta::CitationsDelta { citation },
+            ..
+        } => StreamItem::Citation(citation.clone()),
+        _ => StreamItem::Event(event),
+    }
+}
+
 pin_project! {
     pub struct StreamParser<S> {
         #[pin]
         inner: S,
         buffer: Vec<u8>,
         pos: usize,
+        event_parser: Option<Box<dyn Fn(&str) -> Option<StreamItem> + Send + Sync>>,
     }
 }
 
@@ -37,6 +60,19 @@ where
             inner,
             buffer: Vec::with_capacity(4096),
             pos: 0,
+            event_parser: None,
+        }
+    }
+
+    pub fn with_event_parser(
+        inner: S,
+        parser: impl Fn(&str) -> Option<StreamItem> + Send + Sync + 'static,
+    ) -> Self {
+        Self {
+            inner,
+            buffer: Vec::with_capacity(4096),
+            pos: 0,
+            event_parser: Some(Box::new(parser)),
         }
     }
 
@@ -64,17 +100,29 @@ where
         None
     }
 
-    fn parse_event(event_block: &str) -> Option<StreamEvent> {
+    /// Parse an SSE event block into a [`StreamItem`], using the custom parser
+    /// if one was provided, otherwise falling back to Anthropic `StreamEvent`
+    /// deserialization.
+    #[allow(clippy::needless_borrow)]
+    fn try_parse(
+        event_parser: &Option<Box<dyn Fn(&str) -> Option<StreamItem> + Send + Sync>>,
+        event_block: &str,
+    ) -> Option<StreamItem> {
         let trimmed = event_block.trim();
         if trimmed.is_empty() || trimmed.starts_with(':') {
             return None;
         }
         let json_str = Self::extract_json_data(event_block)?;
-        serde_json::from_str::<StreamEvent>(json_str)
-            .inspect_err(|e| {
-                tracing::warn!("Failed to parse stream event: {} - data: {}", e, json_str)
-            })
-            .ok()
+        if let Some(parser) = event_parser {
+            parser(json_str)
+        } else {
+            serde_json::from_str::<StreamEvent>(json_str)
+                .inspect_err(|e| {
+                    tracing::warn!("Failed to parse stream event: {} - data: {}", e, json_str)
+                })
+                .ok()
+                .map(stream_event_to_item)
+        }
     }
 }
 
@@ -102,7 +150,8 @@ where
                     }
                 };
 
-                let event = Self::parse_event(event_block);
+                let item = Self::try_parse(&*this.event_parser, event_block);
+
                 *this.pos = end_pos + 2;
 
                 if this.buffer.len() > 8192 && *this.pos > this.buffer.len() / 2 {
@@ -110,22 +159,7 @@ where
                     *this.pos = 0;
                 }
 
-                if let Some(event) = event {
-                    let item = match &event {
-                        StreamEvent::ContentBlockDelta {
-                            delta: ContentDelta::TextDelta { text },
-                            ..
-                        } => StreamItem::Text(text.clone()),
-                        StreamEvent::ContentBlockDelta {
-                            delta: ContentDelta::ThinkingDelta { thinking },
-                            ..
-                        } => StreamItem::Thinking(thinking.clone()),
-                        StreamEvent::ContentBlockDelta {
-                            delta: ContentDelta::CitationsDelta { citation },
-                            ..
-                        } => StreamItem::Citation(citation.clone()),
-                        _ => StreamItem::Event(event),
-                    };
+                if let Some(item) = item {
                     return Poll::Ready(Some(Ok(item)));
                 }
                 continue;
@@ -148,8 +182,9 @@ where
                             Ok(s) => s,
                             Err(_) => return Poll::Ready(None),
                         };
-                        if let Some(event) = Self::parse_event(remaining) {
-                            return Poll::Ready(Some(Ok(StreamItem::Event(event))));
+                        let item = Self::try_parse(&*this.event_parser, remaining);
+                        if let Some(item) = item {
+                            return Poll::Ready(Some(Ok(item)));
                         }
                     }
                     return Poll::Ready(None);
@@ -158,6 +193,32 @@ where
             }
         }
     }
+}
+
+/// Convert a non-streaming [`ApiResponse`] into a list of [`StreamItem`]s.
+///
+/// This is used as a fallback when the provider's streaming format is not
+/// supported by [`StreamParser`] (e.g. Bedrock's AWS Event Stream).  The
+/// caller wraps the items in a `futures::stream::iter` to present them as
+/// a stream.
+pub fn api_response_to_stream_items(response: crate::types::ApiResponse) -> Vec<StreamItem> {
+    use crate::types::ContentBlock;
+    let mut items = Vec::new();
+    for block in response.content {
+        match block {
+            ContentBlock::Text { text, .. } => {
+                items.push(StreamItem::Text(text));
+            }
+            ContentBlock::Thinking(tb) => {
+                items.push(StreamItem::Thinking(tb.thinking));
+            }
+            ContentBlock::ToolUse(tu) => {
+                items.push(StreamItem::ToolUseComplete(tu));
+            }
+            _ => {}
+        }
+    }
+    items
 }
 
 pin_project! {
@@ -183,6 +244,17 @@ where
     pub fn new(inner: S) -> Self {
         Self {
             inner: StreamParser::new(inner),
+            recovery: StreamRecoveryState::new(),
+            current_block_type: None,
+        }
+    }
+
+    pub fn with_event_parser(
+        inner: S,
+        parser: impl Fn(&str) -> Option<StreamItem> + Send + Sync + 'static,
+    ) -> Self {
+        Self {
+            inner: StreamParser::with_event_parser(inner, parser),
             recovery: StreamRecoveryState::new(),
             current_block_type: None,
         }
@@ -275,51 +347,56 @@ mod tests {
     #[test]
     fn test_parse_simple_data() {
         let data = r#"data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Hello"}}"#;
-        let event = StreamParser::<EmptyStream>::parse_event(data);
-        assert!(event.is_some());
+        let item = StreamParser::<EmptyStream>::try_parse(&None, data);
+        assert!(item.is_some());
+        assert!(matches!(item, Some(StreamItem::Text(_))));
     }
 
     #[test]
     fn test_parse_event_with_type() {
         let data = "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"Hi\"}}";
-        let event = StreamParser::<EmptyStream>::parse_event(data);
-        assert!(event.is_some());
+        let item = StreamParser::<EmptyStream>::try_parse(&None, data);
+        assert!(item.is_some());
+        assert!(matches!(item, Some(StreamItem::Text(_))));
     }
 
     #[test]
     fn test_parse_message_start() {
         let data = r#"event: message_start
 data: {"type":"message_start","message":{"model":"claude-sonnet-4-5","id":"msg_123","type":"message","role":"assistant","content":[],"stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":10,"output_tokens":1}}}"#;
-        let event = StreamParser::<EmptyStream>::parse_event(data);
-        assert!(event.is_some());
-        assert!(matches!(event, Some(StreamEvent::MessageStart { .. })));
+        let item = StreamParser::<EmptyStream>::try_parse(&None, data);
+        assert!(item.is_some());
+        assert!(matches!(
+            item,
+            Some(StreamItem::Event(StreamEvent::MessageStart { .. }))
+        ));
     }
 
     #[test]
     fn test_skip_done_marker() {
         let data = "data: [DONE]";
-        let event = StreamParser::<EmptyStream>::parse_event(data);
-        assert!(event.is_none());
+        let item = StreamParser::<EmptyStream>::try_parse(&None, data);
+        assert!(item.is_none());
     }
 
     #[test]
     fn test_skip_ping_event() {
         let data = "event: ping\ndata: {\"type\": \"ping\"}";
-        let event = StreamParser::<EmptyStream>::parse_event(data);
-        assert!(event.is_none());
+        let item = StreamParser::<EmptyStream>::try_parse(&None, data);
+        assert!(item.is_none());
     }
 
     #[test]
     fn test_skip_empty_block() {
-        assert!(StreamParser::<EmptyStream>::parse_event("").is_none());
-        assert!(StreamParser::<EmptyStream>::parse_event("   \n  ").is_none());
+        assert!(StreamParser::<EmptyStream>::try_parse(&None, "").is_none());
+        assert!(StreamParser::<EmptyStream>::try_parse(&None, "   \n  ").is_none());
     }
 
     #[test]
     fn test_skip_comment() {
         let data = ": this is a comment";
-        let event = StreamParser::<EmptyStream>::parse_event(data);
-        assert!(event.is_none());
+        let item = StreamParser::<EmptyStream>::try_parse(&None, data);
+        assert!(item.is_none());
     }
 
     #[test]

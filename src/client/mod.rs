@@ -36,12 +36,16 @@ pub use resilience::{
     RetryConfig,
 };
 pub use schema::{strict_schema, transform_for_strict};
-pub use streaming::{RecoverableStream, StreamItem, StreamParser};
+pub use streaming::{RecoverableStream, StreamItem, StreamParser, stream_event_to_item};
 
 #[cfg(feature = "aws")]
 pub use adapter::BedrockAdapter;
 #[cfg(feature = "azure")]
 pub use adapter::FoundryAdapter;
+#[cfg(feature = "gemini")]
+pub use adapter::GeminiAdapter;
+#[cfg(feature = "openai")]
+pub use adapter::OpenAiAdapter;
 #[cfg(feature = "gcp")]
 pub use adapter::VertexAdapter;
 
@@ -242,9 +246,27 @@ impl Client {
         &self,
         request: CreateMessageRequest,
     ) -> Result<impl futures::Stream<Item = Result<StreamItem>> + Send + 'static + use<>> {
+        use futures::future::Either;
+
         request.validate()?;
+
+        if self.adapter.stream_format() == adapter::StreamFormat::AwsEventStream {
+            // AWS Event Stream binary framing (Bedrock) is not yet handled by
+            // StreamParser.  Fall back to a non-streaming request wrapped as a
+            // single-item stream so callers still get correct results.
+            let response = self.adapter.send(&self.http, request).await?;
+            let items = crate::client::streaming::api_response_to_stream_items(response);
+            return Ok(Either::Left(futures::stream::iter(
+                items.into_iter().map(Ok),
+            )));
+        }
+
         let response = self.adapter.send_stream(&self.http, request).await?;
-        Ok(StreamParser::new(response.bytes_stream()))
+        let adapter = Arc::clone(&self.adapter);
+        let stream = StreamParser::with_event_parser(response.bytes_stream(), move |json| {
+            adapter.parse_stream_event(json)
+        });
+        Ok(Either::Right(stream))
     }
 
     pub async fn stream_recoverable(
@@ -260,7 +282,11 @@ impl Client {
     > {
         request.validate()?;
         let response = self.adapter.send_stream(&self.http, request).await?;
-        Ok(RecoverableStream::new(response.bytes_stream()))
+        let adapter = Arc::clone(&self.adapter);
+        Ok(RecoverableStream::with_event_parser(
+            response.bytes_stream(),
+            move |json| adapter.parse_stream_event(json),
+        ))
     }
 
     pub async fn stream_with_recovery(
@@ -391,6 +417,10 @@ pub struct ClientBuilder {
     gcp_region: Option<String>,
     #[cfg(feature = "azure")]
     azure_resource: Option<String>,
+    #[cfg(feature = "openai")]
+    openai_base_url: Option<String>,
+    #[cfg(feature = "gemini")]
+    gemini_base_url: Option<String>,
 }
 
 impl ClientBuilder {
@@ -418,6 +448,14 @@ impl ClientBuilder {
             Auth::Foundry { resource } => {
                 self.provider = Some(CloudProvider::Foundry);
                 self.azure_resource = Some(resource.clone());
+            }
+            #[cfg(feature = "openai")]
+            Auth::OpenAi { .. } => {
+                self.provider = Some(CloudProvider::OpenAi);
+            }
+            #[cfg(feature = "gemini")]
+            Auth::Gemini { .. } => {
+                self.provider = Some(CloudProvider::Gemini);
             }
             _ => {
                 self.provider = Some(CloudProvider::Anthropic);
@@ -457,6 +495,32 @@ impl ClientBuilder {
     pub(crate) fn azure_resource(mut self, resource: String) -> Self {
         self.provider = Some(CloudProvider::Foundry);
         self.azure_resource = Some(resource);
+        self
+    }
+
+    #[cfg(feature = "openai")]
+    pub fn openai(mut self) -> Self {
+        self.provider = Some(CloudProvider::OpenAi);
+        self
+    }
+
+    #[cfg(feature = "openai")]
+    pub fn openai_base_url(mut self, url: impl Into<String>) -> Self {
+        self.provider = Some(CloudProvider::OpenAi);
+        self.openai_base_url = Some(url.into());
+        self
+    }
+
+    #[cfg(feature = "gemini")]
+    pub fn gemini(mut self) -> Self {
+        self.provider = Some(CloudProvider::Gemini);
+        self
+    }
+
+    #[cfg(feature = "gemini")]
+    pub fn gemini_base_url(mut self, url: impl Into<String>) -> Self {
+        self.provider = Some(CloudProvider::Gemini);
+        self.gemini_base_url = Some(url.into());
         self
     }
 
@@ -574,6 +638,50 @@ impl ClientBuilder {
                 let mut adapter = adapter::FoundryAdapter::from_env(config).await?;
                 if let Some(resource) = self.azure_resource {
                     adapter = adapter.resource(resource);
+                }
+                Box::new(adapter)
+            }
+            #[cfg(feature = "openai")]
+            CloudProvider::OpenAi => {
+                let mut adapter = if let Some(ref cred) = self.credential {
+                    use secrecy::ExposeSecret;
+                    if let crate::auth::Credential::ApiKey(key) = cred {
+                        adapter::OpenAiAdapter::from_api_key(config, key.expose_secret())
+                    } else {
+                        adapter::OpenAiAdapter::new(config)
+                    }
+                } else {
+                    adapter::OpenAiAdapter::new(config)
+                };
+                if let Some(ref gw) = self.gateway
+                    && let Some(ref url) = gw.base_url
+                {
+                    adapter = adapter.base_url(url);
+                }
+                if let Some(url) = self.openai_base_url {
+                    adapter = adapter.base_url(url);
+                }
+                Box::new(adapter)
+            }
+            #[cfg(feature = "gemini")]
+            CloudProvider::Gemini => {
+                let mut adapter = if let Some(ref cred) = self.credential {
+                    use secrecy::ExposeSecret;
+                    if let crate::auth::Credential::ApiKey(key) = cred {
+                        adapter::GeminiAdapter::from_api_key(config, key.expose_secret())
+                    } else {
+                        adapter::GeminiAdapter::new(config)
+                    }
+                } else {
+                    adapter::GeminiAdapter::new(config)
+                };
+                if let Some(ref gw) = self.gateway
+                    && let Some(ref url) = gw.base_url
+                {
+                    adapter = adapter.base_url(url);
+                }
+                if let Some(url) = self.gemini_base_url {
+                    adapter = adapter.base_url(url);
                 }
                 Box::new(adapter)
             }

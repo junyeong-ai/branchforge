@@ -4,10 +4,28 @@ use super::state::{AgentMetrics, AgentState};
 use crate::types::{Message, StopReason, Usage};
 
 /// Events emitted during agent execution.
+///
+/// These events provide real-time visibility into the agent's progress:
+/// text streaming, tool lifecycle, token consumption, and final result.
 #[derive(Debug, Clone)]
 pub enum AgentEvent {
+    /// Incremental text output from the model.
     Text(String),
+    /// Model thinking/reasoning output.
     Thinking(String),
+    /// A tool is about to be executed.
+    ToolStart {
+        id: String,
+        name: String,
+        input: serde_json::Value,
+    },
+    /// A tool requires user review before execution (emitted by Supervised/SupervisedFor execution modes).
+    ToolReview {
+        id: String,
+        name: String,
+        input: serde_json::Value,
+    },
+    /// A tool execution completed.
     ToolComplete {
         id: String,
         name: String,
@@ -15,15 +33,25 @@ pub enum AgentEvent {
         is_error: bool,
         duration_ms: u64,
     },
+    /// A tool was blocked by a security hook.
     ToolBlocked {
         id: String,
         name: String,
         reason: String,
     },
-    ContextUpdate {
-        used_tokens: u64,
-        max_tokens: u64,
+    /// Per-turn token usage (emitted after each API call).
+    ///
+    /// Fields match [`AgentMetrics`] naming for consistency.
+    /// `cache_creation_tokens` = Anthropic's `cache_creation_input_tokens`.
+    TurnUsage {
+        input_tokens: u32,
+        output_tokens: u32,
+        cache_read_tokens: u32,
+        cache_creation_tokens: u32,
+        total_input_tokens: u64,
+        total_output_tokens: u64,
     },
+    /// Final execution result.
     Complete(Box<AgentResult>),
 }
 

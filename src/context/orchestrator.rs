@@ -191,6 +191,32 @@ impl PromptOrchestrator {
         format!("# Available Skills\n{summary}")
     }
 
+    /// Register a new rule at runtime for dynamic injection (A/B testing, compliance, etc.).
+    ///
+    /// Uses priority-based override semantics: if a rule with the same name already exists,
+    /// it is replaced only if the new rule has equal or higher priority.
+    pub async fn register_rule(&self, rule: RuleIndex) -> crate::Result<()> {
+        let mut registry = self.rule_registry.write().await;
+        registry.register(rule);
+        Ok(())
+    }
+
+    /// Unregister a rule by name at runtime.
+    ///
+    /// Returns `true` if the rule was found and removed, `false` if no rule
+    /// with that name was registered.
+    pub async fn unregister_rule(&self, name: &str) -> crate::Result<bool> {
+        let mut registry = self.rule_registry.write().await;
+        let removed = registry.remove(name).await.is_some();
+        Ok(removed)
+    }
+
+    /// List all currently registered rule names.
+    pub async fn list_rules(&self) -> Vec<String> {
+        let registry = self.rule_registry.read().await;
+        registry.list().into_iter().map(|s| s.to_string()).collect()
+    }
+
     /// Build a summary of all registered rules.
     pub async fn build_rules_summary(&self) -> String {
         let registry = self.rule_registry.read().await;
@@ -225,6 +251,7 @@ mod tests {
             output_tokens: 500,
             cache_read_input_tokens: 0,
             cache_creation_input_tokens: 0,
+            ..Default::default()
         });
 
         assert!(!orchestrator.needs_compact());
@@ -235,6 +262,7 @@ mod tests {
             output_tokens: 500,
             cache_read_input_tokens: 0,
             cache_creation_input_tokens: 0,
+            ..Default::default()
         });
 
         assert!(orchestrator.needs_compact());
@@ -360,5 +388,137 @@ mod tests {
         let summary = orchestrator.build_rules_summary().await;
         assert!(summary.contains("security"));
         assert!(summary.contains("Security best practices"));
+    }
+
+    #[tokio::test]
+    async fn test_register_rule_at_runtime() {
+        let static_context = StaticContext::new();
+        let orchestrator = PromptOrchestrator::new(static_context, "claude-sonnet-4-5");
+
+        // Initially empty
+        let rules = orchestrator.list_rules().await;
+        assert!(rules.is_empty());
+
+        // Register a rule at runtime
+        let rule = RuleIndex::new("compliance")
+            .description("Runtime compliance rule")
+            .source(ContentSource::in_memory("Must follow compliance"));
+
+        orchestrator.register_rule(rule).await.unwrap();
+
+        let rules = orchestrator.list_rules().await;
+        assert_eq!(rules.len(), 1);
+        assert!(rules.contains(&"compliance".to_string()));
+
+        // Verify the rule is accessible via the registry
+        let registry = orchestrator.get_rule_registry().await;
+        assert!(registry.contains("compliance"));
+    }
+
+    #[tokio::test]
+    async fn test_unregister_rule_at_runtime() {
+        let mut rule_registry = IndexRegistry::new();
+        rule_registry.register(
+            RuleIndex::new("ab-test")
+                .description("A/B test rule")
+                .source(ContentSource::in_memory("A/B content")),
+        );
+        rule_registry.register(
+            RuleIndex::new("permanent")
+                .description("Permanent rule")
+                .source(ContentSource::in_memory("Permanent content")),
+        );
+
+        let static_context = StaticContext::new();
+        let orchestrator = PromptOrchestrator::new(static_context, "claude-sonnet-4-5")
+            .rule_registry(rule_registry);
+
+        assert_eq!(orchestrator.list_rules().await.len(), 2);
+
+        // Remove the A/B test rule
+        let removed = orchestrator.unregister_rule("ab-test").await.unwrap();
+        assert!(removed);
+
+        // Verify it's gone
+        let rules = orchestrator.list_rules().await;
+        assert_eq!(rules.len(), 1);
+        assert!(rules.contains(&"permanent".to_string()));
+        assert!(!rules.contains(&"ab-test".to_string()));
+
+        // Removing a non-existent rule returns false
+        let removed = orchestrator.unregister_rule("nonexistent").await.unwrap();
+        assert!(!removed);
+    }
+
+    #[tokio::test]
+    async fn test_register_rule_priority_override() {
+        let static_context = StaticContext::new();
+        let orchestrator = PromptOrchestrator::new(static_context, "claude-sonnet-4-5");
+
+        // Register a low-priority rule
+        let rule = RuleIndex::new("policy")
+            .description("Original policy")
+            .priority(1)
+            .source(ContentSource::in_memory("Original"));
+
+        orchestrator.register_rule(rule).await.unwrap();
+
+        // Register a higher-priority rule with the same name (should override)
+        let rule = RuleIndex::new("policy")
+            .description("Updated policy")
+            .priority(10)
+            .source(ContentSource::in_memory("Updated"));
+
+        orchestrator.register_rule(rule).await.unwrap();
+
+        // Should still be one rule, but with updated description
+        let rules = orchestrator.list_rules().await;
+        assert_eq!(rules.len(), 1);
+
+        let registry = orchestrator.get_rule_registry().await;
+        let policy = registry.get("policy").unwrap();
+        assert_eq!(policy.description, "Updated policy");
+    }
+
+    #[tokio::test]
+    async fn test_runtime_rule_affects_matching() {
+        let static_context = StaticContext::new();
+        let orchestrator = PromptOrchestrator::new(static_context, "claude-sonnet-4-5");
+
+        // No rules initially
+        assert!(
+            !orchestrator
+                .has_matching_rules(Path::new("src/lib.rs"))
+                .await
+        );
+
+        // Register a rule at runtime that matches .rs files
+        let rule = RuleIndex::new("rust-lint")
+            .paths(vec!["**/*.rs".into()])
+            .source(ContentSource::in_memory("Lint rules for Rust"));
+
+        orchestrator.register_rule(rule).await.unwrap();
+
+        // Now it should match
+        assert!(
+            orchestrator
+                .has_matching_rules(Path::new("src/lib.rs"))
+                .await
+        );
+        assert!(
+            !orchestrator
+                .has_matching_rules(Path::new("src/lib.ts"))
+                .await
+        );
+
+        // Unregister it
+        orchestrator.unregister_rule("rust-lint").await.unwrap();
+
+        // Should no longer match
+        assert!(
+            !orchestrator
+                .has_matching_rules(Path::new("src/lib.rs"))
+                .await
+        );
     }
 }

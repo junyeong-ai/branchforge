@@ -245,12 +245,74 @@ impl Agent {
                 })
                 .await;
 
+            // Fire ModelSelection hook - allows overriding the model
+            let model_input = HookInput::model_selection(
+                &*self.session_id,
+                request_builder.current_model(),
+                messages.len(),
+                request_builder.has_tools(),
+            );
+            match self
+                .hooks
+                .execute(HookEvent::ModelSelection, model_input, &hook_ctx)
+                .await
+            {
+                Ok(output) => {
+                    if let Some(ref updated) = output.updated_input
+                        && let Some(model_override) = updated.get("model").and_then(|v| v.as_str())
+                    {
+                        request_builder.set_model(model_override);
+                    }
+                }
+                Err(e) => {
+                    warn!(error = %e, "ModelSelection hook failed, blocking request");
+                    return Err(e);
+                }
+            }
+
+            // Fire PreMessage hook - can block the message
+            let messages_json: Vec<serde_json::Value> = messages
+                .iter()
+                .filter_map(|m| serde_json::to_value(m).ok())
+                .collect();
+            let pre_msg_input = HookInput::pre_message(
+                &*self.session_id,
+                messages_json,
+                request_builder.current_model(),
+            );
+            let pre_msg_output = self
+                .hooks
+                .execute(HookEvent::PreMessage, pre_msg_input, &hook_ctx)
+                .await?;
+
+            if !pre_msg_output.continue_execution {
+                return Err(crate::Error::Authorization(
+                    pre_msg_output
+                        .stop_reason
+                        .unwrap_or_else(|| "Blocked by PreMessage hook".into()),
+                ));
+            }
+
             let api_start = Instant::now();
             let request = request_builder.build(messages, &dynamic_rules_context);
             let response = self.client.send_with_auth_retry(request).await?;
             let api_duration_ms = api_start.elapsed().as_millis() as u64;
             metrics.record_api_call_with_timing(api_duration_ms);
             debug!(api_time_ms = api_duration_ms, "API call completed");
+
+            // Fire PostMessage hook (observation only, fail-open)
+            let stop_reason_str = response.stop_reason.map(|sr| format!("{:?}", sr));
+            let post_msg_input = HookInput::post_message(
+                &*self.session_id,
+                &response.model,
+                stop_reason_str,
+                response.usage.input_tokens,
+                response.usage.output_tokens,
+            );
+            let _ = self
+                .hooks
+                .execute(HookEvent::PostMessage, post_msg_input, &hook_ctx)
+                .await;
 
             accumulate_response_usage(
                 &mut total_usage,
@@ -419,6 +481,7 @@ impl Agent {
                 &self.config.execution,
                 max_tokens,
                 &mut metrics,
+                self.event_bus.as_deref(),
             )
             .await;
             self.persist_session_state().await?;

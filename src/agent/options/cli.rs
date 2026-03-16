@@ -6,7 +6,7 @@
 use std::path::Path;
 
 use crate::auth::Auth;
-use crate::authorization::{AuthorizationMode, AuthorizationPolicy};
+use crate::authorization::ToolPolicy;
 use crate::common::{IndexRegistry, Named, Provider};
 use crate::config::{Settings, SettingsLoader};
 use crate::context::{LeveledMemoryProvider, MemoryLoader, enterprise_base_path, user_base_path};
@@ -285,26 +285,16 @@ impl AgentBuilder {
     }
 
     fn merge_permission_policies(
-        from_settings: AuthorizationPolicy,
-        programmatic: AuthorizationPolicy,
-    ) -> AuthorizationPolicy {
-        let mode = if programmatic.mode != AuthorizationMode::Rules {
-            programmatic.mode
-        } else {
-            from_settings.mode
-        };
-
+        from_settings: ToolPolicy,
+        programmatic: ToolPolicy,
+    ) -> ToolPolicy {
         let mut rules = from_settings.rules;
         rules.extend(programmatic.rules);
 
         let mut tool_limits = from_settings.tool_limits;
         tool_limits.extend(programmatic.tool_limits);
 
-        AuthorizationPolicy {
-            mode,
-            rules,
-            tool_limits,
-        }
+        ToolPolicy { rules, tool_limits }
     }
 }
 
@@ -426,9 +416,5 @@ mod tests {
         let builder = AgentBuilder::new().apply_settings(settings);
 
         assert!(builder.authorization_policy_explicit);
-        assert_eq!(
-            builder.config.security.authorization_policy.mode,
-            crate::authorization::AuthorizationMode::Rules
-        );
     }
 }

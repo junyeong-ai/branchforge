@@ -8,7 +8,7 @@ use super::state::AgentMetrics;
 use super::state_formatter::format_todo_summary;
 use super::{AgentConfig, AgentState};
 use crate::Client;
-use crate::authorization::AuthorizationPolicy;
+use crate::authorization::ToolPolicy;
 use crate::client::{DEFAULT_SMALL_MODEL, GatewayConfig, ModelConfig, ProviderConfig};
 use crate::common::{ContentSource, IndexRegistry};
 use crate::context::{PromptOrchestrator, StaticContext};
@@ -366,7 +366,7 @@ async fn test_execute_routes_explicit_manual_only_skill_before_model_request() {
     let tools = Arc::new(
         ToolRegistry::builder()
             .access(ToolSurface::only(["Skill"]))
-            .policy(AuthorizationPolicy::permissive())
+            .policy(ToolPolicy::permissive())
             .skill_executor(SkillRuntime::new(skill_registry.clone()))
             .build(),
     );
@@ -462,10 +462,7 @@ async fn test_execute_explicit_skill_respects_deny_rule() {
     skill.disable_model_invocation = true;
     skill_registry.register(skill);
 
-    let policy = AuthorizationPolicy::builder()
-        .mode(crate::authorization::AuthorizationMode::Rules)
-        .deny("Skill(internal)")
-        .build();
+    let policy = ToolPolicy::builder().deny("Skill(internal)").build();
 
     let tools = Arc::new(
         ToolRegistry::builder()
@@ -603,7 +600,7 @@ async fn test_hook_input_modification() {
 fn test_tool_registry_with_dummy() {
     use helpers::DummyTool;
 
-    let mut registry = ToolRegistry::new();
+    let registry = ToolRegistry::new();
     let tool = Arc::new(DummyTool {
         name: "TestTool".to_string(),
         output: ToolOutput::Success("success".to_string()),
@@ -618,7 +615,7 @@ fn test_tool_registry_with_dummy() {
 async fn test_tool_registry_execute() {
     use helpers::DummyTool;
 
-    let mut registry = ToolRegistry::from_context(ExecutionContext::permissive());
+    let registry = ToolRegistry::from_context(ExecutionContext::permissive());
     let tool = Arc::new(DummyTool {
         name: "TestTool".to_string(),
         output: ToolOutput::Success("test output".to_string()),

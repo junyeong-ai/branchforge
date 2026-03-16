@@ -93,6 +93,27 @@ impl ModelConfig {
         Self::from_env_with_defaults(FOUNDRY_MODEL, FOUNDRY_SMALL_MODEL, FOUNDRY_REASONING_MODEL)
     }
 
+    #[cfg(feature = "openai")]
+    pub fn openai() -> Self {
+        Self {
+            primary: env::var("OPENAI_MODEL").unwrap_or_else(|_| "gpt-4o".into()),
+            small: env::var("OPENAI_SMALL_MODEL").unwrap_or_else(|_| "gpt-4o-mini".into()),
+            reasoning: Some(env::var("OPENAI_REASONING_MODEL").unwrap_or_else(|_| "o3".into())),
+        }
+    }
+
+    #[cfg(feature = "gemini")]
+    pub fn gemini() -> Self {
+        Self {
+            primary: env::var("GEMINI_MODEL").unwrap_or_else(|_| "gemini-2.0-flash".into()),
+            small: env::var("GEMINI_SMALL_MODEL")
+                .unwrap_or_else(|_| "gemini-2.0-flash-lite".into()),
+            reasoning: Some(
+                env::var("GEMINI_REASONING_MODEL").unwrap_or_else(|_| "gemini-2.5-pro".into()),
+            ),
+        }
+    }
+
     pub fn primary(mut self, model: impl Into<String>) -> Self {
         self.primary = model.into();
         self

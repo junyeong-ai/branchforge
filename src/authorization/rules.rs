@@ -1,12 +1,10 @@
-//! Authorization rules and policy evaluation.
+//! Tool policy rules and evaluation.
 
 use std::collections::HashMap;
 
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-
-use super::{AuthorizationMode, is_file_tool, is_read_only_tool};
 
 fn anchor_pattern(pattern: &str) -> String {
     let has_start = pattern.starts_with('^');
@@ -19,63 +17,38 @@ fn anchor_pattern(pattern: &str) -> String {
     }
 }
 
-/// Authorization decision for SDK.
-///
-/// SDK only supports Allow/Deny. For interactive approval workflows,
-/// implement your own pre-check hook using the HookManager.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum AuthorizationDecision {
+/// Decision for a tool policy check.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ToolDecision {
     Allow,
-    #[default]
-    Deny,
+    Deny { reason: String },
 }
 
-impl AuthorizationDecision {
+impl ToolDecision {
     pub fn is_allowed(&self) -> bool {
         matches!(self, Self::Allow)
     }
-}
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum AuthorizationStatus {
-    Allowed,
-    Denied,
-}
+    pub fn is_denied(&self) -> bool {
+        !self.is_allowed()
+    }
 
-#[derive(Clone, Debug)]
-pub struct AuthorizationResult {
-    pub status: AuthorizationStatus,
-    pub reason: String,
-    pub tool_name: Option<String>,
-    pub input: Option<Value>,
-}
-
-impl AuthorizationResult {
-    pub fn allowed(reason: impl Into<String>) -> Self {
-        Self {
-            status: AuthorizationStatus::Allowed,
-            reason: reason.into(),
-            tool_name: None,
-            input: None,
+    pub fn reason(&self) -> &str {
+        match self {
+            Self::Deny { reason } => reason,
+            _ => "",
         }
+    }
+
+    pub fn allowed(reason: impl Into<String>) -> Self {
+        let _ = reason.into(); // kept for compat but Allow carries no reason
+        Self::Allow
     }
 
     pub fn denied(reason: impl Into<String>) -> Self {
-        Self {
-            status: AuthorizationStatus::Denied,
+        Self::Deny {
             reason: reason.into(),
-            tool_name: None,
-            input: None,
         }
-    }
-
-    pub fn is_allowed(&self) -> bool {
-        matches!(self.status, AuthorizationStatus::Allowed)
-    }
-
-    pub fn is_denied(&self) -> bool {
-        matches!(self.status, AuthorizationStatus::Denied)
     }
 }
 
@@ -123,14 +96,23 @@ impl ToolLimits {
     }
 }
 
+/// Whether a rule allows or denies.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ToolRuleDecision {
+    Allow,
+    #[default]
+    Deny,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct AuthorizationRule {
+pub struct ToolRule {
     pub pattern: String,
 
     #[serde(skip_serializing_if = "Option::is_none")]
     pub input_pattern: Option<String>,
 
-    pub decision: AuthorizationDecision,
+    pub decision: ToolRuleDecision,
 
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
@@ -139,16 +121,16 @@ pub struct AuthorizationRule {
     compiled: Option<Regex>,
 }
 
-impl AuthorizationRule {
+impl ToolRule {
     pub fn allow(pattern: impl Into<String>) -> Self {
-        Self::new(pattern, AuthorizationDecision::Allow)
+        Self::new(pattern, ToolRuleDecision::Allow)
     }
 
     pub fn deny(pattern: impl Into<String>) -> Self {
-        Self::new(pattern, AuthorizationDecision::Deny)
+        Self::new(pattern, ToolRuleDecision::Deny)
     }
 
-    fn new(pattern: impl Into<String>, decision: AuthorizationDecision) -> Self {
+    fn new(pattern: impl Into<String>, decision: ToolRuleDecision) -> Self {
         let pattern = pattern.into();
         let anchored = anchor_pattern(&pattern);
         let compiled = Regex::new(&anchored).ok();
@@ -161,7 +143,7 @@ impl AuthorizationRule {
         }
     }
 
-    pub fn from_scoped(scoped: &str, decision: AuthorizationDecision) -> Self {
+    pub fn from_scoped(scoped: &str, decision: ToolRuleDecision) -> Self {
         if let Some((tool, scope)) = Self::parse_scope(scoped) {
             let anchored = anchor_pattern(&tool);
             let compiled = Regex::new(&anchored).ok();
@@ -178,11 +160,11 @@ impl AuthorizationRule {
     }
 
     pub fn allow_scoped(scoped: &str) -> Self {
-        Self::from_scoped(scoped, AuthorizationDecision::Allow)
+        Self::from_scoped(scoped, ToolRuleDecision::Allow)
     }
 
     pub fn deny_scoped(scoped: &str) -> Self {
-        Self::from_scoped(scoped, AuthorizationDecision::Deny)
+        Self::from_scoped(scoped, ToolRuleDecision::Deny)
     }
 
     /// Create a rule from a pattern string, auto-detecting scoped patterns like `Bash(git:*)`.
@@ -326,55 +308,39 @@ impl AuthorizationRule {
 }
 
 #[derive(Clone, Debug, Default)]
-pub struct AuthorizationPolicy {
-    pub mode: AuthorizationMode,
-    pub rules: Vec<AuthorizationRule>,
+pub struct ToolPolicy {
+    pub rules: Vec<ToolRule>,
     pub tool_limits: HashMap<String, ToolLimits>,
 }
 
-impl AuthorizationPolicy {
+impl ToolPolicy {
     pub fn new() -> Self {
         Self::default()
     }
 
-    pub fn builder() -> AuthorizationPolicyBuilder {
-        AuthorizationPolicyBuilder::new()
+    pub fn builder() -> ToolPolicyBuilder {
+        ToolPolicyBuilder::new()
     }
 
+    /// A permissive policy that allows all tools.
     pub fn permissive() -> Self {
-        Self {
-            mode: AuthorizationMode::AllowAll,
-            ..Default::default()
-        }
+        Self::builder().allow(".*").build()
     }
 
-    pub fn read_only() -> Self {
-        Self {
-            mode: AuthorizationMode::ReadOnly,
-            ..Default::default()
-        }
-    }
-
-    pub fn auto_approve_files() -> Self {
-        Self {
-            mode: AuthorizationMode::AutoApproveFiles,
-            ..Default::default()
-        }
-    }
-
-    pub fn check(&self, tool_name: &str, input: &Value) -> AuthorizationResult {
-        if self.mode.allows_all() {
-            return AuthorizationResult::allowed("AllowAll mode: all tools allowed");
-        }
-
+    /// Check a tool against rules only.
+    ///
+    /// - First check deny rules: if any match, return Deny.
+    /// - Then check allow rules: if any match, return Allow.
+    /// - Default: Deny("no matching rule").
+    pub fn check(&self, tool_name: &str, input: &Value) -> ToolDecision {
         // Deny rules first (highest priority)
         for rule in self
             .rules
             .iter()
-            .filter(|r| r.decision == AuthorizationDecision::Deny)
+            .filter(|r| r.decision == ToolRuleDecision::Deny)
         {
             if rule.matches_with_input(tool_name, input) {
-                return AuthorizationResult::denied(
+                return ToolDecision::denied(
                     rule.reason
                         .clone()
                         .unwrap_or_else(|| format!("Denied by rule: {}", rule.pattern)),
@@ -386,40 +352,15 @@ impl AuthorizationPolicy {
         for rule in self
             .rules
             .iter()
-            .filter(|r| r.decision == AuthorizationDecision::Allow)
+            .filter(|r| r.decision == ToolRuleDecision::Allow)
         {
             if rule.matches_with_input(tool_name, input) {
-                return AuthorizationResult::allowed(
-                    rule.reason
-                        .clone()
-                        .unwrap_or_else(|| format!("Allowed by rule: {}", rule.pattern)),
-                );
+                return ToolDecision::Allow;
             }
         }
 
-        // Mode-based defaults
-        match self.mode {
-            AuthorizationMode::AllowAll => {
-                AuthorizationResult::allowed("AllowAll mode: all tools allowed")
-            }
-            AuthorizationMode::ReadOnly => {
-                if is_read_only_tool(tool_name) {
-                    AuthorizationResult::allowed("ReadOnly mode: read-only tool allowed")
-                } else {
-                    AuthorizationResult::denied("ReadOnly mode: only read-only tools allowed")
-                }
-            }
-            AuthorizationMode::AutoApproveFiles => {
-                if is_file_tool(tool_name) {
-                    AuthorizationResult::allowed("AutoApproveFiles mode: file tool allowed")
-                } else {
-                    AuthorizationResult::denied("AutoApproveFiles mode: not a file tool")
-                }
-            }
-            AuthorizationMode::Rules => {
-                AuthorizationResult::denied("Rules mode: tool not explicitly allowed")
-            }
-        }
+        // Default: deny
+        ToolDecision::denied("No matching rule: tool not explicitly allowed")
     }
 
     /// Check permission for an explicit user-requested skill invocation such as `/review-pr`.
@@ -429,18 +370,14 @@ impl AuthorizationPolicy {
     /// - allow rules are honored
     /// - if no rule matches, the explicit wrapper invocation is allowed and
     ///   nested tool usage remains governed by the delegated runtime policy
-    pub fn check_explicit_skill(&self, input: &Value) -> AuthorizationResult {
-        if self.mode.allows_all() {
-            return AuthorizationResult::allowed("AllowAll mode: all tools allowed");
-        }
-
+    pub fn check_explicit_skill(&self, input: &Value) -> ToolDecision {
         for rule in self
             .rules
             .iter()
-            .filter(|r| r.decision == AuthorizationDecision::Deny)
+            .filter(|r| r.decision == ToolRuleDecision::Deny)
         {
             if rule.matches_with_input("Skill", input) {
-                return AuthorizationResult::denied(
+                return ToolDecision::denied(
                     rule.reason
                         .clone()
                         .unwrap_or_else(|| format!("Denied by rule: {}", rule.pattern)),
@@ -451,18 +388,14 @@ impl AuthorizationPolicy {
         for rule in self
             .rules
             .iter()
-            .filter(|r| r.decision == AuthorizationDecision::Allow)
+            .filter(|r| r.decision == ToolRuleDecision::Allow)
         {
             if rule.matches_with_input("Skill", input) {
-                return AuthorizationResult::allowed(
-                    rule.reason
-                        .clone()
-                        .unwrap_or_else(|| format!("Allowed by rule: {}", rule.pattern)),
-                );
+                return ToolDecision::Allow;
             }
         }
 
-        AuthorizationResult::allowed("Explicit skill invocation requested by user")
+        ToolDecision::Allow
     }
 
     pub fn limits(&self, tool_name: &str) -> Option<&ToolLimits> {
@@ -475,35 +408,26 @@ impl AuthorizationPolicy {
 }
 
 #[derive(Clone, Debug, Default)]
-pub struct AuthorizationPolicyBuilder {
-    policy: AuthorizationPolicy,
+pub struct ToolPolicyBuilder {
+    policy: ToolPolicy,
 }
 
-impl AuthorizationPolicyBuilder {
+impl ToolPolicyBuilder {
     pub fn new() -> Self {
         Self::default()
     }
 
-    pub fn mode(mut self, mode: AuthorizationMode) -> Self {
-        self.policy.mode = mode;
-        self
-    }
-
     pub fn allow(mut self, pattern: impl Into<String>) -> Self {
-        self.policy
-            .rules
-            .push(AuthorizationRule::allow_pattern(pattern));
+        self.policy.rules.push(ToolRule::allow_pattern(pattern));
         self
     }
 
     pub fn deny(mut self, pattern: impl Into<String>) -> Self {
-        self.policy
-            .rules
-            .push(AuthorizationRule::deny_pattern(pattern));
+        self.policy.rules.push(ToolRule::deny_pattern(pattern));
         self
     }
 
-    pub fn rule(mut self, rule: AuthorizationRule) -> Self {
+    pub fn rule(mut self, rule: ToolRule) -> Self {
         self.policy.rules.push(rule);
         self
     }
@@ -513,7 +437,7 @@ impl AuthorizationPolicyBuilder {
         self
     }
 
-    pub fn build(mut self) -> AuthorizationPolicy {
+    pub fn build(mut self) -> ToolPolicy {
         for rule in &mut self.policy.rules {
             let _ = rule.compile();
         }
@@ -526,26 +450,27 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_authorization_result() {
-        let allowed = AuthorizationResult::allowed("test");
+    fn test_tool_decision() {
+        let allowed = ToolDecision::Allow;
         assert!(allowed.is_allowed());
         assert!(!allowed.is_denied());
 
-        let denied = AuthorizationResult::denied("test");
+        let denied = ToolDecision::denied("test");
         assert!(!denied.is_allowed());
         assert!(denied.is_denied());
+        assert_eq!(denied.reason(), "test");
     }
 
     #[test]
-    fn test_authorization_rule_exact_match() {
-        let rule = AuthorizationRule::allow("Read");
+    fn test_tool_rule_exact_match() {
+        let rule = ToolRule::allow("Read");
         assert!(rule.matches("Read"));
         assert!(!rule.matches("Write"));
     }
 
     #[test]
-    fn test_authorization_rule_regex() {
-        let mut rule = AuthorizationRule::allow("Read|Write|Edit");
+    fn test_tool_rule_regex() {
+        let mut rule = ToolRule::allow("Read|Write|Edit");
         rule.compile().unwrap();
         assert!(rule.matches("Read"));
         assert!(rule.matches("Write"));
@@ -555,55 +480,28 @@ mod tests {
 
     #[test]
     fn test_scoped_rule() {
-        let rule = AuthorizationRule::allow_scoped("Bash(git:*)");
+        let rule = ToolRule::allow_scoped("Bash(git:*)");
         assert_eq!(rule.pattern, "Bash");
         assert_eq!(rule.input_pattern, Some("git:*".to_string()));
     }
 
     #[test]
     fn test_skill_scoped_rule_matches_skill_name() {
-        let rule = AuthorizationRule::deny_scoped("Skill(internal)");
+        let rule = ToolRule::deny_scoped("Skill(internal)");
         assert!(rule.matches_with_input("Skill", &serde_json::json!({"skill": "internal"})));
         assert!(!rule.matches_with_input("Skill", &serde_json::json!({"skill": "commit"})));
     }
 
     #[test]
-    fn test_policy_bypass_mode() {
-        let policy = AuthorizationPolicy::permissive();
+    fn test_policy_permissive() {
+        let policy = ToolPolicy::permissive();
         let result = policy.check("AnyTool", &Value::Null);
         assert!(result.is_allowed());
     }
 
     #[test]
-    fn test_policy_plan_mode() {
-        let policy = AuthorizationPolicy::read_only();
-
-        assert!(policy.check("Read", &Value::Null).is_allowed());
-        assert!(policy.check("Glob", &Value::Null).is_allowed());
-        assert!(policy.check("Grep", &Value::Null).is_allowed());
-
-        assert!(policy.check("Write", &Value::Null).is_denied());
-        assert!(policy.check("Bash", &Value::Null).is_denied());
-    }
-
-    #[test]
-    fn test_policy_accept_edits_mode() {
-        let policy = AuthorizationPolicy::auto_approve_files();
-
-        assert!(policy.check("Read", &Value::Null).is_allowed());
-        assert!(policy.check("Write", &Value::Null).is_allowed());
-        assert!(policy.check("Edit", &Value::Null).is_allowed());
-
-        assert!(policy.check("Bash", &Value::Null).is_denied());
-        assert!(policy.check("WebSearch", &Value::Null).is_denied());
-    }
-
-    #[test]
     fn test_policy_deny_takes_precedence() {
-        let policy = AuthorizationPolicy::builder()
-            .mode(AuthorizationMode::AutoApproveFiles)
-            .deny("Write")
-            .build();
+        let policy = ToolPolicy::builder().allow(".*").deny("Write").build();
 
         assert!(policy.check("Read", &Value::Null).is_allowed());
         assert!(policy.check("Write", &Value::Null).is_denied());
@@ -611,11 +509,7 @@ mod tests {
 
     #[test]
     fn test_policy_allow_rules() {
-        let policy = AuthorizationPolicy::builder()
-            .mode(AuthorizationMode::Rules)
-            .allow("Bash")
-            .allow("Read")
-            .build();
+        let policy = ToolPolicy::builder().allow("Bash").allow("Read").build();
 
         assert!(policy.check("Bash", &Value::Null).is_allowed());
         assert!(policy.check("Read", &Value::Null).is_allowed());
@@ -624,10 +518,7 @@ mod tests {
 
     #[test]
     fn test_scoped_allow() {
-        let policy = AuthorizationPolicy::builder()
-            .mode(AuthorizationMode::Rules)
-            .allow("Bash(git:*)")
-            .build();
+        let policy = ToolPolicy::builder().allow("Bash(git:*)").build();
 
         let git_input = serde_json::json!({"command": "git status"});
         let rm_input = serde_json::json!({"command": "rm -rf /"});
@@ -638,7 +529,7 @@ mod tests {
 
     #[test]
     fn test_tool_limits() {
-        let policy = AuthorizationPolicy::builder()
+        let policy = ToolPolicy::builder()
             .tool_limits("Bash", ToolLimits::timeout(30000))
             .build();
 
@@ -649,8 +540,7 @@ mod tests {
 
     #[test]
     fn test_domain_filter() {
-        let policy = AuthorizationPolicy::builder()
-            .mode(AuthorizationMode::Rules)
+        let policy = ToolPolicy::builder()
             .allow("WebFetch(domain:github.com)")
             .build();
 
@@ -663,8 +553,7 @@ mod tests {
 
     #[test]
     fn test_domain_filter_security() {
-        let policy = AuthorizationPolicy::builder()
-            .mode(AuthorizationMode::Rules)
+        let policy = ToolPolicy::builder()
             .allow("WebFetch(domain:github.com)")
             .build();
 
@@ -689,17 +578,14 @@ mod tests {
 
     #[test]
     fn test_explicit_skill_invocation_allowed_in_default_mode() {
-        let policy = AuthorizationPolicy::default();
+        let policy = ToolPolicy::default();
         let result = policy.check_explicit_skill(&serde_json::json!({"skill": "review-pr"}));
         assert!(result.is_allowed());
     }
 
     #[test]
     fn test_explicit_skill_invocation_respects_deny_rule() {
-        let policy = AuthorizationPolicy::builder()
-            .mode(AuthorizationMode::Rules)
-            .deny("Skill(internal)")
-            .build();
+        let policy = ToolPolicy::builder().deny("Skill(internal)").build();
 
         assert!(
             policy
@@ -716,47 +602,44 @@ mod tests {
     #[test]
     fn test_matches_domain_helper() {
         // Exact match
-        assert!(AuthorizationRule::matches_domain(
+        assert!(ToolRule::matches_domain(
             "https://github.com/path",
             "github.com"
         ));
-        assert!(AuthorizationRule::matches_domain(
-            "http://github.com",
-            "github.com"
-        ));
-        assert!(AuthorizationRule::matches_domain(
+        assert!(ToolRule::matches_domain("http://github.com", "github.com"));
+        assert!(ToolRule::matches_domain(
             "https://github.com:443/path",
             "github.com"
         ));
 
         // Subdomain match
-        assert!(AuthorizationRule::matches_domain(
+        assert!(ToolRule::matches_domain(
             "https://api.github.com/repos",
             "github.com"
         ));
-        assert!(AuthorizationRule::matches_domain(
+        assert!(ToolRule::matches_domain(
             "https://raw.githubusercontent.com/f",
             "githubusercontent.com"
         ));
 
         // Security: should NOT match
-        assert!(!AuthorizationRule::matches_domain(
+        assert!(!ToolRule::matches_domain(
             "https://github.com.evil.com/x",
             "github.com"
         ));
-        assert!(!AuthorizationRule::matches_domain(
+        assert!(!ToolRule::matches_domain(
             "https://evil.com?r=github.com",
             "github.com"
         ));
-        assert!(!AuthorizationRule::matches_domain(
+        assert!(!ToolRule::matches_domain(
             "https://evil.com/github.com",
             "github.com"
         ));
-        assert!(!AuthorizationRule::matches_domain(
+        assert!(!ToolRule::matches_domain(
             "https://notgithub.com",
             "github.com"
         ));
-        assert!(!AuthorizationRule::matches_domain(
+        assert!(!ToolRule::matches_domain(
             "https://fakegithub.com",
             "github.com"
         ));

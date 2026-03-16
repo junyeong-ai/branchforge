@@ -1,8 +1,9 @@
 //! Tool registry for managing and executing tools.
 
-use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
+
+use dashmap::DashMap;
 
 use super::ProcessManager;
 use super::builder::ToolRegistryBuilder;
@@ -11,14 +12,14 @@ use super::env::ToolExecutionEnv;
 use super::surface::ToolSurface;
 use super::traits::Tool;
 use crate::agent::TaskRegistry;
-use crate::authorization::AuthorizationPolicy;
+use crate::authorization::ToolPolicy;
 use crate::session::MemoryPersistence;
 use crate::types::{ToolDefinition, ToolOutput, ToolResult};
 use std::path::PathBuf;
 
 #[derive(Clone)]
 pub struct ToolRegistry {
-    tools: HashMap<String, Arc<dyn Tool>>,
+    tools: DashMap<String, Arc<dyn Tool>>,
     task_registry: TaskRegistry,
     env: ToolExecutionEnv,
 }
@@ -26,7 +27,7 @@ pub struct ToolRegistry {
 impl ToolRegistry {
     pub fn new() -> Self {
         Self {
-            tools: HashMap::new(),
+            tools: DashMap::new(),
             task_registry: TaskRegistry::new(Arc::new(MemoryPersistence::new())),
             env: ToolExecutionEnv::default(),
         }
@@ -34,7 +35,7 @@ impl ToolRegistry {
 
     pub(crate) fn from_env(task_registry: TaskRegistry, env: ToolExecutionEnv) -> Self {
         Self {
-            tools: HashMap::new(),
+            tools: DashMap::new(),
             task_registry,
             env,
         }
@@ -46,7 +47,7 @@ impl ToolRegistry {
 
     pub fn from_context(context: ExecutionContext) -> Self {
         Self {
-            tools: HashMap::new(),
+            tools: DashMap::new(),
             task_registry: TaskRegistry::new(Arc::new(MemoryPersistence::new())),
             env: ToolExecutionEnv::new(context),
         }
@@ -55,7 +56,7 @@ impl ToolRegistry {
     pub fn default_tools(
         access: ToolSurface,
         working_dir: Option<PathBuf>,
-        policy: Option<AuthorizationPolicy>,
+        policy: Option<ToolPolicy>,
     ) -> Self {
         let mut builder = ToolRegistryBuilder::new().access(access);
         if let Some(dir) = working_dir {
@@ -92,47 +93,30 @@ impl ToolRegistry {
         &self.task_registry
     }
 
-    pub fn register(&mut self, tool: Arc<dyn Tool>) {
+    pub fn register(&self, tool: Arc<dyn Tool>) {
         self.tools.insert(tool.name().to_string(), tool);
     }
 
     #[inline]
-    pub fn get(&self, name: &str) -> Option<&Arc<dyn Tool>> {
-        self.tools.get(name)
+    pub fn get(&self, name: &str) -> Option<Arc<dyn Tool>> {
+        self.tools.get(name).map(|r| Arc::clone(r.value()))
     }
-
-    /// Tools allowed during plan mode (exploration only).
-    const PLAN_MODE_TOOLS: &[&str] = &["Plan", "Read", "Glob", "Grep", "TodoWrite", "GraphHistory"];
 
     pub async fn execute(&self, name: &str, input: serde_json::Value) -> ToolResult {
         let tool = match self.tools.get(name) {
-            Some(t) => t,
+            Some(t) => Arc::clone(t.value()),
             None => return ToolResult::unknown_tool(name),
         };
 
-        // Plan mode guard: only exploration tools allowed during planning
-        if let Some(ref tool_state) = self.env.tool_state
-            && tool_state.is_in_plan_mode().await
-            && !Self::PLAN_MODE_TOOLS.contains(&name)
-        {
-            return ToolResult::error(format!(
-                "Tool '{}' is not available during plan mode. \
-                 Complete or cancel the current plan first. \
-                 Allowed: {}",
-                name,
-                Self::PLAN_MODE_TOOLS.join(", ")
-            ));
-        }
-
         // Security validation first — catches structural violations
-        // regardless of authorization policy
+        // regardless of tool policy
         if let Err(e) = self.env.context.validate_security(name, &input) {
             return ToolResult::security_error(e);
         }
 
-        let decision = self.env.context.check_permission(name, &input);
-        if !decision.is_allowed() {
-            return ToolResult::authorization_denied(name, decision.reason);
+        let decision = self.env.context.check_tool_policy(name, &input);
+        if decision.is_denied() {
+            return ToolResult::authorization_denied(name, decision.reason());
         }
 
         let limits = self.env.context.limits_for(name);
@@ -170,18 +154,18 @@ impl ToolRegistry {
     }
 
     pub fn definitions(&self) -> Vec<ToolDefinition> {
-        self.tools.values().map(|t| t.definition()).collect()
+        self.tools.iter().map(|r| r.value().definition()).collect()
     }
 
-    pub fn names(&self) -> Vec<&str> {
-        self.tools.keys().map(|s| s.as_str()).collect()
+    pub fn names(&self) -> Vec<String> {
+        self.tools.iter().map(|r| r.key().clone()).collect()
     }
 
     pub fn contains(&self, name: &str) -> bool {
         self.tools.contains_key(name)
     }
 
-    pub fn register_dynamic(&mut self, tool: Arc<dyn Tool>) -> crate::Result<()> {
+    pub fn register_dynamic(&self, tool: Arc<dyn Tool>) -> crate::Result<()> {
         let name = tool.name().to_string();
         if self.tools.contains_key(&name) {
             return Err(crate::Error::Config(format!(
@@ -193,13 +177,13 @@ impl ToolRegistry {
         Ok(())
     }
 
-    pub fn register_or_replace(&mut self, tool: Arc<dyn Tool>) -> Option<Arc<dyn Tool>> {
+    pub fn register_or_replace(&self, tool: Arc<dyn Tool>) -> Option<Arc<dyn Tool>> {
         let name = tool.name().to_string();
         self.tools.insert(name, tool)
     }
 
-    pub fn unregister(&mut self, name: &str) -> Option<Arc<dyn Tool>> {
-        self.tools.remove(name)
+    pub fn unregister(&self, name: &str) -> Option<Arc<dyn Tool>> {
+        self.tools.remove(name).map(|(_, v)| v)
     }
 }
 
@@ -250,7 +234,7 @@ mod tests {
 
     #[test]
     fn test_register_dynamic() {
-        let mut registry = ToolRegistry::new();
+        let registry = ToolRegistry::new();
         let tool: Arc<dyn Tool> = Arc::new(crate::tools::ReadTool);
 
         assert!(registry.register_dynamic(tool.clone()).is_ok());
@@ -262,7 +246,7 @@ mod tests {
 
     #[test]
     fn test_register_or_replace() {
-        let mut registry = ToolRegistry::new();
+        let registry = ToolRegistry::new();
         let tool1: Arc<dyn Tool> = Arc::new(crate::tools::ReadTool);
         let tool2: Arc<dyn Tool> = Arc::new(crate::tools::ReadTool);
 
@@ -273,64 +257,34 @@ mod tests {
         assert!(old.is_some());
     }
 
-    #[tokio::test]
-    async fn test_plan_mode_blocks_mutation_tools() {
-        use crate::session::{SessionId, session_state::ToolState};
+    #[test]
+    fn test_execution_mode_plan_allows_and_blocks() {
+        use crate::authorization::ExecutionMode;
 
-        let tool_state = ToolState::new(SessionId::new());
-        tool_state
-            .enter_plan_mode(Some("Test Plan".to_string()))
-            .await;
+        let mode = ExecutionMode::Plan;
 
-        let registry = ToolRegistryBuilder::new()
-            .access(ToolSurface::All)
-            .tool_state(tool_state.clone())
-            .build();
+        // Plan mode allows exploration tools
+        assert!(mode.allows_tool("Read"));
+        assert!(mode.allows_tool("Glob"));
+        assert!(mode.allows_tool("Grep"));
+        assert!(mode.allows_tool("TodoWrite"));
+        assert!(mode.allows_tool("Plan"));
+        assert!(mode.allows_tool("GraphHistory"));
 
-        // Mutation tools should be blocked in plan mode
-        for tool in &["Write", "Edit", "Bash"] {
-            let result = registry
-                .execute(
-                    tool,
-                    serde_json::json!({"file_path": "/test", "content": "x"}),
-                )
-                .await;
-            assert!(result.is_error(), "{tool} should be blocked in plan mode");
-            assert!(
-                result.text().contains("plan mode"),
-                "{tool}: expected plan mode error, got: {}",
-                result.text()
-            );
-        }
+        // Plan mode blocks mutation tools
+        assert!(!mode.allows_tool("Write"));
+        assert!(!mode.allows_tool("Edit"));
+        assert!(!mode.allows_tool("Bash"));
 
-        // Exploration tools should NOT be blocked by plan mode
-        for tool in &["Read", "Glob", "Grep", "TodoWrite"] {
-            let result = registry
-                .execute(tool, serde_json::json!({"file_path": "/test"}))
-                .await;
-            assert!(
-                !result.text().contains("not available during plan mode"),
-                "{tool} should not be blocked by plan mode"
-            );
-        }
-
-        // After exiting plan mode, mutations should work again
-        tool_state.exit_plan_mode().await;
-        let result = registry
-            .execute(
-                "Write",
-                serde_json::json!({"file_path": "/test.txt", "content": "x"}),
-            )
-            .await;
-        assert!(
-            !result.text().contains("plan mode"),
-            "Write should not be blocked after exiting plan mode"
-        );
+        // Non-plan modes allow all tools
+        let auto = ExecutionMode::Auto;
+        assert!(auto.allows_tool("Write"));
+        assert!(auto.allows_tool("Bash"));
     }
 
     #[test]
     fn test_unregister() {
-        let mut registry = ToolRegistry::new();
+        let registry = ToolRegistry::new();
         let tool: Arc<dyn Tool> = Arc::new(crate::tools::ReadTool);
 
         registry.register(tool);

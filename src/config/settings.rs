@@ -122,16 +122,10 @@ pub struct AuthorizationSettings {
 }
 
 impl AuthorizationSettings {
-    pub fn to_policy(&self) -> crate::authorization::AuthorizationPolicy {
-        use crate::authorization::{AuthorizationMode, AuthorizationPolicy};
+    pub fn to_policy(&self) -> crate::authorization::ToolPolicy {
+        use crate::authorization::ToolPolicy;
 
-        let mut builder = AuthorizationPolicy::builder();
-
-        if let Some(mode_str) = &self.default_mode
-            && let Ok(mode) = mode_str.parse::<AuthorizationMode>()
-        {
-            builder = builder.mode(mode);
-        }
+        let mut builder = ToolPolicy::builder();
 
         for pattern in &self.deny {
             builder = builder.deny(pattern);
@@ -548,16 +542,13 @@ mod tests {
 
     #[test]
     fn test_authorization_settings_to_policy() {
-        use crate::authorization::AuthorizationMode;
-
         let settings = AuthorizationSettings {
             deny: vec!["Bash(rm:*)".to_string()],
             allow: vec!["Bash(git:*)".to_string()],
-            default_mode: Some("autoApproveFiles".to_string()),
+            default_mode: Some("auto".to_string()),
         };
 
         let policy = settings.to_policy();
-        assert_eq!(policy.mode, AuthorizationMode::AutoApproveFiles);
         assert_eq!(policy.rules.len(), 2);
     }
 

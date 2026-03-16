@@ -11,7 +11,7 @@
 use async_trait::async_trait;
 use branchforge::{
     Agent, Auth, Hook, ToolSurface,
-    authorization::{AuthorizationMode, AuthorizationPolicy},
+    authorization::ToolPolicy,
     common::ContentSource,
     hooks::{HookContext, HookEvent, HookInput, HookManager, HookOutput},
     session::{SessionAccessScope, SessionConfig, SessionManager, SessionState},
@@ -63,7 +63,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         test_allow_tool_rules(&working_dir).await
     );
     test!("Rules mode denies", test_default_mode_denies());
-    test!("AuthorizationPolicy API", test_authorization_policy_api());
+    test!("ToolPolicy API", test_tool_policy_api());
 
     println!("\nSection 2: Hook System");
     println!("------------------------------------------------------------------------");
@@ -108,7 +108,7 @@ async fn test_allow_all_mode(working_dir: &PathBuf) -> Result<(), String> {
         .await
         .map_err(|e| format!("Auth: {}", e))?
         .tools(ToolSurface::only(["Bash"]))
-        .authorization_mode(AuthorizationMode::AllowAll)
+        .authorization_policy(ToolPolicy::permissive())
         .working_dir(working_dir)
         .build()
         .await
@@ -136,7 +136,7 @@ async fn test_accept_edits(working_dir: &PathBuf) -> Result<(), String> {
         .await
         .map_err(|e| format!("Auth: {}", e))?
         .tools(ToolSurface::only(["Write", "Read"]))
-        .authorization_mode(AuthorizationMode::AutoApproveFiles)
+        .authorization_policy(ToolPolicy::permissive())
         .working_dir(working_dir)
         .build()
         .await
@@ -168,7 +168,6 @@ async fn test_allow_tool_rules(working_dir: &PathBuf) -> Result<(), String> {
         .await
         .map_err(|e| format!("Auth: {}", e))?
         .tools(ToolSurface::only(["Glob"]))
-        .authorization_mode(AuthorizationMode::Rules)
         .allow_tool("Glob")
         .working_dir(working_dir)
         .build()
@@ -188,30 +187,33 @@ async fn test_allow_tool_rules(working_dir: &PathBuf) -> Result<(), String> {
 }
 
 fn test_default_mode_denies() -> Result<(), String> {
-    let policy = AuthorizationPolicy::default();
+    let policy = ToolPolicy::default();
     let result = policy.check("Read", &serde_json::json!({"file_path": "/etc/passwd"}));
 
     if result.is_allowed() {
         return Err("Should deny without allow rule".into());
     }
-    if !result.reason.contains("Rules mode") {
-        return Err(format!("Wrong reason: {}", result.reason));
+    if !result.reason().contains("No matching rule") {
+        return Err(format!("Wrong reason: {}", result.reason()));
     }
     Ok(())
 }
 
-fn test_authorization_policy_api() -> Result<(), String> {
-    let accept = AuthorizationPolicy::auto_approve_files();
-    if !accept.check("Read", &serde_json::json!({})).is_allowed() {
-        return Err("AutoApproveFiles should allow Read".into());
-    }
-    if accept.check("Bash", &serde_json::json!({})).is_allowed() {
-        return Err("AutoApproveFiles should deny Bash".into());
+fn test_tool_policy_api() -> Result<(), String> {
+    let permissive = ToolPolicy::permissive();
+    if !permissive
+        .check("Bash", &serde_json::json!({}))
+        .is_allowed()
+    {
+        return Err("Permissive should allow all".into());
     }
 
-    let bypass = AuthorizationPolicy::permissive();
-    if !bypass.check("Bash", &serde_json::json!({})).is_allowed() {
-        return Err("Permissive should allow all".into());
+    let selective = ToolPolicy::builder().allow("Read").allow("Glob").build();
+    if !selective.check("Read", &serde_json::json!({})).is_allowed() {
+        return Err("Should allow Read".into());
+    }
+    if selective.check("Bash", &serde_json::json!({})).is_allowed() {
+        return Err("Should deny Bash".into());
     }
 
     Ok(())

@@ -3,7 +3,9 @@
 mod archive;
 pub mod compact;
 mod export;
+pub mod lock;
 pub mod manager;
+pub mod memory;
 pub mod persistence;
 #[cfg(feature = "jsonl")]
 pub mod persistence_jsonl;
@@ -24,7 +26,16 @@ pub use archive::{
 };
 pub use compact::{CompactExecutor, CompactStrategy, DEFAULT_COMPACT_THRESHOLD};
 pub use export::{AuditBundle, ExportPolicy, SessionExporter};
+#[cfg(feature = "postgres")]
+pub use lock::PostgresLock;
+#[cfg(feature = "redis-backend")]
+pub use lock::RedisLock;
+pub use lock::{
+    DEFAULT_LOCK_TTL_SECS, DEFAULT_MAX_RETRIES, DEFAULT_RETRY_DELAY_MS, DistributedLock,
+    LOCK_KEY_PREFIX, LockGuard,
+};
 pub use manager::{ScopedSessionManager, SessionManager};
+pub use memory::{InMemoryStore, MemoryEntry, MemoryStore};
 pub use persistence::{MemoryPersistence, Persistence, PersistenceFactory};
 #[cfg(feature = "jsonl")]
 pub use persistence_jsonl::{

@@ -22,6 +22,10 @@ pub enum HookEvent {
     PreCompact,
     SessionStart,
     SessionEnd,
+    PostStreamChunk,
+    ModelSelection,
+    PreMessage,
+    PostMessage,
 }
 
 impl HookEvent {
@@ -41,7 +45,12 @@ impl HookEvent {
     pub fn can_block(&self) -> bool {
         matches!(
             self,
-            Self::PreToolUse | Self::UserPromptSubmit | Self::SessionStart | Self::SubagentStart
+            Self::PreToolUse
+                | Self::UserPromptSubmit
+                | Self::SessionStart
+                | Self::SubagentStart
+                | Self::ModelSelection
+                | Self::PreMessage
         )
     }
 
@@ -58,6 +67,10 @@ impl HookEvent {
             "PreCompact" => Some(Self::PreCompact),
             "SessionStart" => Some(Self::SessionStart),
             "SessionEnd" => Some(Self::SessionEnd),
+            "PostStreamChunk" => Some(Self::PostStreamChunk),
+            "ModelSelection" => Some(Self::ModelSelection),
+            "PreMessage" => Some(Self::PreMessage),
+            "PostMessage" => Some(Self::PostMessage),
             _ => None,
         }
     }
@@ -74,6 +87,10 @@ impl HookEvent {
             Self::PreCompact,
             Self::SessionStart,
             Self::SessionEnd,
+            Self::PostStreamChunk,
+            Self::ModelSelection,
+            Self::PreMessage,
+            Self::PostMessage,
         ]
     }
 }
@@ -91,6 +108,10 @@ impl std::fmt::Display for HookEvent {
             Self::PreCompact => "pre_compact",
             Self::SessionStart => "session_start",
             Self::SessionEnd => "session_end",
+            Self::PostStreamChunk => "post_stream_chunk",
+            Self::ModelSelection => "model_selection",
+            Self::PreMessage => "pre_message",
+            Self::PostMessage => "post_message",
         };
         write!(f, "{}", s)
     }
@@ -128,6 +149,26 @@ pub enum HookEventData {
     PreCompact,
     SessionStart,
     SessionEnd,
+    PostStreamChunk {
+        chunk_text: String,
+        chunk_type: String,
+        accumulated_text: Option<String>,
+    },
+    ModelSelection {
+        requested_model: String,
+        message_count: usize,
+        has_tools: bool,
+    },
+    PreMessage {
+        messages: Vec<serde_json::Value>,
+        model: String,
+    },
+    PostMessage {
+        model: String,
+        stop_reason: Option<String>,
+        input_tokens: u32,
+        output_tokens: u32,
+    },
 }
 
 impl HookEventData {
@@ -143,6 +184,10 @@ impl HookEventData {
             Self::PreCompact => HookEvent::PreCompact,
             Self::SessionStart => HookEvent::SessionStart,
             Self::SessionEnd => HookEvent::SessionEnd,
+            Self::PostStreamChunk { .. } => HookEvent::PostStreamChunk,
+            Self::ModelSelection { .. } => HookEvent::ModelSelection,
+            Self::PreMessage { .. } => HookEvent::PreMessage,
+            Self::PostMessage { .. } => HookEvent::PostMessage,
         }
     }
 
@@ -297,6 +342,70 @@ impl HookInput {
                 subagent_id: subagent_id.into(),
                 success,
                 error,
+            },
+        )
+    }
+
+    pub fn post_stream_chunk(
+        session_id: impl Into<String>,
+        chunk_text: impl Into<String>,
+        chunk_type: impl Into<String>,
+        accumulated_text: Option<String>,
+    ) -> Self {
+        Self::new(
+            session_id,
+            HookEventData::PostStreamChunk {
+                chunk_text: chunk_text.into(),
+                chunk_type: chunk_type.into(),
+                accumulated_text,
+            },
+        )
+    }
+
+    pub fn model_selection(
+        session_id: impl Into<String>,
+        requested_model: impl Into<String>,
+        message_count: usize,
+        has_tools: bool,
+    ) -> Self {
+        Self::new(
+            session_id,
+            HookEventData::ModelSelection {
+                requested_model: requested_model.into(),
+                message_count,
+                has_tools,
+            },
+        )
+    }
+
+    pub fn pre_message(
+        session_id: impl Into<String>,
+        messages: Vec<serde_json::Value>,
+        model: impl Into<String>,
+    ) -> Self {
+        Self::new(
+            session_id,
+            HookEventData::PreMessage {
+                messages,
+                model: model.into(),
+            },
+        )
+    }
+
+    pub fn post_message(
+        session_id: impl Into<String>,
+        model: impl Into<String>,
+        stop_reason: Option<String>,
+        input_tokens: u32,
+        output_tokens: u32,
+    ) -> Self {
+        Self::new(
+            session_id,
+            HookEventData::PostMessage {
+                model: model.into(),
+                stop_reason,
+                input_tokens,
+                output_tokens,
             },
         )
     }
@@ -597,6 +706,10 @@ mod tests {
         assert_eq!(HookEvent::PreToolUse.to_string(), "pre_tool_use");
         assert_eq!(HookEvent::PostToolUse.to_string(), "post_tool_use");
         assert_eq!(HookEvent::SessionStart.to_string(), "session_start");
+        assert_eq!(HookEvent::PostStreamChunk.to_string(), "post_stream_chunk");
+        assert_eq!(HookEvent::ModelSelection.to_string(), "model_selection");
+        assert_eq!(HookEvent::PreMessage.to_string(), "pre_message");
+        assert_eq!(HookEvent::PostMessage.to_string(), "post_message");
     }
 
     #[test]
@@ -607,6 +720,8 @@ mod tests {
         assert!(HookEvent::SessionStart.can_block());
         assert!(!HookEvent::PreCompact.can_block());
         assert!(HookEvent::SubagentStart.can_block());
+        assert!(HookEvent::ModelSelection.can_block());
+        assert!(HookEvent::PreMessage.can_block());
 
         // Non-blockable events (fail-open semantics)
         assert!(!HookEvent::PostToolUse.can_block());
@@ -614,6 +729,37 @@ mod tests {
         assert!(!HookEvent::SessionEnd.can_block());
         assert!(!HookEvent::SubagentStop.can_block());
         assert!(!HookEvent::Stop.can_block());
+        assert!(!HookEvent::PostStreamChunk.can_block());
+        assert!(!HookEvent::PostMessage.can_block());
+    }
+
+    #[test]
+    fn test_hook_event_from_pascal_case_new_events() {
+        assert_eq!(
+            HookEvent::from_pascal_case("PostStreamChunk"),
+            Some(HookEvent::PostStreamChunk)
+        );
+        assert_eq!(
+            HookEvent::from_pascal_case("ModelSelection"),
+            Some(HookEvent::ModelSelection)
+        );
+        assert_eq!(
+            HookEvent::from_pascal_case("PreMessage"),
+            Some(HookEvent::PreMessage)
+        );
+        assert_eq!(
+            HookEvent::from_pascal_case("PostMessage"),
+            Some(HookEvent::PostMessage)
+        );
+    }
+
+    #[test]
+    fn test_hook_event_all_includes_new_events() {
+        let all = HookEvent::all();
+        assert!(all.contains(&HookEvent::PostStreamChunk));
+        assert!(all.contains(&HookEvent::ModelSelection));
+        assert!(all.contains(&HookEvent::PreMessage));
+        assert!(all.contains(&HookEvent::PostMessage));
     }
 
     #[test]
@@ -627,6 +773,34 @@ mod tests {
         let input = HookInput::session_start("session-2");
         assert_eq!(input.event_type(), HookEvent::SessionStart);
         assert_eq!(input.session_id, "session-2");
+    }
+
+    #[test]
+    fn test_hook_input_builders_new_events() {
+        let input =
+            HookInput::post_stream_chunk("session-1", "Hello", "text", Some("Hello".into()));
+        assert_eq!(input.event_type(), HookEvent::PostStreamChunk);
+        assert_eq!(input.session_id, "session-1");
+
+        let input = HookInput::model_selection("session-1", "claude-sonnet-4-5", 5, true);
+        assert_eq!(input.event_type(), HookEvent::ModelSelection);
+        assert_eq!(input.session_id, "session-1");
+
+        let input = HookInput::pre_message(
+            "session-1",
+            vec![serde_json::json!({"role": "user"})],
+            "claude-sonnet-4-5",
+        );
+        assert_eq!(input.event_type(), HookEvent::PreMessage);
+
+        let input = HookInput::post_message(
+            "session-1",
+            "claude-sonnet-4-5",
+            Some("EndTurn".into()),
+            100,
+            50,
+        );
+        assert_eq!(input.event_type(), HookEvent::PostMessage);
     }
 
     #[test]
@@ -663,5 +837,37 @@ mod tests {
         assert_eq!(data.event_type(), HookEvent::SessionStart);
         assert_eq!(data.tool_name(), None);
         assert!(data.tool_input().is_none());
+    }
+
+    #[test]
+    fn test_hook_event_data_new_variants() {
+        let data = HookEventData::PostStreamChunk {
+            chunk_text: "hello".into(),
+            chunk_type: "text".into(),
+            accumulated_text: Some("hello world".into()),
+        };
+        assert_eq!(data.event_type(), HookEvent::PostStreamChunk);
+        assert_eq!(data.tool_name(), None);
+
+        let data = HookEventData::ModelSelection {
+            requested_model: "claude-sonnet-4-5".into(),
+            message_count: 3,
+            has_tools: true,
+        };
+        assert_eq!(data.event_type(), HookEvent::ModelSelection);
+
+        let data = HookEventData::PreMessage {
+            messages: vec![serde_json::json!({"role": "user"})],
+            model: "claude-sonnet-4-5".into(),
+        };
+        assert_eq!(data.event_type(), HookEvent::PreMessage);
+
+        let data = HookEventData::PostMessage {
+            model: "claude-sonnet-4-5".into(),
+            stop_reason: Some("EndTurn".into()),
+            input_tokens: 100,
+            output_tokens: 50,
+        };
+        assert_eq!(data.event_type(), HookEvent::PostMessage);
     }
 }

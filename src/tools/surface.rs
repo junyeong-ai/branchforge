@@ -2,7 +2,7 @@
 
 use std::collections::HashSet;
 
-use crate::authorization::{AuthorizationPolicy, AuthorizationRule};
+use crate::authorization::{ToolPolicy, ToolRule};
 use crate::common::matches_tool_pattern;
 
 /// Controls which tools are available to the agent.
@@ -68,8 +68,8 @@ impl ToolSurface {
         }
     }
 
-    pub fn default_policy(&self) -> AuthorizationPolicy {
-        let mut builder = AuthorizationPolicy::builder();
+    pub fn default_policy(&self) -> ToolPolicy {
+        let mut builder = ToolPolicy::builder();
         match self {
             Self::None => builder.build(),
             Self::Core => {
@@ -90,7 +90,7 @@ impl ToolSurface {
                 policy.rules.extend(
                     denied
                         .iter()
-                        .map(|pattern| AuthorizationRule::deny_pattern(pattern.clone())),
+                        .map(|pattern| ToolRule::deny_pattern(pattern.clone())),
                 );
                 policy
             }

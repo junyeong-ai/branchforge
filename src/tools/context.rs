@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
 
-use crate::authorization::{AuthorizationResult, ToolLimits};
+use crate::authorization::{ToolDecision, ToolLimits};
 use crate::hooks::{HookContext, HookEvent, HookInput, HookManager};
 use crate::security::bash::{BashAnalysis, SanitizedEnv};
 use crate::security::fs::SecureFileHandle;
@@ -108,7 +108,7 @@ impl ExecutionContext {
     pub fn limits_for(&self, tool_name: &str) -> ToolLimits {
         self.security
             .policy
-            .permission
+            .tool_policy
             .limits(tool_name)
             .cloned()
             .unwrap_or_default()
@@ -220,19 +220,12 @@ impl ExecutionContext {
         self.sanitized_env().vars(sandbox_env)
     }
 
-    pub fn check_permission(
-        &self,
-        tool_name: &str,
-        input: &serde_json::Value,
-    ) -> AuthorizationResult {
-        self.security.policy.permission.check(tool_name, input)
+    pub fn check_tool_policy(&self, tool_name: &str, input: &serde_json::Value) -> ToolDecision {
+        self.security.policy.tool_policy.check(tool_name, input)
     }
 
-    pub fn check_explicit_skill_permission(
-        &self,
-        input: &serde_json::Value,
-    ) -> AuthorizationResult {
-        self.security.policy.permission.check_explicit_skill(input)
+    pub fn check_explicit_skill_permission(&self, input: &serde_json::Value) -> ToolDecision {
+        self.security.policy.tool_policy.check_explicit_skill(input)
     }
 
     pub fn validate_security(

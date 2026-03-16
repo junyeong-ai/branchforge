@@ -12,7 +12,7 @@ pub use ids::{MessageId, SessionId};
 pub use message::{
     ExecutionMetadata, MessageMetadata, SessionMessage, ThinkingMetadata, ToolResultMeta,
 };
-pub use policy::{SessionAuthorization, SessionAuthorizationMode, SessionToolLimits};
+pub use policy::{SessionAuthorization, SessionExecutionMode, SessionToolLimits};
 
 use std::collections::VecDeque;
 
@@ -481,6 +481,7 @@ impl Session {
                 output_tokens: u.output_tokens as u64,
                 cache_read_input_tokens: u.cache_read_input_tokens.unwrap_or(0) as u64,
                 cache_creation_input_tokens: u.cache_creation_input_tokens.unwrap_or(0) as u64,
+                ..Default::default()
             });
         }
         self.add_message(msg)

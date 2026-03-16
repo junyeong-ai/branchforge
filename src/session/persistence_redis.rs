@@ -7,6 +7,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use super::archive::verify_restored_session_roundtrip;
+use super::lock::{DEFAULT_LOCK_TTL_SECS, DistributedLock, RedisLock};
 use super::persistence::{Persistence, validate_session_graph};
 use super::state::{Session, SessionId, SessionMessage, SessionState};
 use super::types::QueueItem;
@@ -74,6 +75,7 @@ impl RedisConfig {
 pub struct RedisPersistence {
     client: Arc<redis::Client>,
     config: RedisConfig,
+    lock: RedisLock,
 }
 
 impl RedisPersistence {
@@ -83,9 +85,11 @@ impl RedisPersistence {
 
     pub fn from_config(redis_url: &str, config: RedisConfig) -> Result<Self, redis::RedisError> {
         let client = redis::Client::open(redis_url)?;
+        let lock = RedisLock::new(redis_url)?;
         Ok(Self {
             client: Arc::new(client),
             config,
+            lock,
         })
     }
 
@@ -336,40 +340,60 @@ impl RedisPersistence {
         F: Fn(&mut Session) -> SessionResult<()>,
     {
         let key = self.session_key(session_id);
+        let lock_resource = format!("session:{}", session_id);
+        let lock_ttl = Duration::from_secs(DEFAULT_LOCK_TTL_SECS);
         let mut attempt = 0;
         let mut backoff = self.config.initial_backoff;
 
         loop {
             let result = async {
-                let mut conn = self.get_connection().await?;
-                let Some((expected_json, mut session)) =
-                    self.load_session_from_key(&mut conn, &key).await?
-                else {
-                    return Err(SessionError::NotFound {
-                        id: session_id.to_string(),
-                    });
-                };
+                // Acquire distributed lock before reading + mutating
+                let mut guard = self.lock.acquire(&lock_resource, lock_ttl).await?;
 
-                mutate(&mut session)?;
-                validate_session_graph(&session, "redis")?;
-                session.refresh_summary_cache();
-                session.refresh_message_projection();
-                let next_json =
-                    serde_json::to_string(&session).map_err(SessionError::Serialization)?;
+                let inner_result = async {
+                    let mut conn = self.get_connection().await?;
+                    let Some((expected_json, mut session)) =
+                        self.load_session_from_key(&mut conn, &key).await?
+                    else {
+                        return Err(SessionError::NotFound {
+                            id: session_id.to_string(),
+                        });
+                    };
 
-                if self
-                    .compare_and_set_session(&mut conn, &key, &expected_json, &next_json)
-                    .await?
-                {
-                    Ok(())
-                } else {
-                    Err(SessionError::Storage {
-                        message: format!(
-                            "REDIS_SESSION_CONFLICT during {operation} for session {}",
-                            session_id
-                        ),
-                    })
+                    mutate(&mut session)?;
+                    validate_session_graph(&session, "redis")?;
+                    session.refresh_summary_cache();
+                    session.refresh_message_projection();
+                    let next_json =
+                        serde_json::to_string(&session).map_err(SessionError::Serialization)?;
+
+                    if self
+                        .compare_and_set_session(&mut conn, &key, &expected_json, &next_json)
+                        .await?
+                    {
+                        Ok(())
+                    } else {
+                        Err(SessionError::Storage {
+                            message: format!(
+                                "REDIS_SESSION_CONFLICT during {operation} for session {}",
+                                session_id
+                            ),
+                        })
+                    }
                 }
+                .await;
+
+                // Always release the lock, even on error
+                if let Err(release_err) = self.lock.release(&mut guard).await {
+                    tracing::warn!(
+                        session_id = %session_id,
+                        operation,
+                        error = %release_err,
+                        "Failed to release distributed lock"
+                    );
+                }
+
+                inner_result
             }
             .await;
 

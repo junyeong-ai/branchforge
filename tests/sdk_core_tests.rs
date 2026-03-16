@@ -1100,7 +1100,7 @@ mod tool_execution_tests {
         let registry = branchforge::ToolRegistry::default_tools(
             branchforge::ToolSurface::All,
             Some(std::path::PathBuf::from("/tmp")),
-            Some(branchforge::AuthorizationPolicy::permissive()),
+            Some(branchforge::ToolPolicy::permissive()),
         );
         let result = registry
             .execute(
@@ -1388,6 +1388,7 @@ mod caching_tests {
             output_tokens: 500,
             cache_read_input_tokens: 8000,
             cache_creation_input_tokens: 0,
+            ..Default::default()
         };
         assert!((usage.cache_hit_rate() - 0.8).abs() < 0.01);
     }

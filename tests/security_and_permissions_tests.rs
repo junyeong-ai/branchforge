@@ -80,8 +80,7 @@ mod security_tests {
 
 mod authorization_tests {
     use branchforge::authorization::{
-        AuthorizationMode, AuthorizationPolicyBuilder, is_file_tool, is_read_only_tool,
-        is_shell_tool,
+        ExecutionMode, ToolPolicyBuilder, is_file_tool, is_read_only_tool, is_shell_tool,
     };
 
     #[test]
@@ -102,19 +101,16 @@ mod authorization_tests {
     }
 
     #[test]
-    fn test_authorization_modes() {
-        assert_eq!(AuthorizationMode::default(), AuthorizationMode::Rules);
-        assert_eq!(AuthorizationMode::AllowAll.to_string(), "allowAll");
-        assert_eq!(AuthorizationMode::ReadOnly.to_string(), "readOnly");
-        assert_eq!(
-            AuthorizationMode::AutoApproveFiles.to_string(),
-            "autoApproveFiles"
-        );
+    fn test_execution_modes() {
+        assert!(matches!(ExecutionMode::default(), ExecutionMode::Auto));
+        assert_eq!(ExecutionMode::Auto.to_string(), "auto");
+        assert_eq!(ExecutionMode::Plan.to_string(), "plan");
+        assert_eq!(ExecutionMode::Supervised.to_string(), "supervised");
     }
 
     #[test]
-    fn test_authorization_policy_builder() {
-        let policy = AuthorizationPolicyBuilder::new()
+    fn test_tool_policy_builder() {
+        let policy = ToolPolicyBuilder::new()
             .allow("Read")
             .allow("Glob")
             .deny("Bash")

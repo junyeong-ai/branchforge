@@ -24,7 +24,7 @@ pub use message::{CacheControl, CacheTtl, CacheType, Message, Role, SystemBlock,
 pub use response::{
     ApiResponse, AuthorizationDenied, CompactResult, ContentDelta, MessageDeltaData,
     MessageStartData, ModelUsage, ServerToolUse, ServerToolUseUsage, StopReason, StreamError,
-    StreamEvent, TokenUsage, Usage,
+    StreamEvent, TokenUsage, Usage, UsageProvider,
 };
 pub use search::{SearchResultBlock, SearchResultContentBlock};
 pub use tool::{

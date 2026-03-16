@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use crate::agent::{AgentBuilder, AgentConfig, AgentResult};
 use crate::auth::Auth;
-use crate::authorization::{AuthorizationMode, AuthorizationPolicy, AuthorizationRule};
+use crate::authorization::{ExecutionMode, ToolPolicy, ToolRule};
 use crate::client::{ModelConfig, ModelType, ProviderConfig};
 use crate::common::{IndexRegistry, matches_tool_pattern};
 use crate::config::SandboxSettings;
@@ -257,25 +257,25 @@ impl DelegationRuntime {
                 &subagent.mcp_servers,
             )
             .await;
-        let mut policy = restricted_authorization_policy(
+        let policy = restricted_tool_policy(
             &self.config.security.authorization_policy,
             &subagent.disallowed_tools,
             skills_enabled,
         );
-        if let Some(mode) = subagent
-            .authorization_mode
-            .as_deref()
-            .and_then(parse_authorization_mode)
-        {
-            policy.mode = mode;
-        }
-
         let mut builder = builder
             .skill_registry(skill_registry)
             .subagent_registry(self.subagent_registry.clone())
             .tools(access)
             .authorization_policy(policy)
             .hooks_manager(hooks);
+
+        if let Some(mode) = subagent
+            .authorization_mode
+            .as_deref()
+            .and_then(parse_execution_mode)
+        {
+            builder = builder.execution_mode(mode);
+        }
 
         if let Some(max_turns) = subagent.max_turns {
             builder = builder.max_iterations(max_turns);
@@ -323,16 +323,17 @@ impl DelegationRuntime {
         let mcp_servers = subagent
             .map(|agent| agent.mcp_servers.as_slice())
             .unwrap_or_default();
-        let mut policy = restricted_authorization_policy(
+        let policy = restricted_tool_policy(
             &self.config.security.authorization_policy,
             inherited_disallowed,
             skills_enabled,
         );
+        let mut builder = builder;
         if let Some(mode) = subagent
             .and_then(|agent| agent.authorization_mode.as_deref())
-            .and_then(parse_authorization_mode)
+            .and_then(parse_execution_mode)
         {
-            policy.mode = mode;
+            builder = builder.execution_mode(mode);
         }
 
         builder
@@ -590,33 +591,25 @@ fn apply_mcp_server_tool_filter(
     }
 }
 
-fn restricted_authorization_policy(
-    base: &AuthorizationPolicy,
+fn restricted_tool_policy(
+    base: &ToolPolicy,
     disallowed: &[String],
     skills_enabled: bool,
-) -> AuthorizationPolicy {
+) -> ToolPolicy {
     let mut policy = base.clone();
     for tool in disallowed {
-        policy.rules.push(AuthorizationRule::deny_pattern(tool));
+        policy.rules.push(ToolRule::deny_pattern(tool));
     }
-    policy.rules.push(AuthorizationRule::deny_pattern("Task"));
-    policy
-        .rules
-        .push(AuthorizationRule::deny_pattern("TaskOutput"));
+    policy.rules.push(ToolRule::deny_pattern("Task"));
+    policy.rules.push(ToolRule::deny_pattern("TaskOutput"));
     if !skills_enabled {
-        policy.rules.push(AuthorizationRule::deny_pattern("Skill"));
+        policy.rules.push(ToolRule::deny_pattern("Skill"));
     }
     policy
 }
 
-fn parse_authorization_mode(value: &str) -> Option<AuthorizationMode> {
-    match value.to_ascii_lowercase().as_str() {
-        "autoapprovefiles" | "auto-approve-files" | "auto_approve_files" => {
-            Some(AuthorizationMode::AutoApproveFiles)
-        }
-        "allowall" | "allow-all" | "allow_all" => Some(AuthorizationMode::AllowAll),
-        other => other.parse().ok(),
-    }
+fn parse_execution_mode(value: &str) -> Option<ExecutionMode> {
+    value.parse().ok()
 }
 
 #[cfg(test)]

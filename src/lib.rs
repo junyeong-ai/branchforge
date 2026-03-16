@@ -63,6 +63,7 @@ pub mod common;
 pub mod config;
 pub mod context;
 pub mod credentials;
+pub mod events;
 pub mod graph;
 pub mod hooks;
 pub mod mcp;
@@ -90,7 +91,7 @@ pub mod types;
 
 pub use agent::{Agent, AgentBuilder, AgentConfig, AgentEvent, AgentResult};
 pub use auth::{Auth, Credential};
-pub use authorization::{AuthorizationMode, AuthorizationPolicy};
+pub use authorization::{ExecutionMode, ToolPolicy};
 pub use client::{Client, ClientBuilder};
 pub use credentials::{CredentialKind, CredentialRecord};
 pub use graph::{
@@ -124,8 +125,8 @@ pub use context::{
 pub use hooks::{CommandHook, Hook, HookContext, HookEvent, HookManager, HookOutput};
 pub use output_style::OutputStyle;
 pub use session::{
-    ScopedSessionManager, Session, SessionConfig, SessionId, SessionManager, SessionMessage,
-    SessionState, ToolState,
+    InMemoryStore, MemoryEntry, MemoryStore, ScopedSessionManager, Session, SessionConfig,
+    SessionId, SessionManager, SessionMessage, SessionState, ToolState,
 };
 pub use skills::{SkillIndex, SkillResult, SkillRuntime};
 pub use subagents::{SubagentIndex, builtin_subagents};
@@ -136,6 +137,10 @@ pub use auth::ClaudeCliProvider;
 pub use client::BedrockAdapter;
 #[cfg(feature = "azure")]
 pub use client::FoundryAdapter;
+#[cfg(feature = "gemini")]
+pub use client::GeminiAdapter;
+#[cfg(feature = "openai")]
+pub use client::OpenAiAdapter;
 #[cfg(feature = "gcp")]
 pub use client::VertexAdapter;
 #[cfg(feature = "cli-integration")]

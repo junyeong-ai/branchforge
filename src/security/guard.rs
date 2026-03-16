@@ -19,7 +19,7 @@ impl SecurityGuard {
     ) -> Result<(), SecurityError> {
         let limits = security
             .policy
-            .permission
+            .tool_policy
             .limits(tool_name)
             .cloned()
             .unwrap_or_default();

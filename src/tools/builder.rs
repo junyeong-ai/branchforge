@@ -10,7 +10,7 @@ use super::registry::ToolRegistry;
 use super::surface::ToolSurface;
 use super::traits::Tool;
 use crate::agent::{TaskOutputTool, TaskRegistry, TaskTool};
-use crate::authorization::AuthorizationPolicy;
+use crate::authorization::ToolPolicy;
 use crate::common::IndexRegistry;
 use crate::hooks::HookManager;
 use crate::session::session_state::ToolState;
@@ -23,7 +23,7 @@ pub struct ToolRegistryBuilder {
     task_registry: Option<TaskRegistry>,
     skill_executor: Option<crate::skills::SkillRuntime>,
     subagent_registry: Option<IndexRegistry<SubagentIndex>>,
-    policy: Option<AuthorizationPolicy>,
+    policy: Option<ToolPolicy>,
     sandbox_config: Option<crate::security::SandboxConfig>,
     tool_state: Option<ToolState>,
     session_id: Option<SessionId>,
@@ -35,7 +35,7 @@ pub struct ToolRegistryBuilder {
 }
 
 impl ToolRegistryBuilder {
-    fn effective_authorization_policy(&self) -> AuthorizationPolicy {
+    fn effective_tool_policy(&self) -> ToolPolicy {
         self.policy
             .clone()
             .unwrap_or_else(|| self.access.default_policy())
@@ -98,7 +98,7 @@ impl ToolRegistryBuilder {
         self
     }
 
-    pub fn policy(mut self, policy: AuthorizationPolicy) -> Self {
+    pub fn policy(mut self, policy: ToolPolicy) -> Self {
         self.policy = Some(policy);
         self
     }
@@ -140,7 +140,7 @@ impl ToolRegistryBuilder {
 
     pub fn build(self) -> ToolRegistry {
         let access = &self.access;
-        let authorization_policy = self.effective_authorization_policy();
+        let tool_policy = self.effective_tool_policy();
         let wd = self
             .working_dir
             .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
@@ -154,7 +154,7 @@ impl ToolRegistryBuilder {
             .sandbox(sandbox_config)
             .build()
             .map(|mut security| {
-                security.policy = crate::security::SecurityPolicy::new(authorization_policy);
+                security.policy = crate::security::SecurityPolicy::new(tool_policy);
                 security
             })
             .unwrap_or_else(|_| crate::security::SecurityContext::permissive());
@@ -231,7 +231,7 @@ impl ToolRegistryBuilder {
             process_manager: Some(process_manager),
         };
 
-        let mut registry = ToolRegistry::from_env(task_registry, env);
+        let registry = ToolRegistry::from_env(task_registry, env);
 
         for tool in all_tools {
             if access.is_allowed(tool.name()) {
@@ -252,7 +252,7 @@ impl Default for ToolRegistryBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::authorization::AuthorizationPolicy;
+    use crate::authorization::ToolPolicy;
 
     #[tokio::test]
     async fn default_builder_policy_allows_visible_tools() {
@@ -278,14 +278,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn explicit_default_authorization_policy_still_denies_without_rules() {
+    async fn explicit_default_tool_policy_still_denies_without_rules() {
         let dir = tempfile::tempdir().unwrap();
         let file = dir.path().join("value.txt");
         tokio::fs::write(&file, "visible").await.unwrap();
 
         let registry = ToolRegistryBuilder::new()
             .access(ToolSurface::only(["Read"]))
-            .policy(AuthorizationPolicy::default())
+            .policy(ToolPolicy::default())
             .working_dir(dir.path())
             .build();
 
@@ -303,9 +303,7 @@ mod tests {
             "explicit default policy should remain fail-closed"
         );
         assert!(
-            result
-                .error_message()
-                .contains("Rules mode: tool not explicitly allowed"),
+            result.error_message().contains("No matching rule"),
             "expected permission-denied error, got {}",
             result.error_message()
         );

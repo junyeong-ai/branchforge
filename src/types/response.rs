@@ -8,6 +8,36 @@ use serde::{Deserialize, Serialize};
 use super::ContentBlock;
 use super::citations::{Citation, SearchResultLocationCitation};
 
+/// Provider that generated this usage.
+///
+/// Used for provider-aware cost attribution when calculating pricing
+/// across different API providers (Anthropic, OpenAI, Gemini, etc.).
+#[derive(Clone, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum UsageProvider {
+    #[default]
+    Anthropic,
+    OpenAi,
+    Gemini,
+    Bedrock,
+    Vertex,
+    Foundry,
+    Unknown(String),
+}
+
+impl std::fmt::Display for UsageProvider {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Anthropic => write!(f, "Anthropic"),
+            Self::OpenAi => write!(f, "OpenAI"),
+            Self::Gemini => write!(f, "Gemini"),
+            Self::Bedrock => write!(f, "Bedrock"),
+            Self::Vertex => write!(f, "Vertex"),
+            Self::Foundry => write!(f, "Foundry"),
+            Self::Unknown(name) => write!(f, "{}", name),
+        }
+    }
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TokenUsage {
     pub input_tokens: u64,
@@ -16,6 +46,9 @@ pub struct TokenUsage {
     pub cache_read_input_tokens: u64,
     #[serde(default)]
     pub cache_creation_input_tokens: u64,
+    /// Provider that generated this usage, for provider-aware cost attribution.
+    #[serde(default)]
+    pub provider: UsageProvider,
 }
 
 impl TokenUsage {
@@ -56,6 +89,7 @@ impl From<&Usage> for TokenUsage {
             output_tokens: usage.output_tokens as u64,
             cache_read_input_tokens: usage.cache_read_input_tokens.unwrap_or(0) as u64,
             cache_creation_input_tokens: usage.cache_creation_input_tokens.unwrap_or(0) as u64,
+            ..Default::default()
         }
     }
 }

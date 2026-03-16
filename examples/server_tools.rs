@@ -5,7 +5,7 @@
 //!
 //! Run: cargo run --example server_tools
 
-use branchforge::{Agent, Auth, ToolSurface, authorization::AuthorizationMode};
+use branchforge::{Agent, Auth, ToolSurface, authorization::ToolPolicy};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Instant;
 
@@ -56,7 +56,7 @@ async fn test_web_search() -> Result<(), String> {
         .await
         .map_err(|e| format!("Auth: {}", e))?
         .tools(ToolSurface::all())
-        .authorization_mode(AuthorizationMode::AllowAll)
+        .authorization_policy(ToolPolicy::permissive())
         .working_dir(".")
         .build()
         .await
@@ -84,7 +84,7 @@ async fn test_web_fetch() -> Result<(), String> {
         .await
         .map_err(|e| format!("Auth: {}", e))?
         .tools(ToolSurface::all())
-        .authorization_mode(AuthorizationMode::AllowAll)
+        .authorization_policy(ToolPolicy::permissive())
         .working_dir(".")
         .build()
         .await

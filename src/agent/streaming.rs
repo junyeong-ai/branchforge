@@ -18,6 +18,7 @@ use super::events::{AgentEvent, AgentResult};
 use super::executor::Agent;
 use super::request::RequestBuilder;
 use super::{AgentConfig, AgentMetrics};
+use crate::authorization::ExecutionMode;
 use crate::budget::{BudgetTracker, TenantBudget};
 use crate::client::{RecoverableStream, StreamItem};
 use crate::context::PromptOrchestrator;
@@ -85,6 +86,8 @@ impl Agent {
                 tenant_budget: self.tenant_budget.clone(),
                 session_manager: self.session_manager.clone(),
                 session_scope: self.session_scope.clone(),
+                event_bus: self.event_bus.clone(),
+                execution_mode: self.execution_mode.clone(),
             },
             timeout,
             prompt.to_string(),
@@ -110,6 +113,8 @@ struct StreamStateConfig {
     tenant_budget: Option<Arc<TenantBudget>>,
     session_manager: Option<SessionManager>,
     session_scope: Option<SessionAccessScope>,
+    event_bus: Option<Arc<crate::events::EventBus>>,
+    execution_mode: ExecutionMode,
 }
 
 enum StreamPollResult {
@@ -431,6 +436,69 @@ impl StreamState {
             })
             .await;
 
+        // Fire ModelSelection hook - allows overriding the model
+        let model_input = HookInput::model_selection(
+            &*self.cfg.session_id,
+            self.cfg.request_builder.current_model(),
+            messages.len(),
+            self.cfg.request_builder.has_tools(),
+        );
+        match self
+            .cfg
+            .hooks
+            .execute(
+                HookEvent::ModelSelection,
+                model_input,
+                &self.cfg.hook_context,
+            )
+            .await
+        {
+            Ok(output) => {
+                if let Some(ref updated) = output.updated_input
+                    && let Some(model_override) = updated.get("model").and_then(|v| v.as_str())
+                {
+                    self.cfg.request_builder.set_model(model_override);
+                }
+            }
+            Err(e) => {
+                warn!(error = %e, "ModelSelection hook failed, blocking request");
+                self.phase = Phase::Done;
+                return Some(Err(e));
+            }
+        }
+
+        // Fire PreMessage hook - can block the message
+        let messages_json: Vec<serde_json::Value> = messages
+            .iter()
+            .filter_map(|m| serde_json::to_value(m).ok())
+            .collect();
+        let pre_msg_input = HookInput::pre_message(
+            &*self.cfg.session_id,
+            messages_json,
+            self.cfg.request_builder.current_model(),
+        );
+        match self
+            .cfg
+            .hooks
+            .execute(HookEvent::PreMessage, pre_msg_input, &self.cfg.hook_context)
+            .await
+        {
+            Ok(output) => {
+                if !output.continue_execution {
+                    self.phase = Phase::Done;
+                    return Some(Err(crate::Error::Authorization(
+                        output
+                            .stop_reason
+                            .unwrap_or_else(|| "Blocked by PreMessage hook".into()),
+                    )));
+                }
+            }
+            Err(e) => {
+                self.phase = Phase::Done;
+                return Some(Err(e));
+            }
+        }
+
         let stream_request = self
             .cfg
             .request_builder
@@ -496,18 +564,38 @@ impl StreamState {
         match item {
             StreamItem::Text(text) => {
                 self.final_text.push_str(&text);
+                self.fire_post_stream_chunk_sync(&text, "text");
                 StreamPollResult::Event(Ok(AgentEvent::Text(text)))
             }
             StreamItem::Thinking(thinking) => {
+                self.fire_post_stream_chunk_sync(&thinking, "thinking");
                 StreamPollResult::Event(Ok(AgentEvent::Thinking(thinking)))
             }
             StreamItem::Citation(_) => StreamPollResult::Continue,
             StreamItem::ToolUseComplete(tool_use) => {
+                self.fire_post_stream_chunk_sync(&tool_use.name, "tool_use");
                 self.pending_tool_uses.push(tool_use);
                 StreamPollResult::Continue
             }
             StreamItem::Event(event) => self.handle_stream_event(event, accumulated_usage),
         }
+    }
+
+    /// Fire PostStreamChunk hook in a non-blocking, fail-open manner.
+    fn fire_post_stream_chunk_sync(&self, chunk_text: &str, chunk_type: &str) {
+        let hooks = Arc::clone(&self.cfg.hooks);
+        let hook_context = self.cfg.hook_context.clone();
+        let input = HookInput::post_stream_chunk(
+            &*self.cfg.session_id,
+            chunk_text,
+            chunk_type,
+            Some(self.final_text.clone()),
+        );
+        tokio::spawn(async move {
+            let _ = hooks
+                .execute(HookEvent::PostStreamChunk, input, &hook_context)
+                .await;
+        });
     }
 
     fn handle_stream_event(
@@ -544,6 +632,24 @@ impl StreamState {
         &mut self,
         accumulated_usage: Usage,
     ) -> Option<crate::Result<AgentEvent>> {
+        // Fire PostMessage hook (observation only, fail-open)
+        let post_msg_input = HookInput::post_message(
+            &*self.cfg.session_id,
+            self.cfg.request_builder.current_model(),
+            None, // stop_reason is not directly available from stream end
+            accumulated_usage.input_tokens,
+            accumulated_usage.output_tokens,
+        );
+        let _ = self
+            .cfg
+            .hooks
+            .execute(
+                HookEvent::PostMessage,
+                post_msg_input,
+                &self.cfg.hook_context,
+            )
+            .await;
+
         accumulate_response_usage(
             &mut self.total_usage,
             &mut self.metrics,
@@ -552,6 +658,19 @@ impl StreamState {
             &self.cfg.config.model.primary,
             &accumulated_usage,
         );
+
+        // Emit per-turn usage event for real-time token tracking
+        if let Some(ref bus) = self.cfg.event_bus {
+            bus.emit_simple(
+                crate::events::EventKind::TokensConsumed,
+                serde_json::json!({
+                    "input_tokens": accumulated_usage.input_tokens,
+                    "output_tokens": accumulated_usage.output_tokens,
+                    "model": self.cfg.config.model.primary,
+                }),
+            );
+        }
+
         let structured_output = self.extract_structured_output(&self.final_text);
 
         self.cfg
@@ -671,6 +790,46 @@ impl StreamState {
                 });
             } else {
                 let actual_input = pre_output.updated_input.unwrap_or(tool_use.input.clone());
+
+                // ExecutionMode: Plan mode blocks non-plan tools
+                if self.cfg.execution_mode.is_plan()
+                    && !self.cfg.execution_mode.allows_tool(&tool_use.name)
+                {
+                    let reason = format!(
+                        "Tool '{}' is not available in plan mode. Only read/navigation tools are allowed.",
+                        tool_use.name
+                    );
+                    all_tool_results.push(ToolResultBlock::error(&tool_use.id, reason.clone()));
+                    events.push(AgentEvent::ToolBlocked {
+                        id: tool_use.id.clone(),
+                        name: tool_use.name.clone(),
+                        reason,
+                    });
+                    continue;
+                }
+
+                // ExecutionMode: Supervised mode requires review
+                if self.cfg.execution_mode.requires_review(&tool_use.name) {
+                    events.push(AgentEvent::ToolReview {
+                        id: tool_use.id.clone(),
+                        name: tool_use.name.clone(),
+                        input: actual_input.clone(),
+                    });
+                    all_tool_results.push(ToolResultBlock::error(
+                        &tool_use.id,
+                        format!(
+                            "Tool '{}' requires user review. Use execute_stream() to handle ToolReview events.",
+                            tool_use.name
+                        ),
+                    ));
+                    continue;
+                }
+
+                events.push(AgentEvent::ToolStart {
+                    id: tool_use.id.clone(),
+                    name: tool_use.name.clone(),
+                    input: actual_input.clone(),
+                });
                 self.cfg
                     .tool_state
                     .append_graph_node(
@@ -739,6 +898,18 @@ impl StreamState {
             )
             .await;
 
+            // Emit to EventBus for observability
+            if let Some(ref bus) = self.cfg.event_bus {
+                bus.emit_simple(
+                    crate::events::EventKind::ToolExecuted,
+                    serde_json::json!({
+                        "tool_name": &name,
+                        "duration_ms": duration_ms,
+                        "is_error": is_error,
+                    }),
+                );
+            }
+
             self.cfg
                 .tool_state
                 .record_tool_execution(
@@ -796,6 +967,7 @@ impl StreamState {
             &self.cfg.config.execution,
             max_tokens,
             &mut self.metrics,
+            self.cfg.event_bus.as_deref(),
         )
         .await;
         persist_stream_session_state(

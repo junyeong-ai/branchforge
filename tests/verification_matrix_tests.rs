@@ -92,6 +92,7 @@ async fn progressive_disclosure_matrix_preserves_manual_only_and_rule_scoping() 
         output_tokens: 0,
         cache_creation_input_tokens: 0,
         cache_read_input_tokens: 0,
+        ..Default::default()
     });
     assert!(orchestrator.needs_compact());
 }
