@@ -210,13 +210,13 @@ mod tests {
             .base_dir(".")
             .triggers(["research"]);
         skill.context = Some("fork".to_string());
-        skill.agent = Some("Explore".to_string());
+        skill.agent = Some("explore".to_string());
         registry.register(skill);
 
         let runtime = SkillRuntime::new(registry);
         let spec = runtime.load_spec("research", Some("topic")).await.unwrap();
         assert_eq!(spec.execution_kind, SkillExecutionKind::Fork);
-        assert_eq!(spec.agent.as_deref(), Some("Explore"));
+        assert_eq!(spec.agent.as_deref(), Some("explore"));
     }
 
     #[tokio::test]

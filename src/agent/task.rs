@@ -596,12 +596,12 @@ mod tests {
         let input: TaskInput = serde_json::from_value(serde_json::json!({
             "description": "Search files",
             "prompt": "Find all Rust files",
-            "subagent_type": "Explore"
+            "subagent_type": "explore"
         }))
         .unwrap();
 
         assert_eq!(input.description, "Search files");
-        assert_eq!(input.subagent_type, "Explore");
+        assert_eq!(input.subagent_type, "explore");
     }
 
     #[tokio::test]
@@ -613,7 +613,7 @@ mod tests {
         registry
             .register_or_resume_background(
                 "00000000-0000-0000-0000-0000000000aa".into(),
-                "Explore".into(),
+                "explore".into(),
                 "Existing task".into(),
                 1,
             )
@@ -633,7 +633,7 @@ mod tests {
                 serde_json::json!({
                     "description": "New task",
                     "prompt": "Do something",
-                    "subagent_type": "general-purpose",
+                    "subagent_type": "general",
                     "run_in_background": true
                 }),
                 &context,
@@ -652,10 +652,10 @@ mod tests {
         let mut subagent_registry = IndexRegistry::new();
         subagent_registry.register_all(builtin_subagents());
 
-        assert!(subagent_registry.contains("Bash"));
-        assert!(subagent_registry.contains("Explore"));
-        assert!(subagent_registry.contains("Plan"));
-        assert!(subagent_registry.contains("general-purpose"));
+        assert!(subagent_registry.contains("bash"));
+        assert!(subagent_registry.contains("explore"));
+        assert!(subagent_registry.contains("plan"));
+        assert!(subagent_registry.contains("general"));
 
         let _tool = TaskTool::new(registry).subagent_registry(subagent_registry);
     }
@@ -727,7 +727,7 @@ mod tests {
                 serde_json::json!({
                     "description": "Replay task",
                     "prompt": "Inspect prior session",
-                    "subagent_type": "Explore",
+                    "subagent_type": "explore",
                     "replay_session": "session-123"
                 }),
                 &context,
@@ -766,7 +766,7 @@ mod tests {
                 serde_json::json!({
                     "description": "Replay task",
                     "prompt": "Inspect prior session",
-                    "subagent_type": "Explore",
+                    "subagent_type": "explore",
                     "replay_session": session.id.to_string()
                 }),
                 &context,
@@ -794,7 +794,7 @@ mod tests {
                 serde_json::json!({
                     "description": "Replay task",
                     "prompt": "Inspect prior session",
-                    "subagent_type": "Explore",
+                    "subagent_type": "explore",
                     "replay_session": session.id.to_string(),
                     "replay_from_node": "not-a-uuid"
                 }),
@@ -821,7 +821,7 @@ mod tests {
                 serde_json::json!({
                     "description": "Replay task",
                     "prompt": "Inspect prior session",
-                    "subagent_type": "Explore",
+                    "subagent_type": "explore",
                     "replay_session": "not-a-uuid"
                 }),
                 &context,

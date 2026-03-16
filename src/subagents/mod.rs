@@ -25,7 +25,7 @@
 //! use branchforge::subagents::SubagentIndex;
 //!
 //! // Create subagent with metadata only (prompt loaded lazily)
-//! let subagent = SubagentIndex::new("Explore", "Fast codebase exploration")
+//! let subagent = SubagentIndex::new("explore", "Fast codebase exploration")
 //!     .source(ContentSource::in_memory("You are an exploration agent..."))
 //!     .tools(["Read", "Grep", "Glob"]);
 //!
@@ -85,7 +85,7 @@ mod tests {
 
     #[test]
     fn test_no_tool_restrictions() {
-        let subagent = SubagentIndex::new("general-purpose", "General purpose agent")
+        let subagent = SubagentIndex::new("general", "General purpose agent")
             .source(ContentSource::in_memory("Do anything"));
 
         assert!(!subagent.has_tool_restrictions());

@@ -439,6 +439,7 @@ impl SessionArchiveService {
             todos: bundle.todos.clone(),
             current_plan: bundle.current_plan.clone(),
             compact_history: bundle.compact_history.iter().cloned().collect(),
+            event_bus: None,
         };
         session.refresh_summary_cache();
         session.refresh_message_projection();
@@ -810,7 +811,7 @@ mod tests {
 
         let mut session = Session::new_subagent(
             parent.id,
-            "Explore",
+            "explore",
             "Review auth",
             SessionConfig::default(),
         );

@@ -67,7 +67,7 @@ pub struct SkillIndex {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context: Option<String>,
 
-    /// Agent to delegate execution to (e.g., "Explore", "Plan")
+    /// Agent to delegate execution to (e.g., "explore", "plan")
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent: Option<String>,
 

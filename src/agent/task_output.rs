@@ -196,7 +196,7 @@ mod tests {
     async fn test_task_output_completed() {
         let registry = test_registry();
         registry
-            .register_or_resume(TASK_1_UUID.into(), "Explore".into(), "Test".into())
+            .register_or_resume(TASK_1_UUID.into(), "explore".into(), "Test".into())
             .await
             .unwrap();
         registry
@@ -245,7 +245,7 @@ mod tests {
     async fn test_task_output_non_blocking() {
         let registry = test_registry();
         registry
-            .register_or_resume(TASK_2_UUID.into(), "Explore".into(), "Running".into())
+            .register_or_resume(TASK_2_UUID.into(), "explore".into(), "Running".into())
             .await
             .unwrap();
 
@@ -270,7 +270,7 @@ mod tests {
     async fn test_task_output_failed() {
         let registry = test_registry();
         registry
-            .register_or_resume(TASK_3_UUID.into(), "Explore".into(), "Failing".into())
+            .register_or_resume(TASK_3_UUID.into(), "explore".into(), "Failing".into())
             .await
             .unwrap();
         registry
@@ -299,7 +299,7 @@ mod tests {
     async fn test_task_output_includes_structured_output() {
         let registry = test_registry();
         registry
-            .register_or_resume(TASK_1_UUID.into(), "Explore".into(), "Structured".into())
+            .register_or_resume(TASK_1_UUID.into(), "explore".into(), "Structured".into())
             .await
             .unwrap();
 
@@ -345,7 +345,7 @@ mod tests {
     async fn test_task_output_preserves_content_blocks_and_text() {
         let registry = test_registry();
         registry
-            .register_or_resume(TASK_1_UUID.into(), "Explore".into(), "Rich content".into())
+            .register_or_resume(TASK_1_UUID.into(), "explore".into(), "Rich content".into())
             .await
             .unwrap();
 
@@ -389,7 +389,7 @@ mod tests {
     async fn test_task_output_includes_execution_and_response_metadata() {
         let registry = test_registry();
         registry
-            .register_or_resume(TASK_1_UUID.into(), "Explore".into(), "Observed".into())
+            .register_or_resume(TASK_1_UUID.into(), "explore".into(), "Observed".into())
             .await
             .unwrap();
 

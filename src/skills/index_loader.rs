@@ -313,7 +313,7 @@ Content"#;
 name: explore-skill
 description: Explore codebase
 context: fork
-agent: Explore
+agent: explore
 ---
 Content"#;
 
@@ -323,7 +323,7 @@ Content"#;
             .unwrap();
 
         assert_eq!(index.context, Some("fork".to_string()));
-        assert_eq!(index.agent, Some("Explore".to_string()));
+        assert_eq!(index.agent, Some("explore".to_string()));
     }
 
     #[test]

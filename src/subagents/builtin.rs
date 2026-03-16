@@ -1,14 +1,16 @@
-//! Built-in subagent definitions matching Claude Code CLI.
+//! Built-in subagent definitions.
+//!
+//! Subagent names use lowercase convention (matching skills and execution modes),
+//! distinct from tool names which use PascalCase.
 
 use super::SubagentIndex;
 use crate::client::ModelType;
 use crate::common::{ContentSource, SourceType};
 
 /// Bash agent - Command execution specialist.
-/// CLI name: "Bash"
 pub fn bash_subagent() -> SubagentIndex {
     SubagentIndex::new(
-        "Bash",
+        "bash",
         "Command execution specialist for running bash commands. Use this for git operations, command execution, and other terminal tasks.",
     )
     .source(ContentSource::in_memory(
@@ -27,10 +29,9 @@ Always verify command safety before execution. Return clear, concise results."#,
 }
 
 /// Explore agent - Fast codebase exploration.
-/// CLI name: "Explore"
 pub fn explore_subagent() -> SubagentIndex {
     SubagentIndex::new(
-        "Explore",
+        "explore",
         "Fast agent specialized for exploring codebases. Use this when you need to quickly find files by patterns, search code for keywords, or answer questions about the codebase. When calling this agent, specify the desired thoroughness level: \"quick\" for basic searches, \"medium\" for moderate exploration, or \"very thorough\" for comprehensive analysis across multiple locations and naming conventions.",
     )
     .source(ContentSource::in_memory(
@@ -54,10 +55,9 @@ Be thorough but efficient. Return a concise summary of your findings."#,
 }
 
 /// Plan agent - Software architect for implementation planning.
-/// CLI name: "Plan"
 pub fn plan_subagent() -> SubagentIndex {
     SubagentIndex::new(
-        "Plan",
+        "plan",
         "Software architect agent for designing implementation plans. Use this when you need to plan the implementation strategy for a task. Returns step-by-step plans, identifies critical files, and considers architectural trade-offs.",
     )
     .source(ContentSource::in_memory(
@@ -82,10 +82,9 @@ Present your plan clearly with:
 }
 
 /// General-purpose agent - Full capability for complex tasks.
-/// CLI name: "general-purpose"
 pub fn general_purpose_subagent() -> SubagentIndex {
     SubagentIndex::new(
-        "general-purpose",
+        "general",
         "General-purpose agent for researching complex questions, searching for code, and executing multi-step tasks. When you are searching for a keyword or file and are not confident that you will find the right match in the first few tries, use this agent to perform the search for you.",
     )
     .source(ContentSource::in_memory(
@@ -120,10 +119,10 @@ pub fn builtin_subagents() -> Vec<SubagentIndex> {
 
 pub fn find_builtin(name: &str) -> Option<SubagentIndex> {
     match name {
-        "Bash" => Some(bash_subagent()),
-        "Explore" => Some(explore_subagent()),
-        "Plan" => Some(plan_subagent()),
-        "general-purpose" => Some(general_purpose_subagent()),
+        "bash" => Some(bash_subagent()),
+        "explore" => Some(explore_subagent()),
+        "plan" => Some(plan_subagent()),
+        "general" => Some(general_purpose_subagent()),
         _ => None,
     }
 }
@@ -139,18 +138,18 @@ mod tests {
         assert_eq!(builtins.len(), 4);
 
         let names: Vec<&str> = builtins.iter().map(|s| s.name.as_str()).collect();
-        assert!(names.contains(&"Bash"));
-        assert!(names.contains(&"Explore"));
-        assert!(names.contains(&"Plan"));
-        assert!(names.contains(&"general-purpose"));
+        assert!(names.contains(&"bash"));
+        assert!(names.contains(&"explore"));
+        assert!(names.contains(&"plan"));
+        assert!(names.contains(&"general"));
     }
 
     #[test]
-    fn test_find_builtin_cli_names() {
-        assert!(find_builtin("Bash").is_some());
-        assert!(find_builtin("Explore").is_some());
-        assert!(find_builtin("Plan").is_some());
-        assert!(find_builtin("general-purpose").is_some());
+    fn test_find_builtin_names() {
+        assert!(find_builtin("bash").is_some());
+        assert!(find_builtin("explore").is_some());
+        assert!(find_builtin("plan").is_some());
+        assert!(find_builtin("general").is_some());
         assert!(find_builtin("nonexistent").is_none());
     }
 

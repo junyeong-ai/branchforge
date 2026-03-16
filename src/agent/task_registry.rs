@@ -1082,7 +1082,7 @@ mod tests {
     async fn test_register_and_complete() {
         let registry = test_registry();
         let _cancel_rx = registry
-            .register_or_resume(TASK_1_UUID.into(), "Explore".into(), "Test task".into())
+            .register_or_resume(TASK_1_UUID.into(), "explore".into(), "Test task".into())
             .await
             .unwrap();
 
@@ -1106,7 +1106,7 @@ mod tests {
         let registry = TaskRegistry::new(persistence.clone());
 
         registry
-            .register_or_resume(TASK_1_UUID.into(), "Explore".into(), "Retry".into())
+            .register_or_resume(TASK_1_UUID.into(), "explore".into(), "Retry".into())
             .await
             .unwrap();
 
@@ -1141,7 +1141,7 @@ mod tests {
         let registry = TaskRegistry::new(persistence.clone());
 
         registry
-            .register_or_resume(TASK_1_UUID.into(), "Explore".into(), "Restart".into())
+            .register_or_resume(TASK_1_UUID.into(), "explore".into(), "Restart".into())
             .await
             .unwrap();
 
@@ -1170,7 +1170,7 @@ mod tests {
         let restarted = TaskRegistry::new(persistence);
 
         let _cancel_rx = registry
-            .register_or_resume(TASK_2_UUID.into(), "Explore".into(), "Test task".into())
+            .register_or_resume(TASK_2_UUID.into(), "explore".into(), "Test task".into())
             .await
             .unwrap();
 
@@ -1187,7 +1187,7 @@ mod tests {
         let registry = TaskRegistry::new(persistence);
 
         let _cancel_rx = registry
-            .register_or_resume(TASK_2_UUID.into(), "Explore".into(), "Finished task".into())
+            .register_or_resume(TASK_2_UUID.into(), "explore".into(), "Finished task".into())
             .await
             .unwrap();
 
@@ -1207,7 +1207,7 @@ mod tests {
         let registry = test_registry();
 
         let _cancel_rx = registry
-            .register_or_resume(TASK_3_UUID.into(), "Explore".into(), "Finished task".into())
+            .register_or_resume(TASK_3_UUID.into(), "explore".into(), "Finished task".into())
             .await
             .unwrap();
 
@@ -1230,7 +1230,7 @@ mod tests {
         registry
             .register_or_resume_background(
                 TASK_3_UUID.into(),
-                "Explore".into(),
+                "explore".into(),
                 "Background slot".into(),
                 1,
             )
@@ -1243,7 +1243,7 @@ mod tests {
         let error = registry
             .register_or_resume_background(
                 TASK_4_UUID.into(),
-                "Explore".into(),
+                "explore".into(),
                 "Second background slot".into(),
                 1,
             )
@@ -1260,7 +1260,7 @@ mod tests {
     async fn test_fail_task() {
         let registry = test_registry();
         registry
-            .register_or_resume(TASK_2_UUID.into(), "Explore".into(), "Failing task".into())
+            .register_or_resume(TASK_2_UUID.into(), "explore".into(), "Failing task".into())
             .await
             .unwrap();
 
@@ -1280,7 +1280,7 @@ mod tests {
         registry
             .register_or_resume(
                 TASK_3_UUID.into(),
-                "Explore".into(),
+                "explore".into(),
                 "Cancellable task".into(),
             )
             .await
@@ -1306,7 +1306,7 @@ mod tests {
     async fn test_messages() {
         let registry = test_registry();
         registry
-            .register_or_resume(TASK_4_UUID.into(), "Explore".into(), "Message test".into())
+            .register_or_resume(TASK_4_UUID.into(), "explore".into(), "Message test".into())
             .await
             .unwrap();
 
@@ -1337,7 +1337,7 @@ mod tests {
         registry
             .register_or_resume(
                 TASK_1_UUID.into(),
-                "Explore".into(),
+                "explore".into(),
                 "Completion messages".into(),
             )
             .await
@@ -1375,7 +1375,7 @@ mod tests {
     async fn test_invalid_task_ids_are_rejected() {
         let registry = test_registry();
         let error = registry
-            .register_or_resume("not-a-uuid".into(), "Explore".into(), "Invalid".into())
+            .register_or_resume("not-a-uuid".into(), "explore".into(), "Invalid".into())
             .await
             .expect_err("invalid task ids should fail");
 
@@ -1391,7 +1391,7 @@ mod tests {
     async fn test_register_or_resume_reuses_existing_session() {
         let registry = test_registry();
         let _cancel_rx = registry
-            .register_or_resume(TASK_1_UUID.into(), "Explore".into(), "Reusable".into())
+            .register_or_resume(TASK_1_UUID.into(), "explore".into(), "Reusable".into())
             .await
             .unwrap();
         registry
@@ -1400,7 +1400,7 @@ mod tests {
             .unwrap();
 
         registry
-            .register_or_resume(TASK_1_UUID.into(), "Explore".into(), "Reusable".into())
+            .register_or_resume(TASK_1_UUID.into(), "explore".into(), "Reusable".into())
             .await
             .unwrap();
 
@@ -1414,7 +1414,7 @@ mod tests {
     async fn test_get_result_preserves_structured_output() {
         let registry = test_registry();
         registry
-            .register_or_resume(TASK_1_UUID.into(), "Explore".into(), "Structured".into())
+            .register_or_resume(TASK_1_UUID.into(), "explore".into(), "Structured".into())
             .await
             .unwrap();
 
@@ -1449,7 +1449,7 @@ mod tests {
     async fn test_get_result_preserves_full_assistant_content() {
         let registry = test_registry();
         registry
-            .register_or_resume(TASK_1_UUID.into(), "Explore".into(), "Rich".into())
+            .register_or_resume(TASK_1_UUID.into(), "explore".into(), "Rich".into())
             .await
             .unwrap();
 
@@ -1480,7 +1480,7 @@ mod tests {
     async fn test_get_result_includes_response_and_execution_metadata() {
         let registry = test_registry();
         registry
-            .register_or_resume(TASK_1_UUID.into(), "Explore".into(), "Observed".into())
+            .register_or_resume(TASK_1_UUID.into(), "explore".into(), "Observed".into())
             .await
             .unwrap();
 
@@ -1567,7 +1567,7 @@ mod tests {
     async fn test_complete_rejects_mismatched_session_id() {
         let registry = test_registry();
         registry
-            .register_or_resume(TASK_1_UUID.into(), "Explore".into(), "Mismatch".into())
+            .register_or_resume(TASK_1_UUID.into(), "explore".into(), "Mismatch".into())
             .await
             .unwrap();
 

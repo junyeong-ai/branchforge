@@ -82,7 +82,7 @@ mod tests {
                 session_type: "subagent".to_string(),
                 task_id: Some("task-1".to_string()),
                 subagent_session_id: Some("subagent-1".to_string()),
-                subagent_type: Some("Explore".to_string()),
+                subagent_type: Some("explore".to_string()),
                 subagent_description: Some("Inspect repo".to_string()),
             }),
             created_at: Utc::now(),
@@ -92,6 +92,6 @@ mod tests {
 
         let digest = ProvenanceSummaryService::render_node_digest(&node).unwrap();
         assert!(digest.contains("actor:user-1"));
-        assert!(digest.contains("subagent:Explore"));
+        assert!(digest.contains("subagent:explore"));
     }
 }

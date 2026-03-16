@@ -1287,7 +1287,7 @@ mod tests {
             .unwrap();
         let mut subagent = Session::new_subagent(
             session.id,
-            "Explore",
+            "explore",
             "Inspect files",
             SessionConfig::default(),
         );
@@ -1300,7 +1300,7 @@ mod tests {
         let provenance = node.provenance.clone().expect("provenance should exist");
         let subagent_id = subagent.id.to_string();
         assert_eq!(provenance.session_type, "subagent");
-        assert_eq!(provenance.subagent_type.as_deref(), Some("Explore"));
+        assert_eq!(provenance.subagent_type.as_deref(), Some("explore"));
         assert_eq!(provenance.task_id.as_deref(), Some(subagent_id.as_str()));
     }
 
