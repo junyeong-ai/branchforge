@@ -5,10 +5,9 @@
 
 use std::path::PathBuf;
 
-use super::{
-    ChainOutputStyleProvider, InMemoryOutputStyleProvider, OutputStyle, builtin_styles,
-    default_style, file_output_style_provider,
-};
+#[cfg(feature = "cli-integration")]
+use super::{ChainOutputStyleProvider, file_output_style_provider};
+use super::{InMemoryOutputStyleProvider, OutputStyle, builtin_styles, default_style};
 use crate::client::DEFAULT_MODEL;
 use crate::common::Provider;
 use crate::common::SourceType;
@@ -117,12 +116,31 @@ impl SystemPromptGenerator {
         self
     }
 
-    /// Load and set an output style by name.
+    /// Load and set an output style by name from built-in styles.
+    pub async fn style_name_builtin(mut self, name: &str) -> crate::Result<Self> {
+        let builtins = InMemoryOutputStyleProvider::new()
+            .items(builtin_styles())
+            .priority(0)
+            .source_type(SourceType::Builtin);
+
+        if let Some(style) = builtins.get(name).await? {
+            self.style = style;
+            Ok(self)
+        } else {
+            Err(crate::Error::Config(format!(
+                "Output style '{}' not found",
+                name
+            )))
+        }
+    }
+
+    /// Load and set an output style by name from file-based and built-in providers.
     ///
     /// Searches in priority order:
     /// 1. Project styles (.claude/output-styles/) - highest priority
     /// 2. User styles (~/.claude/output-styles/)
     /// 3. Built-in styles - lowest priority
+    #[cfg(feature = "cli-integration")]
     pub async fn style_name(mut self, name: &str) -> crate::Result<Self> {
         let builtins = InMemoryOutputStyleProvider::new()
             .items(builtin_styles())

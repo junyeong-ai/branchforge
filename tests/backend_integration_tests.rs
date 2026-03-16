@@ -390,7 +390,7 @@ async fn test_jsonl_backend_archive_restore_preserves_graph_queue_and_refuses_ov
 #[tokio::test]
 #[ignore = "Requires local Docker backend services"]
 async fn test_backend_containers_are_reachable() {
-    let mut failures = Vec::new();
+    let mut failures: Vec<&str> = Vec::new();
 
     #[cfg(feature = "postgres")]
     if tokio::net::TcpStream::connect("127.0.0.1:55432")

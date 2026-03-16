@@ -4,6 +4,8 @@
 //! credentials. They intentionally verify cross-cutting guarantees with real
 //! model execution instead of only deterministic unit tests.
 
+#![cfg(feature = "cli-integration")]
+
 use branchforge::session::{
     ArchivePolicy, CompactExecutor, CompactStrategy, ExportPolicy, MemoryPersistence, Persistence,
     SessionAccessScope, SessionArchiveService, SessionId, SessionManager,

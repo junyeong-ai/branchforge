@@ -573,6 +573,7 @@ Execute the appropriate docker-compose command using Bash.
 // Live Tests (require CLI credentials)
 // =============================================================================
 
+#[cfg(feature = "cli-integration")]
 mod live_tests {
     use branchforge::{Agent, Auth};
     use tempfile::tempdir;

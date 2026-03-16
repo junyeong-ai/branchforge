@@ -118,9 +118,9 @@ tempfile = "3"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 [features]
-default = ["cli-integration"]
+default = []
 
-# CLI Integration (Claude Code environment support)
+# CLI Integration (Claude Code environment support) - opt-in
 cli-integration = []    # ClaudeCliProvider, file-based loaders
 
 mcp = ["rmcp"]
@@ -160,6 +160,7 @@ full = ["mcp", "cloud-all", "persistence-all", "otel", "plugins"]
 [[example]]
 name = "advanced_test"
 path = "examples/advanced_test.rs"
+required-features = ["cli-integration"]
 
 [[example]]
 name = "all_tools_test"
@@ -168,6 +169,7 @@ path = "examples/all_tools_test.rs"
 [[example]]
 name = "server_tools"
 path = "examples/server_tools.rs"
+required-features = ["cli-integration"]
 
 [[example]]
 name = "sandbox_verification"

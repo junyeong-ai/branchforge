@@ -1398,6 +1398,7 @@ mod caching_tests {
 // Live Tests (require CLI credentials)
 // =============================================================================
 
+#[cfg(feature = "cli-integration")]
 mod live_tests {
     use branchforge::{Agent, Auth, Client, ToolSurface};
     use futures::StreamExt;

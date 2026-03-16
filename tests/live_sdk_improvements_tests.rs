@@ -11,6 +11,8 @@
 //! Requires Claude CLI OAuth credentials.
 //! Run: cargo nextest run --test live_sdk_improvements_tests -- --ignored --nocapture
 
+#![cfg(feature = "cli-integration")]
+
 use std::any::Any;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};

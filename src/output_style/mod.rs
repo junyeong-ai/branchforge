@@ -1,12 +1,10 @@
 mod builtin;
-#[cfg(feature = "cli-integration")]
 mod generator;
 #[cfg(feature = "cli-integration")]
 mod loader;
 mod provider;
 
 pub use builtin::{builtin_styles, default_style, explanatory_style, find_builtin, learning_style};
-#[cfg(feature = "cli-integration")]
 pub use generator::SystemPromptGenerator;
 #[cfg(feature = "cli-integration")]
 pub use loader::{OutputStyleFrontmatter, OutputStyleLoader};
@@ -18,8 +16,10 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
 #[cfg(feature = "cli-integration")]
+use crate::common::IndexRegistry;
+#[cfg(feature = "cli-integration")]
 use crate::common::Provider;
-use crate::common::{ContentSource, Index, IndexRegistry, Named, SourceType};
+use crate::common::{ContentSource, Index, Named, SourceType};
 
 /// Definition of an output style.
 ///

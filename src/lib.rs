@@ -144,7 +144,8 @@ pub use client::OpenAiAdapter;
 #[cfg(feature = "gcp")]
 pub use client::VertexAdapter;
 #[cfg(feature = "cli-integration")]
-pub use output_style::{OutputStyleLoader, SystemPromptGenerator};
+pub use output_style::OutputStyleLoader;
+pub use output_style::SystemPromptGenerator;
 #[cfg(feature = "plugins")]
 pub use plugins::{PluginDescriptor, PluginDiscovery, PluginError, PluginManager, PluginManifest};
 #[cfg(feature = "cli-integration")]
