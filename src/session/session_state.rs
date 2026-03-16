@@ -130,7 +130,7 @@ impl ToolState {
         *self.0.session.write().await = session;
     }
 
-    /// Propagate an [`EventBus`] to the underlying Session and its Graph.
+    /// Propagate an [`EventBus`](crate::events::EventBus) to the underlying Session and its Graph.
     pub async fn with_event_bus(&self, bus: Arc<crate::events::EventBus>) {
         self.0.session.write().await.with_event_bus(bus);
     }

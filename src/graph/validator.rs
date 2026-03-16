@@ -309,10 +309,10 @@ mod tests {
 
     #[test]
     fn primary_branch_missing() {
-        let mut graph = SessionGraph::default();
-        graph.primary_branch = Uuid::new_v4(); // point to a non-existent branch
-        // Remove all branches so the primary is definitely missing
-        graph.branches.clear();
+        let mut graph = linear_graph(1);
+        let fake_branch = Uuid::new_v4();
+        graph.primary_branch = fake_branch;
+        graph.branches.remove(&fake_branch); // ensure it doesn't accidentally exist
 
         let report = GraphValidator::validate(&graph);
         assert!(!report.is_valid());

@@ -504,12 +504,14 @@ mod tests {
 
     #[test]
     fn test_lock_config_defaults() {
-        assert!(DEFAULT_LOCK_TTL_SECS > 0);
-        assert!(DEFAULT_RETRY_DELAY_MS > 0);
-        assert!(DEFAULT_MAX_RETRIES > 0);
-        // Total max wait should be reasonable (under 60 seconds).
-        let max_wait_ms = DEFAULT_RETRY_DELAY_MS as u64 * DEFAULT_MAX_RETRIES as u64;
-        assert!(max_wait_ms <= 60_000);
+        let ttl = DEFAULT_LOCK_TTL_SECS;
+        let delay = DEFAULT_RETRY_DELAY_MS;
+        let retries = DEFAULT_MAX_RETRIES;
+        // Values should be non-zero and total max wait under 60 seconds.
+        assert!(ttl > 0);
+        assert!(delay > 0);
+        assert!(retries > 0);
+        assert!(delay * retries as u64 <= 60_000);
     }
 
     #[test]
@@ -594,10 +596,10 @@ mod tests {
             let now = tokio::time::Instant::now();
 
             // Check if already held (and not expired).
-            if let Some(held) = locks.get(resource) {
-                if held.expires_at > now {
-                    return Ok(None);
-                }
+            if let Some(held) = locks.get(resource)
+                && held.expires_at > now
+            {
+                return Ok(None);
             }
 
             let token = uuid::Uuid::new_v4().to_string();
@@ -614,21 +616,21 @@ mod tests {
 
         async fn extend(&self, guard: &LockGuard, ttl: Duration) -> SessionResult<bool> {
             let mut locks = self.locks.lock().await;
-            if let Some(held) = locks.get_mut(&guard.resource) {
-                if held.token == guard.token {
-                    held.expires_at = tokio::time::Instant::now() + ttl;
-                    return Ok(true);
-                }
+            if let Some(held) = locks.get_mut(&guard.resource)
+                && held.token == guard.token
+            {
+                held.expires_at = tokio::time::Instant::now() + ttl;
+                return Ok(true);
             }
             Ok(false)
         }
 
         async fn release(&self, guard: &mut LockGuard) -> SessionResult<()> {
             let mut locks = self.locks.lock().await;
-            if let Some(held) = locks.get(&guard.resource) {
-                if held.token == guard.token {
-                    locks.remove(&guard.resource);
-                }
+            if let Some(held) = locks.get(&guard.resource)
+                && held.token == guard.token
+            {
+                locks.remove(&guard.resource);
             }
             guard.mark_released();
             // Notify any waiters that a lock was released.

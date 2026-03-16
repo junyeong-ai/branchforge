@@ -16,7 +16,7 @@ use crate::{Error, Result};
 /// byte stream returned by [`ProviderAdapter::send_stream`].
 ///
 /// - **Sse** — Standard SSE (`data: {json}\n\n`).  Used by Anthropic Direct,
-///   OpenAI, and Gemini (`alt=sse`).  The built-in [`StreamParser`] handles
+///   OpenAI, and Gemini (`alt=sse`).  The built-in `StreamParser` handles
 ///   this format.
 /// - **AwsEventStream** — AWS binary Event Stream framing.  Used by Bedrock's
 ///   `converse-stream`.  The [`AwsEventStreamParser`](crate::client::AwsEventStreamParser)
