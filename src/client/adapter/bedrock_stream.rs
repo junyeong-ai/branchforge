@@ -7,20 +7,23 @@
 //! ```text
 //! [total_byte_length: u32]   - big-endian, includes all fields
 //! [headers_byte_length: u32] - big-endian
-//! [prelude_crc: u32]         - CRC-32C over the first 8 bytes
+//! [prelude_crc: u32]         - CRC-32 over the first 8 bytes
 //! [headers: variable]        - typed key-value pairs
 //! [payload: variable]        - message body (JSON for content events)
-//! [message_crc: u32]         - CRC-32C over everything before this field
+//! [message_crc: u32]         - CRC-32 over everything before this field
 //! ```
 
 use bytes::{Buf, BytesMut};
 
 // ---------------------------------------------------------------------------
-// CRC-32C (Castagnoli) – polynomial 0x1EDC6F41
+// CRC-32 (ISO 3309 / ITU-T V.42) – polynomial 0x04C11DB7
+//
+// AWS EventStream uses standard CRC-32, NOT CRC-32 (Castagnoli).
+// Reversed polynomial: 0xEDB88320
 // ---------------------------------------------------------------------------
 
-/// Precomputed CRC-32C lookup table for byte-at-a-time computation.
-const CRC32C_TABLE: [u32; 256] = {
+/// Precomputed CRC-32 lookup table for byte-at-a-time computation.
+const CRC32_TABLE: [u32; 256] = {
     let mut table = [0u32; 256];
     let mut i: usize = 0;
     while i < 256 {
@@ -28,7 +31,7 @@ const CRC32C_TABLE: [u32; 256] = {
         let mut j = 0;
         while j < 8 {
             if crc & 1 != 0 {
-                crc = (crc >> 1) ^ 0x82F6_3B78; // reversed polynomial
+                crc = (crc >> 1) ^ 0xEDB8_8320; // reversed polynomial (standard CRC-32)
             } else {
                 crc >>= 1;
             }
@@ -40,12 +43,12 @@ const CRC32C_TABLE: [u32; 256] = {
     table
 };
 
-/// Compute CRC-32C (Castagnoli) over the given byte slice.
-fn crc32c(data: &[u8]) -> u32 {
+/// Compute CRC-32 over the given byte slice.
+fn crc32(data: &[u8]) -> u32 {
     let mut crc: u32 = 0xFFFF_FFFF;
     for &byte in data {
         let index = ((crc ^ byte as u32) & 0xFF) as usize;
-        crc = CRC32C_TABLE[index] ^ (crc >> 8);
+        crc = CRC32_TABLE[index] ^ (crc >> 8);
     }
     crc ^ 0xFFFF_FFFF
 }
@@ -146,7 +149,7 @@ impl AwsEventStreamDecoder {
 
         // Validate prelude CRC (bytes 8..12 cover bytes 0..8).
         let prelude_crc_expected = u32::from_be_bytes([frame[8], frame[9], frame[10], frame[11]]);
-        let prelude_crc_computed = crc32c(&frame[..8]);
+        let prelude_crc_computed = crc32(&frame[..8]);
         if prelude_crc_computed != prelude_crc_expected {
             return Err(DecodeError::PreludeCrcMismatch {
                 expected: prelude_crc_expected,
@@ -161,7 +164,7 @@ impl AwsEventStreamDecoder {
             frame[total_length - 2],
             frame[total_length - 1],
         ]);
-        let message_crc_computed = crc32c(&frame[..total_length - 4]);
+        let message_crc_computed = crc32(&frame[..total_length - 4]);
         if message_crc_computed != message_crc_expected {
             return Err(DecodeError::MessageCrcMismatch {
                 expected: message_crc_expected,
@@ -322,9 +325,9 @@ pub enum DecodeError {
     InvalidFrameLength(usize),
     #[error("invalid header length: {0}")]
     InvalidHeaderLength(usize),
-    #[error("prelude CRC-32C mismatch (expected {expected:#010x}, computed {computed:#010x})")]
+    #[error("prelude CRC-32 mismatch (expected {expected:#010x}, computed {computed:#010x})")]
     PreludeCrcMismatch { expected: u32, computed: u32 },
-    #[error("message CRC-32C mismatch (expected {expected:#010x}, computed {computed:#010x})")]
+    #[error("message CRC-32 mismatch (expected {expected:#010x}, computed {computed:#010x})")]
     MessageCrcMismatch { expected: u32, computed: u32 },
     #[error("truncated header data")]
     TruncatedHeader,
@@ -360,15 +363,15 @@ fn build_frame(headers: &[(&str, &str)], payload: &[u8]) -> Vec<u8> {
     frame.extend_from_slice(&total_length.to_be_bytes());
     frame.extend_from_slice(&headers_length.to_be_bytes());
 
-    // Prelude CRC-32C over bytes 0..8 (total_length + headers_length).
-    let prelude_crc = crc32c(&frame[..8]);
+    // Prelude CRC-32 over bytes 0..8 (total_length + headers_length).
+    let prelude_crc = crc32(&frame[..8]);
     frame.extend_from_slice(&prelude_crc.to_be_bytes());
 
     frame.extend_from_slice(&header_bytes);
     frame.extend_from_slice(payload);
 
-    // Message CRC-32C over everything before this field.
-    let message_crc = crc32c(&frame);
+    // Message CRC-32 over everything before this field.
+    let message_crc = crc32(&frame);
     frame.extend_from_slice(&message_crc.to_be_bytes());
 
     frame

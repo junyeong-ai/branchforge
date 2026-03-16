@@ -322,6 +322,7 @@ impl Client {
         request: CreateMessageRequest,
     ) -> Result<impl futures::Stream<Item = Result<StreamItem>> + Send + 'static + use<>> {
         request.validate()?;
+        self.adapter.ensure_fresh_credentials().await?;
 
         let response = self.adapter.send_stream(&self.http, request).await?;
 

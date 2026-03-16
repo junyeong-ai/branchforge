@@ -250,13 +250,28 @@ where
                 Ok(messages) => {
                     for msg in messages {
                         let message_type = msg.header_str(":message-type").unwrap_or("");
+                        let event_type = msg.header_str(":event-type").unwrap_or("");
+                        tracing::trace!(
+                            message_type,
+                            event_type,
+                            payload_len = msg.payload.len(),
+                            "AwsEventStream frame decoded"
+                        );
                         match message_type {
                             "event" => {
                                 if let Some(json_str) = msg.payload_str()
                                     && !json_str.is_empty()
-                                    && let Some(item) = (this.event_parser)(json_str)
                                 {
-                                    this.pending.push_back(item);
+                                    // Prepend event type so the parser can dispatch
+                                    // without needing a separate channel for headers.
+                                    let prefixed = if !event_type.is_empty() {
+                                        format!("__event_type={event_type}\n{json_str}")
+                                    } else {
+                                        json_str.to_string()
+                                    };
+                                    if let Some(item) = (this.event_parser)(&prefixed) {
+                                        this.pending.push_back(item);
+                                    }
                                 }
                             }
                             "exception" => {
@@ -303,9 +318,16 @@ where
                             if msg.header_str(":message-type") == Some("event")
                                 && let Some(json_str) = msg.payload_str()
                                 && !json_str.is_empty()
-                                && let Some(item) = (this.event_parser)(json_str)
                             {
-                                this.pending.push_back(item);
+                                let et = msg.header_str(":event-type").unwrap_or("");
+                                let prefixed = if !et.is_empty() {
+                                    format!("__event_type={et}\n{json_str}")
+                                } else {
+                                    json_str.to_string()
+                                };
+                                if let Some(item) = (this.event_parser)(&prefixed) {
+                                    this.pending.push_back(item);
+                                }
                             }
                         }
                     }

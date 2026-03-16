@@ -21,19 +21,19 @@ use super::request::RequestBuilder;
 use super::{AgentConfig, AgentMetrics};
 use crate::authorization::ExecutionMode;
 use crate::budget::{BudgetTracker, TenantBudget};
-use crate::client::{RecoverableStream, StreamItem};
+use crate::client::StreamItem;
 use crate::context::PromptOrchestrator;
 use crate::hooks::{HookContext, HookEvent, HookInput, HookManager};
 use crate::session::ToolExecution;
 use crate::session::{MessageMetadata, SessionAccessScope, SessionManager, ToolState};
 use crate::types::{
-    AuthorizationDenied, ContentBlock, StopReason, StreamEvent, ToolResultBlock, ToolUseBlock,
+    AuthorizationDenied, ContentBlock, ContentDelta, StopReason, StreamEvent, ToolResultBlock, ToolUseBlock,
     Usage, context_window,
 };
 use crate::{Client, ToolRegistry};
 
-type BoxedByteStream =
-    Pin<Box<dyn Stream<Item = std::result::Result<bytes::Bytes, reqwest::Error>> + Send>>;
+type BoxedItemStream =
+    Pin<Box<dyn Stream<Item = crate::Result<StreamItem>> + Send>>;
 
 impl Agent {
     pub async fn execute_stream(
@@ -133,7 +133,7 @@ enum Phase {
 }
 
 struct StreamingPhase {
-    stream: RecoverableStream<BoxedByteStream>,
+    stream: BoxedItemStream,
     accumulated_usage: Usage,
 }
 
@@ -147,6 +147,11 @@ struct StreamState {
     last_chunk_time: Instant,
     pending_tool_results: Vec<ToolResultBlock>,
     pending_tool_uses: Vec<ToolUseBlock>,
+    /// Accumulator for tool_use content blocks being streamed.
+    /// Bedrock (and direct API with BoxedItemStream) sends ContentBlockStart,
+    /// then ContentBlockDelta(InputJsonDelta), then ContentBlockStop.
+    /// We accumulate the partial JSON here and emit ToolUseComplete on stop.
+    accumulating_tool_use: Option<(ToolUseBlock, String)>,
     final_text: String,
     total_usage: Usage,
     phase: Phase,
@@ -170,6 +175,7 @@ impl StreamState {
             last_chunk_time: now,
             pending_tool_results: Vec::new(),
             pending_tool_uses: Vec::new(),
+            accumulating_tool_use: None,
             final_text: String::new(),
             total_usage: Usage::default(),
             phase: Phase::StartRequest,
@@ -528,9 +534,32 @@ impl StreamState {
 
         self.metrics.record_api_call();
 
-        let boxed_stream: BoxedByteStream = Box::pin(response.bytes_stream());
+        // Select the appropriate stream parser based on the provider's wire format.
+        // Bedrock uses AWS EventStream binary framing; Anthropic/others use SSE text.
+        #[cfg(feature = "aws")]
+        let is_aws = self.cfg.client.adapter().stream_format()
+            == crate::client::adapter::StreamFormat::AwsEventStream;
+        #[cfg(not(feature = "aws"))]
+        let is_aws = false;
+
+        let item_stream: BoxedItemStream = if is_aws {
+            #[cfg(feature = "aws")]
+            {
+                Box::pin(crate::client::AwsEventStreamParser::new(
+                    response.bytes_stream(),
+                    crate::client::adapter::bedrock::BedrockAdapter::parse_converse_stream_event,
+                ))
+            }
+            #[cfg(not(feature = "aws"))]
+            unreachable!()
+        } else {
+            // For SSE-based providers (Anthropic, etc.), use the default SSE parser.
+            // The adapter-specific event parser is passed to handle provider quirks.
+            Box::pin(crate::client::StreamParser::new(response.bytes_stream()))
+        };
+
         self.phase = Phase::Streaming(Box::new(StreamingPhase {
-            stream: RecoverableStream::new(boxed_stream),
+            stream: item_stream,
             accumulated_usage: Usage::default(),
         }));
 
@@ -539,7 +568,7 @@ impl StreamState {
 
     async fn do_poll_stream(
         &mut self,
-        stream: &mut RecoverableStream<BoxedByteStream>,
+        stream: &mut BoxedItemStream,
         accumulated_usage: &mut Usage,
     ) -> StreamPollResult {
         let chunk_result = tokio::time::timeout(self.chunk_timeout, stream.next()).await;
@@ -647,9 +676,36 @@ impl StreamState {
                 accumulated_usage.cache_read_input_tokens = message.usage.cache_read_input_tokens;
                 StreamPollResult::Continue
             }
+            StreamEvent::ContentBlockStart {
+                content_block: ContentBlock::ToolUse(tu),
+                ..
+            } => {
+                // Start accumulating a tool_use content block.
+                self.accumulating_tool_use = Some((tu, String::new()));
+                StreamPollResult::Continue
+            }
             StreamEvent::ContentBlockStart { .. } => StreamPollResult::Continue,
+            StreamEvent::ContentBlockDelta {
+                delta: ContentDelta::InputJsonDelta { partial_json },
+                ..
+            } => {
+                // Accumulate partial JSON for the in-progress tool_use.
+                if let Some((_, ref mut json_buf)) = self.accumulating_tool_use {
+                    json_buf.push_str(&partial_json);
+                }
+                StreamPollResult::Continue
+            }
             StreamEvent::ContentBlockDelta { .. } => StreamPollResult::Continue,
-            StreamEvent::ContentBlockStop { .. } => StreamPollResult::Continue,
+            StreamEvent::ContentBlockStop { .. } => {
+                // Finalize accumulated tool_use and push to pending_tool_uses.
+                if let Some((mut tool_use, json_buf)) = self.accumulating_tool_use.take() {
+                    let input: serde_json::Value = serde_json::from_str(&json_buf)
+                        .unwrap_or(serde_json::json!({}));
+                    tool_use.input = input;
+                    self.pending_tool_uses.push(tool_use);
+                }
+                StreamPollResult::Continue
+            }
             StreamEvent::MessageDelta { usage, .. } => {
                 accumulated_usage.output_tokens = usage.output_tokens;
                 StreamPollResult::Continue
