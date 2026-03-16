@@ -17,7 +17,7 @@ Rust로 작성된 stateful coding agent runtime입니다.
 
 - graph-first 세션 모델
 - replay, export, bookmark, checkpoint를 포함한 지속 가능한 작업 기록
-- Anthropic, Bedrock, Vertex AI, Azure AI Foundry 지원
+- Anthropic, Bedrock, Vertex AI, Azure AI Foundry, OpenAI, Gemini 지원
 - 안전한 로컬 도구 실행과 인가 제어
 - Claude CLI의 `.claude/` 레이아웃과 호환되는 워크스페이스 리소스 활용
 

@@ -17,7 +17,7 @@ The project is designed around:
 
 - a graph-first session model
 - durable work history with replay, export, bookmarks, and checkpoints
-- support for Anthropic, Bedrock, Vertex AI, and Azure AI Foundry
+- support for Anthropic, Bedrock, Vertex AI, Azure AI Foundry, OpenAI, and Gemini
 - safe local tool execution with explicit authorization control
 - workspace resources compatible with the Claude CLI `.claude/` layout
 
@@ -30,7 +30,7 @@ The project is designed around:
 | [Tools](docs/tools.md) | Built-in tools, access control, and custom tools |
 | [Skills](docs/skills.md) | Progressive disclosure and skill system |
 | [Subagents](docs/subagents.md) | Delegation, tool restrictions, and model resolution |
-| [Authorization](docs/authorization.md) | Modes, rules, and scoped patterns |
+| [Authorization](docs/authorization.md) | Execution modes, tool policy, and HITL |
 | [Security](docs/security.md) | SecureFs, bash analysis, and sandboxing |
 | [Authentication](docs/authentication.md) | OAuth, API keys, and cloud providers |
 | [Backend Selection](docs/backend-selection.md) | Memory, JSONL, PostgreSQL, Redis |
@@ -91,9 +91,11 @@ Supported authentication modes:
 
 - Anthropic API key
 - Claude Code CLI credentials
-- AWS Bedrock
+- AWS Bedrock (Converse API)
 - Google Vertex AI
 - Azure AI Foundry
+- OpenAI (GPT-4o, o3, compatible endpoints)
+- Google Gemini
 
 Example:
 

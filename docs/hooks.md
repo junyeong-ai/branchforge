@@ -1,20 +1,53 @@
 # Hooks
 
-Hooks let the runtime intercept execution at selected lifecycle points.
+Hooks intercept execution at lifecycle points for security enforcement, observation, and customization.
 
-## Typical Uses
+## Hook Events
 
-- inspect or block tool execution
-- inject additional context
-- run post-tool automation
-- observe session lifecycle events
+| Event | Blocking | Purpose |
+|-------|----------|---------|
+| `PreToolUse` | Yes | Inspect, block, or modify tool invocations |
+| `PostToolUse` | No | Observe tool results |
+| `PostToolUseFailure` | No | Observe tool errors |
+| `UserPromptSubmit` | Yes | Validate or transform user input |
+| `Stop` | No | Observe agent stop |
+| `SubagentStart` | Yes | Control subagent spawning |
+| `SubagentStop` | No | Observe subagent completion |
+| `PreCompact` | No | Observe compaction triggers |
+| `SessionStart` | Yes | Control session initialization |
+| `SessionEnd` | No | Observe session completion |
+| `PostStreamChunk` | No | Observe streaming text chunks (fail-open) |
+| `ModelSelection` | Yes | Override model selection before API call |
+| `PreMessage` | Yes | Block or observe outgoing messages |
+| `PostMessage` | No | Observe token usage after API response |
 
-## Event Coverage
+## Design Rules
 
-Hooks are available for session lifecycle, tool lifecycle, subagent lifecycle, and compaction-related flows.
+- Blocking hooks (`can_block() = true`) use fail-closed semantics — errors block the operation
+- Non-blocking hooks use fail-open semantics — errors are logged but execution continues
+- `PostStreamChunk` is dispatched via `tokio::spawn` to never block the stream
+- Hook behavior should stay orthogonal to provider transport and credential resolution
 
-## Design Rule
+## Example
 
-- blocking hooks are explicit
-- non-blocking hooks should not mutate core graph state directly
-- hook behavior should stay orthogonal to provider transport and credential resolution
+```rust
+use branchforge::hooks::{Hook, HookEvent, HookInput, HookOutput, HookContext};
+
+struct AuditHook;
+
+#[async_trait::async_trait]
+impl Hook for AuditHook {
+    fn name(&self) -> &str { "audit" }
+    fn events(&self) -> &[HookEvent] { &[HookEvent::PostToolUse, HookEvent::PostMessage] }
+    async fn execute(&self, input: HookInput, _ctx: &HookContext)
+        -> Result<HookOutput, branchforge::Error> {
+        // Log tool usage or token consumption
+        Ok(HookOutput::allow())
+    }
+}
+```
+
+## Related Guides
+
+- [Authorization](authorization.md)
+- [Observability](observability.md)
