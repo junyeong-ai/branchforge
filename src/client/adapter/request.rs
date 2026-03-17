@@ -1,10 +1,5 @@
 //! Shared request building utilities for cloud adapters.
 
-#![cfg_attr(
-    not(any(feature = "aws", feature = "gcp", feature = "azure")),
-    allow(dead_code)
-)]
-
 use serde_json::{Value, json};
 
 use crate::client::messages::CreateMessageRequest;
@@ -61,9 +56,9 @@ pub fn build_messages_body(
     body
 }
 
-/// Build a request body for cloud providers (Bedrock, Vertex, Foundry).
-/// Removes the `model` field (cloud providers pass it in the URL) and
-/// optionally adds beta features.
+/// Build a request body for cloud providers that use URL-based model routing.
+/// Removes the `model` field and optionally adds beta features.
+#[cfg(feature = "gcp")]
 pub fn build_cloud_request_body(
     request: &CreateMessageRequest,
     anthropic_version: &str,
@@ -83,6 +78,7 @@ pub fn build_cloud_request_body(
     body
 }
 
+#[cfg(feature = "gcp")]
 pub fn add_beta_features(body: &mut Value, features: &[&str]) {
     if features.is_empty() {
         return;
@@ -121,6 +117,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "gcp")]
     fn test_add_beta_features() {
         use crate::client::adapter::BetaFeature;
 

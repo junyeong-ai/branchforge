@@ -92,6 +92,7 @@ impl LockGuard {
     }
 
     /// Mark this guard as explicitly released.
+    #[cfg(any(feature = "redis-backend", feature = "postgres", test))]
     pub(crate) fn mark_released(&mut self) {
         self.released = true;
     }

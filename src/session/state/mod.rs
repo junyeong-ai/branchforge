@@ -636,10 +636,12 @@ pub(crate) fn compact_summary_text(message: &SessionMessage) -> Option<String> {
     )
 }
 
+#[cfg(any(feature = "jsonl", feature = "postgres"))]
 pub(crate) fn graph_node_id_for_message(message: &SessionMessage) -> SessionResult<uuid::Uuid> {
     parse_message_node_id(&message.id, "message.id")
 }
 
+#[cfg(any(feature = "jsonl", feature = "postgres"))]
 pub(crate) fn graph_parent_node_id_for_message(
     message: &SessionMessage,
 ) -> SessionResult<Option<uuid::Uuid>> {

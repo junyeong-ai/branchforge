@@ -5,6 +5,7 @@ use crate::{Error, Result};
 pub struct RequestExecutor;
 
 impl RequestExecutor {
+    #[cfg(any(feature = "gcp", feature = "azure"))]
     pub async fn post(
         http: &reqwest::Client,
         url: &str,
@@ -24,6 +25,7 @@ impl RequestExecutor {
         Self::check_response(response).await
     }
 
+    #[cfg(feature = "aws")]
     pub async fn post_bytes(
         http: &reqwest::Client,
         url: &str,

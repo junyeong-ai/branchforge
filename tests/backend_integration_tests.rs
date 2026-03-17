@@ -5,6 +5,7 @@
 
 #[cfg(any(feature = "postgres", feature = "redis-backend"))]
 use std::sync::Arc;
+#[cfg(any(feature = "postgres", feature = "redis-backend"))]
 use std::time::Duration;
 
 #[cfg(any(feature = "postgres", feature = "redis-backend"))]
@@ -29,6 +30,7 @@ use chrono::Utc;
 use tempfile::TempDir;
 #[cfg(any(feature = "postgres", feature = "redis-backend"))]
 use tokio::task::JoinSet;
+#[cfg(any(feature = "postgres", feature = "redis-backend"))]
 use tokio::time::sleep;
 #[cfg(any(feature = "jsonl", feature = "postgres", feature = "redis-backend"))]
 use uuid::Uuid;
@@ -387,6 +389,7 @@ async fn test_jsonl_backend_archive_restore_preserves_graph_queue_and_refuses_ov
     assert_archive_restore_preserves_graph_queue_and_refuses_overwrite(persistence).await;
 }
 
+#[cfg(any(feature = "postgres", feature = "redis-backend"))]
 #[tokio::test]
 #[ignore = "Requires local Docker backend services"]
 async fn test_backend_containers_are_reachable() {

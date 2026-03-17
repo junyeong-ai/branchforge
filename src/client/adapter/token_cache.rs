@@ -1,17 +1,29 @@
 //! Shared authentication caching for cloud provider adapters.
 
-use std::time::{Duration, Instant, SystemTime};
+use std::time::Duration;
+#[cfg(any(feature = "gcp", feature = "azure"))]
+use std::time::Instant;
+#[cfg(feature = "aws")]
+use std::time::SystemTime;
 
-use secrecy::{ExposeSecret, SecretString};
+#[cfg(any(feature = "gcp", feature = "azure"))]
+use secrecy::ExposeSecret;
+use secrecy::SecretString;
 use tokio::sync::RwLock;
 
 const TOKEN_REFRESH_MARGIN: Duration = Duration::from_secs(300);
 
+// ---------------------------------------------------------------------------
+// GCP / Azure token cache
+// ---------------------------------------------------------------------------
+
+#[cfg(any(feature = "gcp", feature = "azure"))]
 pub struct CachedToken {
     token: SecretString,
     expires_at: Instant,
 }
 
+#[cfg(any(feature = "gcp", feature = "azure"))]
 impl std::fmt::Debug for CachedToken {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("CachedToken")
@@ -20,6 +32,7 @@ impl std::fmt::Debug for CachedToken {
     }
 }
 
+#[cfg(any(feature = "gcp", feature = "azure"))]
 impl CachedToken {
     pub fn new(token: String, ttl: Duration) -> Self {
         Self {
@@ -37,6 +50,19 @@ impl CachedToken {
     }
 }
 
+#[cfg(any(feature = "gcp", feature = "azure"))]
+pub type TokenCache = RwLock<Option<CachedToken>>;
+
+#[cfg(any(feature = "gcp", feature = "azure"))]
+pub fn new_token_cache() -> TokenCache {
+    RwLock::new(None)
+}
+
+// ---------------------------------------------------------------------------
+// AWS credentials cache
+// ---------------------------------------------------------------------------
+
+#[cfg(feature = "aws")]
 #[derive(Clone)]
 pub struct CachedAwsCredentials {
     pub access_key_id: String,
@@ -45,6 +71,7 @@ pub struct CachedAwsCredentials {
     expiry: Option<SystemTime>,
 }
 
+#[cfg(feature = "aws")]
 impl std::fmt::Debug for CachedAwsCredentials {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("CachedAwsCredentials")
@@ -53,6 +80,7 @@ impl std::fmt::Debug for CachedAwsCredentials {
     }
 }
 
+#[cfg(feature = "aws")]
 impl CachedAwsCredentials {
     pub fn new(
         access_key_id: String,
@@ -79,13 +107,10 @@ impl CachedAwsCredentials {
     }
 }
 
-pub type TokenCache = RwLock<Option<CachedToken>>;
+#[cfg(feature = "aws")]
 pub type AwsCredentialsCache = RwLock<Option<CachedAwsCredentials>>;
 
-pub fn new_token_cache() -> TokenCache {
-    RwLock::new(None)
-}
-
+#[cfg(feature = "aws")]
 pub fn new_aws_credentials_cache() -> AwsCredentialsCache {
     RwLock::new(None)
 }
@@ -95,6 +120,7 @@ mod tests {
     use super::*;
 
     #[test]
+    #[cfg(any(feature = "gcp", feature = "azure"))]
     fn test_cached_token_not_expired() {
         let token = CachedToken::new("test".into(), Duration::from_secs(3600));
         assert!(!token.is_expired());
@@ -102,6 +128,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(any(feature = "gcp", feature = "azure"))]
     fn test_cached_token_expired() {
         let token = CachedToken::new("test".into(), Duration::from_secs(0));
         assert!(token.is_expired());

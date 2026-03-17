@@ -223,7 +223,9 @@ impl RedisPersistence {
                     self.client.get_multiplexed_async_connection(),
                 )
                 .await
-                .storage_err_ctx("connection timeout")?
+                .map_err(|_| SessionError::Storage {
+                    message: "connection timeout".to_string(),
+                })?
                 .storage_err()
             },
         )

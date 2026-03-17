@@ -89,7 +89,6 @@ pub type SessionResult<T> = std::result::Result<T, SessionError>;
 #[cfg(any(feature = "postgres", feature = "redis-backend"))]
 pub(crate) trait StorageResultExt<T> {
     fn storage_err(self) -> SessionResult<T>;
-    fn storage_err_ctx(self, context: &str) -> SessionResult<T>;
 }
 
 #[cfg(any(feature = "postgres", feature = "redis-backend"))]
@@ -132,12 +131,6 @@ impl<T, E: std::fmt::Display> StorageResultExt<T> for std::result::Result<T, E> 
     fn storage_err(self) -> SessionResult<T> {
         self.map_err(|e| SessionError::Storage {
             message: e.to_string(),
-        })
-    }
-
-    fn storage_err_ctx(self, context: &str) -> SessionResult<T> {
-        self.map_err(|e| SessionError::Storage {
-            message: format!("{}: {}", context, e),
         })
     }
 }

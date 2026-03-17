@@ -8,6 +8,7 @@ mod config;
 mod gemini;
 #[cfg(feature = "openai")]
 mod openai;
+#[cfg(any(feature = "gcp", feature = "azure"))]
 mod request;
 mod traits;
 
