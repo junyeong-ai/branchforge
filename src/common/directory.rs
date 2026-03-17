@@ -1,6 +1,8 @@
-use std::future::Future;
-use std::path::{Path, PathBuf};
+use std::path::Path;
+#[cfg(feature = "file-resources")]
+use std::path::PathBuf;
 
+#[cfg(feature = "file-resources")]
 pub async fn load_files<T, F, Fut>(
     dir: &Path,
     filter: impl Fn(&Path) -> bool,
@@ -8,7 +10,7 @@ pub async fn load_files<T, F, Fut>(
 ) -> crate::Result<Vec<T>>
 where
     F: Fn(PathBuf) -> Fut,
-    Fut: Future<Output = crate::Result<T>>,
+    Fut: std::future::Future<Output = crate::Result<T>>,
 {
     let mut items = Vec::new();
 
@@ -37,6 +39,7 @@ where
     Ok(items)
 }
 
+#[cfg(feature = "file-resources")]
 pub fn is_markdown(path: &Path) -> bool {
     path.extension().is_some_and(|e| e == "md")
 }
@@ -50,9 +53,9 @@ pub fn is_skill_file(path: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::PathBuf;
 
     #[test]
+    #[cfg(feature = "file-resources")]
     fn test_is_markdown() {
         assert!(is_markdown(Path::new("file.md")));
         assert!(is_markdown(Path::new("/path/to/file.md")));
@@ -70,6 +73,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[cfg(feature = "file-resources")]
     async fn test_load_files_empty_dir() {
         let result = load_files(
             Path::new("/nonexistent/path"),
@@ -82,6 +86,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[cfg(feature = "file-resources")]
     async fn test_load_files_from_temp() {
         let temp = tempfile::tempdir().unwrap();
         let file1 = temp.path().join("test.md");

@@ -8,6 +8,8 @@ use serde::de::DeserializeOwned;
 /// Parsed document containing frontmatter metadata and body content.
 pub struct ParsedDocument<F> {
     pub frontmatter: F,
+    /// Body content after frontmatter. Consumed by output_style/loader.
+    #[cfg_attr(not(feature = "file-resources"), allow(dead_code))]
     pub body: String,
 }
 

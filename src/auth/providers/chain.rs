@@ -5,7 +5,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use tokio::sync::RwLock;
 
-#[cfg(feature = "cli-integration")]
+#[cfg(feature = "cli-auth")]
 use crate::auth::ClaudeCliProvider;
 use crate::auth::{Credential, CredentialProvider, EnvironmentProvider};
 use crate::{Error, Result};
@@ -29,7 +29,7 @@ impl ChainProvider {
     }
 }
 
-#[cfg(feature = "cli-integration")]
+#[cfg(feature = "cli-auth")]
 impl Default for ChainProvider {
     fn default() -> Self {
         Self {
@@ -42,7 +42,7 @@ impl Default for ChainProvider {
     }
 }
 
-#[cfg(not(feature = "cli-integration"))]
+#[cfg(not(feature = "cli-auth"))]
 impl Default for ChainProvider {
     fn default() -> Self {
         Self {

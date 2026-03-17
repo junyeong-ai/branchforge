@@ -104,7 +104,7 @@ impl AgentBuilder {
         Ok(agent)
     }
 
-    #[cfg(feature = "cli-integration")]
+    #[cfg(feature = "file-resources")]
     async fn resolve_output_style(&mut self) -> crate::Result<()> {
         use crate::common::{Provider, SourceType};
         use crate::output_style::{
@@ -148,7 +148,7 @@ impl AgentBuilder {
         Ok(())
     }
 
-    #[cfg(not(feature = "cli-integration"))]
+    #[cfg(not(feature = "file-resources"))]
     async fn resolve_output_style(&mut self) -> crate::Result<()> {
         Ok(())
     }
@@ -252,7 +252,7 @@ impl AgentBuilder {
     /// regardless of the order `with_*_resources()` methods were called.
     /// This ensures consistent override behavior where later levels
     /// override settings from earlier levels.
-    #[cfg(feature = "cli-integration")]
+    #[cfg(feature = "file-resources")]
     async fn load_resources_by_level(&mut self) {
         // 1. Enterprise (lowest priority)
         if self.load_enterprise {
@@ -275,9 +275,9 @@ impl AgentBuilder {
         }
     }
 
-    #[cfg(not(feature = "cli-integration"))]
+    #[cfg(not(feature = "file-resources"))]
     async fn load_resources_by_level(&mut self) {
-        // No-op when cli-integration is disabled
+        // No-op when file-resources is disabled
     }
 
     #[cfg(feature = "plugins")]

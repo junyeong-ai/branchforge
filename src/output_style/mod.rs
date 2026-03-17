@@ -1,23 +1,23 @@
 mod builtin;
 mod generator;
-#[cfg(feature = "cli-integration")]
+#[cfg(feature = "file-resources")]
 mod loader;
 mod provider;
 
 pub use builtin::{builtin_styles, default_style, explanatory_style, find_builtin, learning_style};
 pub use generator::SystemPromptGenerator;
-#[cfg(feature = "cli-integration")]
+#[cfg(feature = "file-resources")]
 pub use loader::{OutputStyleFrontmatter, OutputStyleLoader};
 pub use provider::InMemoryOutputStyleProvider;
-#[cfg(feature = "cli-integration")]
+#[cfg(feature = "file-resources")]
 pub use provider::{ChainOutputStyleProvider, FileOutputStyleProvider, file_output_style_provider};
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
-#[cfg(feature = "cli-integration")]
+#[cfg(feature = "file-resources")]
 use crate::common::IndexRegistry;
-#[cfg(feature = "cli-integration")]
+#[cfg(feature = "file-resources")]
 use crate::common::Provider;
 use crate::common::{ContentSource, Index, Named, SourceType};
 
@@ -103,10 +103,10 @@ impl Index for OutputStyle {
 }
 
 /// Registry for output styles.
-#[cfg(feature = "cli-integration")]
+#[cfg(feature = "file-resources")]
 pub type OutputStyleRegistry = IndexRegistry<OutputStyle>;
 
-#[cfg(feature = "cli-integration")]
+#[cfg(feature = "file-resources")]
 impl OutputStyleRegistry {
     pub fn builtins() -> Self {
         let mut registry = Self::new();

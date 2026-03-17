@@ -103,18 +103,21 @@ impl<T: Named + Clone + Send + Sync + 'static> Provider<T> for InMemoryProvider<
     }
 }
 
+#[cfg(feature = "file-resources")]
 pub struct ChainProvider<T: Named + Clone + Send + Sync + 'static> {
     providers: Vec<Box<dyn Provider<T>>>,
     /// Indices into `providers` sorted by descending priority.
     sorted_indices: Vec<usize>,
 }
 
+#[cfg(feature = "file-resources")]
 impl<T: Named + Clone + Send + Sync + 'static> Default for ChainProvider<T> {
     fn default() -> Self {
         Self::new()
     }
 }
 
+#[cfg(feature = "file-resources")]
 impl<T: Named + Clone + Send + Sync + 'static> ChainProvider<T> {
     pub fn new() -> Self {
         Self {
@@ -141,6 +144,7 @@ impl<T: Named + Clone + Send + Sync + 'static> ChainProvider<T> {
     }
 }
 
+#[cfg(feature = "file-resources")]
 #[async_trait]
 impl<T: Named + Clone + Send + Sync + 'static> Provider<T> for ChainProvider<T> {
     fn provider_name(&self) -> &str {
@@ -228,6 +232,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[cfg(feature = "file-resources")]
     async fn test_chain_provider_priority() {
         let low = InMemoryProvider::new()
             .item(TestItem {
@@ -250,6 +255,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[cfg(feature = "file-resources")]
     async fn test_chain_provider_load_all() {
         let p1 = InMemoryProvider::new()
             .item(TestItem {
@@ -272,6 +278,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[cfg(feature = "file-resources")]
     async fn test_chain_provider_load_all_priority_order() {
         let low = InMemoryProvider::new()
             .item(TestItem {

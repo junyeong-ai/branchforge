@@ -121,13 +121,16 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 [features]
 default = []
 
-# CLI Integration (Claude Code environment support) - opt-in
-cli-integration = []    # ClaudeCliProvider, file-based loaders
+# CLI OAuth authentication source (ClaudeCliProvider, CliCredentials)
+cli-auth = []
+
+# File-based resource loaders (DocumentLoader, FileProvider, ChainProvider)
+file-resources = []
 
 mcp = ["rmcp"]
 
 # Plugin system with namespace-based resource management
-plugins = ["cli-integration"]
+plugins = ["file-resources"]
 
 # Multimedia support for Read tool (PDF, images)
 multimedia = ["pdf-extract"]
@@ -156,12 +159,12 @@ persistence-all = ["jsonl", "postgres", "redis-backend"]
 otel = ["opentelemetry", "opentelemetry_sdk", "opentelemetry-otlp", "opentelemetry-semantic-conventions", "tracing-opentelemetry", "tracing-subscriber"]
 
 # Full feature set (excludes multimedia - heavy native dependency, enable separately if needed)
-full = ["mcp", "cloud-all", "persistence-all", "otel", "plugins"]
+full = ["mcp", "cloud-all", "persistence-all", "otel", "plugins", "cli-auth"]
 
 [[example]]
 name = "advanced_test"
 path = "examples/advanced_test.rs"
-required-features = ["cli-integration"]
+required-features = ["cli-auth", "file-resources"]
 
 [[example]]
 name = "all_tools_test"
@@ -170,7 +173,7 @@ path = "examples/all_tools_test.rs"
 [[example]]
 name = "server_tools"
 path = "examples/server_tools.rs"
-required-features = ["cli-integration"]
+required-features = ["cli-auth", "file-resources"]
 
 [[example]]
 name = "sandbox_verification"

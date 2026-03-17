@@ -5,6 +5,7 @@
 
 use std::path::Path;
 
+#[cfg(feature = "cli-auth")]
 use crate::auth::Auth;
 use crate::authorization::ToolPolicy;
 use crate::common::{IndexRegistry, Named, Provider};
@@ -38,6 +39,7 @@ impl AgentBuilder {
     /// # Ok(())
     /// # }
     /// ```
+    #[cfg(feature = "cli-auth")]
     pub async fn from_claude_cli_workspace(
         mut self,
         path: impl AsRef<Path>,

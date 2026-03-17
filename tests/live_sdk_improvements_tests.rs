@@ -11,7 +11,7 @@
 //! Requires Claude CLI OAuth credentials.
 //! Run: cargo nextest run --test live_sdk_improvements_tests -- --ignored --nocapture
 
-#![cfg(feature = "cli-integration")]
+#![cfg(feature = "cli-auth")]
 
 use std::any::Any;
 use std::sync::Arc;

@@ -472,7 +472,7 @@ mod settings_tests {
 // Live Tests (require CLI credentials)
 // =============================================================================
 
-#[cfg(feature = "cli-integration")]
+#[cfg(feature = "cli-auth")]
 mod live_tests {
     use branchforge::{Agent, ToolSurface};
     use tempfile::tempdir;

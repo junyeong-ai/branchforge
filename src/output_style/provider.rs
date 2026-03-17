@@ -5,17 +5,17 @@ use crate::common::InMemoryProvider as GenericInMemoryProvider;
 
 pub type InMemoryOutputStyleProvider = GenericInMemoryProvider<OutputStyle>;
 
-#[cfg(feature = "cli-integration")]
+#[cfg(feature = "file-resources")]
 pub type FileOutputStyleProvider = crate::common::FileProvider<
     OutputStyle,
     super::OutputStyleLoader,
     crate::common::OutputStyleLookupStrategy,
 >;
 
-#[cfg(feature = "cli-integration")]
+#[cfg(feature = "file-resources")]
 pub type ChainOutputStyleProvider = crate::common::ChainProvider<OutputStyle>;
 
-#[cfg(feature = "cli-integration")]
+#[cfg(feature = "file-resources")]
 pub fn file_output_style_provider() -> FileOutputStyleProvider {
     FileOutputStyleProvider::new(
         super::OutputStyleLoader::new(),
@@ -41,7 +41,7 @@ mod tests {
         assert_eq!(loaded.unwrap().name, "test");
     }
 
-    #[cfg(feature = "cli-integration")]
+    #[cfg(feature = "file-resources")]
     #[tokio::test]
     async fn test_chain_provider() {
         let low = InMemoryOutputStyleProvider::new()
@@ -58,7 +58,7 @@ mod tests {
         assert_eq!(style.description, "High");
     }
 
-    #[cfg(feature = "cli-integration")]
+    #[cfg(feature = "file-resources")]
     #[tokio::test]
     async fn test_file_provider() {
         use crate::common::{Provider, SourceType};
@@ -73,7 +73,7 @@ mod tests {
         assert_eq!(provider.paths().len(), 1);
     }
 
-    #[cfg(feature = "cli-integration")]
+    #[cfg(feature = "file-resources")]
     #[tokio::test]
     async fn test_file_provider_load_style() {
         let temp = tempfile::tempdir().unwrap();

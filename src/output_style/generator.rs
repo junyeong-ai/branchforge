@@ -5,7 +5,7 @@
 
 use std::path::PathBuf;
 
-#[cfg(feature = "cli-integration")]
+#[cfg(feature = "file-resources")]
 use super::{ChainOutputStyleProvider, file_output_style_provider};
 use super::{InMemoryOutputStyleProvider, OutputStyle, builtin_styles, default_style};
 use crate::client::DEFAULT_MODEL;
@@ -140,7 +140,7 @@ impl SystemPromptGenerator {
     /// 1. Project styles (.claude/output-styles/) - highest priority
     /// 2. User styles (~/.claude/output-styles/)
     /// 3. Built-in styles - lowest priority
-    #[cfg(feature = "cli-integration")]
+    #[cfg(feature = "file-resources")]
     pub async fn style_name(mut self, name: &str) -> crate::Result<Self> {
         let builtins = InMemoryOutputStyleProvider::new()
             .items(builtin_styles())

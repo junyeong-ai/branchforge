@@ -504,7 +504,7 @@ mod rule_index_tests {
 // CLI Tool Integration Patterns
 // =============================================================================
 
-mod cli_integration_tests {
+mod skill_integration_tests {
     use super::*;
 
     #[tokio::test]
@@ -573,7 +573,7 @@ Execute the appropriate docker-compose command using Bash.
 // Live Tests (require CLI credentials)
 // =============================================================================
 
-#[cfg(feature = "cli-integration")]
+#[cfg(feature = "cli-auth")]
 mod live_tests {
     use branchforge::{Agent, Auth};
     use tempfile::tempdir;

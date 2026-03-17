@@ -38,7 +38,7 @@
 
 mod builtin;
 mod index;
-#[cfg(feature = "cli-integration")]
+#[cfg(feature = "file-resources")]
 mod index_loader;
 
 pub use builtin::{
@@ -46,7 +46,7 @@ pub use builtin::{
     plan_subagent,
 };
 pub use index::SubagentIndex;
-#[cfg(feature = "cli-integration")]
+#[cfg(feature = "file-resources")]
 pub use index_loader::{SubagentFrontmatter, SubagentIndexLoader};
 
 #[cfg(test)]

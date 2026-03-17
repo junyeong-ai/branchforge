@@ -156,7 +156,7 @@ impl AgentBuilder {
     /// # Supported Methods
     /// - `Auth::from_env()` - Uses `ANTHROPIC_API_KEY` environment variable
     /// - `Auth::api_key("sk-...")` - Explicit API key
-    /// - `Auth::claude_cli()` - Uses Claude CLI OAuth (requires `cli-integration` feature)
+    /// - `Auth::claude_cli()` - Uses Claude CLI OAuth (requires `cli-auth` feature)
     /// - `Auth::bedrock("region")` - AWS Bedrock (requires `aws` feature)
     /// - `Auth::vertex("project", "region")` - GCP Vertex AI (requires `gcp` feature)
     ///

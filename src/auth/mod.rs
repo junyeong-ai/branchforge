@@ -10,7 +10,7 @@ mod credential;
 mod helper;
 mod provider;
 mod providers;
-#[cfg(feature = "cli-integration")]
+#[cfg(feature = "cli-auth")]
 mod storage;
 
 use std::sync::Arc;
@@ -22,10 +22,10 @@ pub use config::{CLAUDE_CODE_BETA, OAuthConfig, OAuthConfigBuilder};
 pub use credential::{Credential, OAuthCredential};
 pub use helper::{ApiKeyHelper, AwsCredentialRefresh, AwsCredentials, CredentialManager};
 pub use provider::CredentialProvider;
-#[cfg(feature = "cli-integration")]
+#[cfg(feature = "cli-auth")]
 pub use providers::ClaudeCliProvider;
 pub use providers::{ChainProvider, EnvironmentProvider, ExplicitProvider};
-#[cfg(feature = "cli-integration")]
+#[cfg(feature = "cli-auth")]
 pub use storage::CliCredentials;
 
 use crate::Result;
@@ -39,7 +39,7 @@ use crate::Result;
 ///
 /// - `ApiKey`: Direct API key authentication
 /// - `FromEnv`: Load API key from ANTHROPIC_API_KEY environment variable
-/// - `ClaudeCli`: Use credentials from Claude Code CLI (requires `cli-integration` feature)
+/// - `ClaudeCli`: Use credentials from Claude Code CLI (requires `cli-auth` feature)
 /// - `OAuth`: OAuth token authentication
 /// - `Resolved`: Pre-resolved credential (for testing or credential reuse)
 /// - `Bedrock`: AWS Bedrock (requires `aws` feature)
@@ -50,7 +50,7 @@ pub enum Auth {
     ApiKey(SecretString),
     #[default]
     FromEnv,
-    #[cfg(feature = "cli-integration")]
+    #[cfg(feature = "cli-auth")]
     ClaudeCli,
     OAuth {
         token: SecretString,
@@ -88,7 +88,7 @@ impl Auth {
         Self::FromEnv
     }
 
-    #[cfg(feature = "cli-integration")]
+    #[cfg(feature = "cli-auth")]
     pub fn claude_cli() -> Self {
         Self::ClaudeCli
     }
@@ -143,7 +143,7 @@ impl Auth {
         match self {
             Self::ApiKey(key) => Ok(Credential::api_key(key.expose_secret())),
             Self::FromEnv => EnvironmentProvider::new().resolve().await,
-            #[cfg(feature = "cli-integration")]
+            #[cfg(feature = "cli-auth")]
             Self::ClaudeCli => ClaudeCliProvider::new().resolve().await,
             Self::OAuth { token } => Ok(Credential::oauth(token.expose_secret())),
             Self::Resolved(credential) => Ok(credential.clone()),
@@ -171,7 +171,7 @@ impl Auth {
                 let credential = provider.resolve().await?;
                 Ok((credential, None))
             }
-            #[cfg(feature = "cli-integration")]
+            #[cfg(feature = "cli-auth")]
             Self::ClaudeCli => {
                 let provider = Arc::new(ClaudeCliProvider::new());
                 let credential = provider.resolve().await?;
@@ -212,7 +212,7 @@ impl Auth {
     pub fn is_oauth(&self) -> bool {
         match self {
             Self::OAuth { .. } => true,
-            #[cfg(feature = "cli-integration")]
+            #[cfg(feature = "cli-auth")]
             Self::ClaudeCli => true,
             Self::Resolved(cred) => cred.is_oauth(),
             _ => false,
@@ -272,7 +272,7 @@ mod tests {
     fn test_auth_constructors() {
         assert!(matches!(Auth::api_key("key"), Auth::ApiKey(_)));
         assert!(matches!(Auth::from_env(), Auth::FromEnv));
-        #[cfg(feature = "cli-integration")]
+        #[cfg(feature = "cli-auth")]
         assert!(matches!(Auth::claude_cli(), Auth::ClaudeCli));
         assert!(matches!(Auth::oauth("token"), Auth::OAuth { .. }));
         assert!(matches!(

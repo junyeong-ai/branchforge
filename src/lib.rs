@@ -131,7 +131,7 @@ pub use session::{
 pub use skills::{SkillIndex, SkillResult, SkillRuntime};
 pub use subagents::{SubagentIndex, builtin_subagents};
 
-#[cfg(feature = "cli-integration")]
+#[cfg(feature = "cli-auth")]
 pub use auth::ClaudeCliProvider;
 #[cfg(feature = "aws")]
 pub use client::BedrockAdapter;
@@ -143,12 +143,12 @@ pub use client::GeminiAdapter;
 pub use client::OpenAiAdapter;
 #[cfg(feature = "gcp")]
 pub use client::VertexAdapter;
-#[cfg(feature = "cli-integration")]
+#[cfg(feature = "file-resources")]
 pub use output_style::OutputStyleLoader;
 pub use output_style::SystemPromptGenerator;
 #[cfg(feature = "plugins")]
 pub use plugins::{PluginDescriptor, PluginDiscovery, PluginError, PluginManager, PluginManifest};
-#[cfg(feature = "cli-integration")]
+#[cfg(feature = "file-resources")]
 pub use subagents::{SubagentFrontmatter, SubagentIndexLoader};
 
 /// Error type for branchforge operations.

@@ -6,7 +6,7 @@
 //! Requires Claude CLI OAuth credentials.
 //! Run: cargo test --test live_all_tools_tests -- --ignored --nocapture
 
-#![cfg(feature = "cli-integration")]
+#![cfg(feature = "cli-auth")]
 
 use branchforge::session::SessionManager;
 use branchforge::{Agent, Auth, ToolSurface};

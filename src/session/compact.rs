@@ -99,7 +99,6 @@ impl CompactStrategy {
     }
 
     /// Create a CompactStrategy that inherits coding instruction preference from OutputStyle.
-    #[cfg(feature = "cli-integration")]
     pub fn from_output_style(style: &crate::output_style::OutputStyle) -> Self {
         Self {
             keep_coding_instructions: style.keep_coding_instructions,

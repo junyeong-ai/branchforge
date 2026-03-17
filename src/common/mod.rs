@@ -1,6 +1,6 @@
 mod content_source;
 mod directory;
-#[cfg(feature = "cli-integration")]
+#[cfg(feature = "file-resources")]
 mod file_provider;
 mod frontmatter;
 mod index;
@@ -16,19 +16,19 @@ use std::path::PathBuf;
 
 pub use content_source::ContentSource;
 pub(crate) use directory::is_skill_file;
-#[cfg(feature = "cli-integration")]
+#[cfg(feature = "file-resources")]
 pub(crate) use directory::{is_markdown, load_files};
 
 pub(crate) fn home_dir() -> Option<PathBuf> {
     directories::UserDirs::new().map(|d| d.home_dir().to_path_buf())
 }
-#[cfg(feature = "cli-integration")]
+#[cfg(feature = "file-resources")]
 pub(crate) use file_provider::{DocumentLoader, FileProvider, OutputStyleLookupStrategy};
 pub(crate) use frontmatter::{parse_frontmatter, strip_frontmatter};
 pub use index::Index;
 pub use index_registry::{IndexRegistry, LoadedEntry};
 pub use path_matched::PathMatched;
-#[cfg(feature = "cli-integration")]
+#[cfg(feature = "file-resources")]
 pub(crate) use provider::ChainProvider;
 pub(crate) use provider::InMemoryProvider;
 pub use provider::Provider;
