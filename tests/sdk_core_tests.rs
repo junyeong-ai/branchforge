@@ -548,7 +548,9 @@ mod agent_builder_tests {
 
     #[test]
     fn test_agent_events() {
-        let text_event = AgentEvent::Text("Hello".to_string());
+        let text_event = AgentEvent::Text {
+            delta: "Hello".to_string(),
+        };
         let tool_complete = AgentEvent::ToolComplete {
             id: "id1".to_string(),
             name: "Read".to_string(),
@@ -561,7 +563,7 @@ mod agent_builder_tests {
             name: "Bash".to_string(),
             reason: "Authorization denied".to_string(),
         };
-        assert!(matches!(text_event, AgentEvent::Text(_)));
+        assert!(matches!(text_event, AgentEvent::Text { .. }));
         assert!(matches!(tool_complete, AgentEvent::ToolComplete { .. }));
         assert!(matches!(tool_blocked, AgentEvent::ToolBlocked { .. }));
     }
@@ -1490,7 +1492,7 @@ mod live_tests {
         let mut has_complete = false;
         while let Some(event) = stream.next().await {
             match event.expect("Event error") {
-                branchforge::AgentEvent::Text(_) => has_text = true,
+                branchforge::AgentEvent::Text { .. } => has_text = true,
                 branchforge::AgentEvent::Complete(_) => has_complete = true,
                 _ => {}
             }

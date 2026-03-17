@@ -601,7 +601,7 @@ impl StreamState {
                         }),
                     );
                 }
-                StreamPollResult::Event(Ok(AgentEvent::Text(text)))
+                StreamPollResult::Event(Ok(AgentEvent::Text { delta: text }))
             }
             StreamItem::Thinking(thinking) => {
                 self.fire_post_stream_chunk_sync(&thinking, "thinking");
@@ -614,7 +614,7 @@ impl StreamState {
                         }),
                     );
                 }
-                StreamPollResult::Event(Ok(AgentEvent::Thinking(thinking)))
+                StreamPollResult::Event(Ok(AgentEvent::Thinking { content: thinking }))
             }
             StreamItem::Citation(_) => StreamPollResult::Continue,
             StreamItem::ToolUseComplete(tool_use) => {
@@ -1078,7 +1078,9 @@ mod tests {
 
     #[test]
     fn test_stream_poll_result_variants() {
-        let event = StreamPollResult::Event(Ok(AgentEvent::Text("test".into())));
+        let event = StreamPollResult::Event(Ok(AgentEvent::Text {
+            delta: "test".into(),
+        }));
         assert!(matches!(event, StreamPollResult::Event(_)));
 
         let cont = StreamPollResult::Continue;

@@ -36,7 +36,7 @@ impl AgentState {
 
 use crate::types::{AuthorizationDenied, ModelUsage, ServerToolUse, ServerToolUseUsage, Usage};
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct AgentMetrics {
     pub iterations: usize,
     pub tool_calls: usize,
@@ -57,14 +57,14 @@ pub struct AgentMetrics {
     pub api_time_ms: u64,
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ToolStats {
     pub calls: usize,
     pub total_time_ms: u64,
     pub errors: usize,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolCallRecord {
     pub tool_use_id: String,
     pub tool_name: String,

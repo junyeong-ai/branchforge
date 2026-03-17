@@ -313,8 +313,8 @@ async fn live_post_stream_chunk_via_streaming() {
     let mut text = String::new();
     tokio::pin!(stream);
     while let Some(event) = stream.next().await {
-        if let Ok(branchforge::AgentEvent::Text(t)) = event {
-            text.push_str(&t);
+        if let Ok(branchforge::AgentEvent::Text { delta }) = event {
+            text.push_str(&delta);
         }
     }
 

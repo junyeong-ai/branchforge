@@ -4,18 +4,20 @@ The runtime provides three complementary observability layers.
 
 ## 1. Agent Events (Real-Time Streaming)
 
-`AgentEvent` variants emitted during `execute_stream()`:
+`AgentEvent` variants emitted during `execute_stream()`. All variants implement `Serialize`/`Deserialize` with `#[serde(tag = "type", rename_all = "snake_case")]`:
 
 | Event | Data | Purpose |
 |-------|------|---------|
-| `Text(String)` | Incremental text | Streaming output |
-| `Thinking(String)` | Model reasoning | Thinking/reasoning display |
+| `Text { delta }` | Incremental text chunk | Streaming output |
+| `Thinking { content }` | Model reasoning | Thinking/reasoning display |
 | `ToolStart { id, name, input }` | Tool about to execute | Progress indicator |
 | `ToolReview { id, name, input }` | Tool needs user approval | Human-in-the-loop (Supervised mode) |
 | `ToolComplete { id, name, output, is_error, duration_ms }` | Tool finished | Duration tracking |
 | `ToolBlocked { id, name, reason }` | Tool denied by policy/hook | Security audit |
 | `TurnUsage { input/output/cache tokens, totals }` | Per-turn token consumption | Cost tracking |
 | `Complete(AgentResult)` | Final result with `AgentMetrics` | Summary |
+
+Use `event.event_type()` for the type string (`"text"`, `"tool_start"`, etc.) and `serde_json::to_value(&event)` for canonical JSON serialization.
 
 ## 2. Agent Metrics (Aggregated Result)
 

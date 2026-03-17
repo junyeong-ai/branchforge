@@ -39,7 +39,7 @@
 //!     let mut stream = pin!(stream);
 //!     while let Some(event) = stream.next().await {
 //!         match event? {
-//!             AgentEvent::Text(text) => print!("{}", text),
+//!             AgentEvent::Text { delta } => print!("{}", delta),
 //!             AgentEvent::Complete(result) => {
 //!                 println!("Done: {} tokens", result.total_tokens());
 //!             }

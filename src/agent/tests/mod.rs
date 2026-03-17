@@ -123,8 +123,10 @@ fn test_agent_result_extract_no_output() {
 
 #[test]
 fn test_agent_event_variants() {
-    let text_event = AgentEvent::Text("Hello".to_string());
-    assert!(matches!(text_event, AgentEvent::Text(_)));
+    let text_event = AgentEvent::Text {
+        delta: "Hello".to_string(),
+    };
+    assert!(matches!(text_event, AgentEvent::Text { .. }));
 
     let tool_complete = AgentEvent::ToolComplete {
         id: "tool_1".to_string(),
@@ -147,6 +149,137 @@ fn test_agent_event_variants() {
         reason: "Authorization denied".to_string(),
     };
     assert!(matches!(tool_blocked, AgentEvent::ToolBlocked { .. }));
+}
+
+#[test]
+fn test_agent_event_serialization_roundtrip() {
+    let events = vec![
+        AgentEvent::Text {
+            delta: "Hello".to_string(),
+        },
+        AgentEvent::Thinking {
+            content: "Let me think...".to_string(),
+        },
+        AgentEvent::ToolStart {
+            id: "t1".to_string(),
+            name: "Read".to_string(),
+            input: serde_json::json!({"path": "/tmp/test.txt"}),
+        },
+        AgentEvent::ToolComplete {
+            id: "t1".to_string(),
+            name: "Read".to_string(),
+            output: "file contents".to_string(),
+            is_error: false,
+            duration_ms: 42,
+        },
+        AgentEvent::ToolBlocked {
+            id: "t2".to_string(),
+            name: "Bash".to_string(),
+            reason: "Denied".to_string(),
+        },
+        AgentEvent::TurnUsage {
+            input_tokens: 100,
+            output_tokens: 50,
+            cache_read_tokens: 10,
+            cache_creation_tokens: 5,
+            total_input_tokens: 100,
+            total_output_tokens: 50,
+        },
+    ];
+
+    for event in &events {
+        let json = serde_json::to_value(event).expect("serialize");
+        assert!(
+            json.get("type").is_some(),
+            "Missing 'type' tag in {:?}",
+            event
+        );
+
+        let roundtrip: AgentEvent = serde_json::from_value(json.clone()).expect("deserialize");
+        let json2 = serde_json::to_value(&roundtrip).expect("re-serialize");
+        assert_eq!(json, json2, "Round-trip mismatch for {:?}", event);
+    }
+}
+
+#[test]
+fn test_agent_event_type_method() {
+    assert_eq!(AgentEvent::Text { delta: "hi".into() }.event_type(), "text");
+    assert_eq!(
+        AgentEvent::Thinking { content: "".into() }.event_type(),
+        "thinking"
+    );
+    assert_eq!(
+        AgentEvent::ToolStart {
+            id: "".into(),
+            name: "".into(),
+            input: serde_json::Value::Null
+        }
+        .event_type(),
+        "tool_start"
+    );
+    assert_eq!(
+        AgentEvent::ToolComplete {
+            id: "".into(),
+            name: "".into(),
+            output: "".into(),
+            is_error: false,
+            duration_ms: 0
+        }
+        .event_type(),
+        "tool_complete"
+    );
+    assert_eq!(
+        AgentEvent::ToolBlocked {
+            id: "".into(),
+            name: "".into(),
+            reason: "".into()
+        }
+        .event_type(),
+        "tool_blocked"
+    );
+    assert_eq!(
+        AgentEvent::TurnUsage {
+            input_tokens: 0,
+            output_tokens: 0,
+            cache_read_tokens: 0,
+            cache_creation_tokens: 0,
+            total_input_tokens: 0,
+            total_output_tokens: 0
+        }
+        .event_type(),
+        "turn_usage"
+    );
+}
+
+#[test]
+fn test_agent_event_tagged_format() {
+    let event = AgentEvent::Text {
+        delta: "Hello".to_string(),
+    };
+    let json = serde_json::to_value(&event).unwrap();
+    assert_eq!(json["type"], "text");
+    assert_eq!(json["delta"], "Hello");
+
+    let event = AgentEvent::ToolStart {
+        id: "t1".into(),
+        name: "Read".into(),
+        input: serde_json::json!({"path": "test.txt"}),
+    };
+    let json = serde_json::to_value(&event).unwrap();
+    assert_eq!(json["type"], "tool_start");
+    assert_eq!(json["name"], "Read");
+    assert_eq!(json["input"]["path"], "test.txt");
+}
+
+#[test]
+fn test_agent_metrics_serialization() {
+    let metrics = AgentMetrics::default();
+    let json = serde_json::to_value(&metrics).expect("serialize AgentMetrics");
+    assert_eq!(json["iterations"], 0);
+    assert_eq!(json["tool_calls"], 0);
+
+    let roundtrip: AgentMetrics = serde_json::from_value(json).expect("deserialize");
+    assert_eq!(roundtrip.iterations, 0);
 }
 
 #[test]
