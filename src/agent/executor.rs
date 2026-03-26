@@ -9,6 +9,7 @@ use crate::Client;
 use crate::authorization::ExecutionMode;
 use crate::budget::{BudgetTracker, TenantBudget};
 use crate::context::PromptOrchestrator;
+use crate::context_scope::SharedContextScope;
 use crate::events::EventBus;
 use crate::hooks::HookManager;
 use crate::session::{SessionAccessScope, SessionManager, ToolState};
@@ -32,6 +33,7 @@ pub struct Agent {
     pub(crate) session_scope: Option<SessionAccessScope>,
     pub(crate) event_bus: Option<Arc<EventBus>>,
     pub(crate) execution_mode: ExecutionMode,
+    pub(crate) context_scope: Option<SharedContextScope>,
 }
 
 impl Agent {
@@ -111,6 +113,7 @@ impl Agent {
             session_scope: None,
             event_bus: None,
             execution_mode: ExecutionMode::Auto,
+            context_scope: None,
         }
     }
 
@@ -149,6 +152,19 @@ impl Agent {
     #[must_use]
     pub fn event_bus(&self) -> Option<&Arc<EventBus>> {
         self.event_bus.as_ref()
+    }
+
+    /// Attach a [`ContextScope`](crate::ContextScope) that wraps every tool
+    /// execution future with per-request context (task-locals, tracing spans, etc.).
+    pub fn with_context_scope(mut self, scope: SharedContextScope) -> Self {
+        self.context_scope = Some(scope);
+        self
+    }
+
+    /// Returns the context scope, if one was configured.
+    #[must_use]
+    pub fn context_scope(&self) -> Option<&SharedContextScope> {
+        self.context_scope.as_ref()
     }
 
     pub(crate) fn initial_messages(mut self, messages: Vec<Message>) -> Self {

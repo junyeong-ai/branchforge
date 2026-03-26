@@ -458,12 +458,16 @@ impl HookOutput {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct HookContext {
     pub session_id: String,
     pub cancellation_token: CancellationToken,
     pub cwd: Option<std::path::PathBuf>,
     pub env: std::collections::HashMap<String, String>,
+    /// Optional execution context scope for hooks that spawn background tasks.
+    /// When present, spawned futures should be wrapped with this scope to
+    /// propagate task-locals (e.g., workspace isolation, tracing context).
+    pub context_scope: Option<crate::SharedContextScope>,
 }
 
 impl Default for HookContext {
@@ -473,7 +477,19 @@ impl Default for HookContext {
             cancellation_token: CancellationToken::new(),
             cwd: None,
             env: std::collections::HashMap::new(),
+            context_scope: None,
         }
+    }
+}
+
+impl std::fmt::Debug for HookContext {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("HookContext")
+            .field("session_id", &self.session_id)
+            .field("cwd", &self.cwd)
+            .field("env", &self.env)
+            .field("context_scope", &self.context_scope.as_ref().map(|_| "..."))
+            .finish()
     }
 }
 
@@ -497,6 +513,11 @@ impl HookContext {
 
     pub fn env(mut self, env: std::collections::HashMap<String, String>) -> Self {
         self.env = env;
+        self
+    }
+
+    pub fn context_scope(mut self, scope: crate::SharedContextScope) -> Self {
+        self.context_scope = Some(scope);
         self
     }
 }

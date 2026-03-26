@@ -96,6 +96,10 @@ impl AgentBuilder {
                 .await;
         }
 
+        if let Some(scope) = self.context_scope {
+            agent.context_scope = Some(scope);
+        }
+
         agent.persist_session_state().await?;
         if let Some(tsm) = self.tool_search_manager {
             agent = agent.tool_search_manager(tsm);

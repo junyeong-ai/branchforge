@@ -416,11 +416,18 @@ impl Agent {
                 }
             }
 
+            let context_scope = self.context_scope.clone();
             let tool_futures = prepared.into_iter().map(|(id, name, input)| {
                 let tools = &self.tools;
+                let context_scope = context_scope.clone();
                 async move {
                     let start = Instant::now();
-                    let result = tools.execute(&name, input.clone()).await;
+                    let result = if let Some(ref scope) = context_scope {
+                        let fut = tools.execute(&name, input.clone());
+                        scope.wrap_tool_future(Box::pin(fut)).await
+                    } else {
+                        tools.execute(&name, input.clone()).await
+                    };
                     let duration_ms = start.elapsed().as_millis() as u64;
                     (id, name, input, result, duration_ms)
                 }
@@ -541,9 +548,13 @@ impl Agent {
     }
 
     pub(crate) fn hook_context(&self) -> HookContext {
-        HookContext::new(&*self.session_id)
+        let ctx = HookContext::new(&*self.session_id)
             .cwd(self.config.working_dir.clone().unwrap_or_default())
-            .env(self.config.security.env.clone())
+            .env(self.config.security.env.clone());
+        match self.context_scope {
+            Some(ref scope) => ctx.context_scope(Arc::clone(scope)),
+            None => ctx,
+        }
     }
 
     fn extract_structured_output(&self, text: &str) -> Option<serde_json::Value> {

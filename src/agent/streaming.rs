@@ -23,6 +23,7 @@ use crate::authorization::ExecutionMode;
 use crate::budget::{BudgetTracker, TenantBudget};
 use crate::client::StreamItem;
 use crate::context::PromptOrchestrator;
+use crate::context_scope::SharedContextScope;
 use crate::hooks::{HookContext, HookEvent, HookInput, HookManager};
 use crate::session::ToolExecution;
 use crate::session::{MessageMetadata, SessionAccessScope, SessionManager, ToolState};
@@ -88,6 +89,7 @@ impl Agent {
                 session_scope: self.session_scope.clone(),
                 event_bus: self.event_bus.clone(),
                 execution_mode: self.execution_mode.clone(),
+                context_scope: self.context_scope.clone(),
             },
             timeout,
             prompt.to_string(),
@@ -115,6 +117,7 @@ struct StreamStateConfig {
     session_scope: Option<SessionAccessScope>,
     event_bus: Option<Arc<crate::events::EventBus>>,
     execution_mode: ExecutionMode,
+    context_scope: Option<SharedContextScope>,
 }
 
 enum StreamPollResult {
@@ -928,11 +931,18 @@ impl StreamState {
 
         // Phase 2: Parallel tool execution
         let tools = Arc::clone(&self.cfg.tools);
+        let context_scope = self.cfg.context_scope.clone();
         let tool_futures = prepared.into_iter().map(|(id, name, input)| {
             let tools = Arc::clone(&tools);
+            let context_scope = context_scope.clone();
             async move {
                 let start = Instant::now();
-                let result = tools.execute(&name, input.clone()).await;
+                let result = if let Some(ref scope) = context_scope {
+                    let fut = tools.execute(&name, input.clone());
+                    scope.wrap_tool_future(Box::pin(fut)).await
+                } else {
+                    tools.execute(&name, input.clone()).await
+                };
                 let duration_ms = start.elapsed().as_millis() as u64;
                 (id, name, input, result, duration_ms)
             }

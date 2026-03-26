@@ -78,6 +78,7 @@ pub struct AgentBuilder {
     pub(super) tool_search_config: Option<crate::tools::ToolSearchConfig>,
     pub(super) tool_search_manager: Option<std::sync::Arc<crate::tools::ToolSearchManager>>,
     pub(super) session_manager: Option<crate::session::SessionManager>,
+    pub(super) context_scope: Option<crate::context_scope::SharedContextScope>,
     pub(super) authorization_policy_explicit: bool,
 
     // Resource level flags - loaded in fixed order during build()
@@ -872,6 +873,32 @@ impl AgentBuilder {
     #[cfg(feature = "plugins")]
     pub fn plugin_dirs(mut self, dirs: impl IntoIterator<Item = impl Into<PathBuf>>) -> Self {
         self.plugin_dirs.extend(dirs.into_iter().map(Into::into));
+        self
+    }
+
+    // =========================================================================
+    // Context Scope
+    // =========================================================================
+
+    /// Attaches a [`ContextScope`](crate::ContextScope) that wraps every tool
+    /// execution future with per-request context.
+    ///
+    /// This is useful for propagating task-locals (e.g., workspace IDs for
+    /// database RLS), tracing spans, or other request-scoped state into
+    /// parallel tool invocations.
+    ///
+    /// # Example
+    /// ```rust,no_run
+    /// # use std::sync::Arc;
+    /// # use branchforge::Agent;
+    /// # async fn example() -> branchforge::Result<()> {
+    /// // let scope: Arc<dyn branchforge::ContextScope> = Arc::new(my_scope);
+    /// // let agent = Agent::builder().context_scope(scope).build().await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn context_scope(mut self, scope: crate::context_scope::SharedContextScope) -> Self {
+        self.context_scope = Some(scope);
         self
     }
 
