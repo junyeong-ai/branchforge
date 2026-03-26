@@ -62,6 +62,7 @@ pub mod client;
 pub mod common;
 pub mod config;
 pub mod context;
+pub mod context_scope;
 pub mod credentials;
 pub mod events;
 pub mod graph;
@@ -93,6 +94,7 @@ pub use agent::{Agent, AgentBuilder, AgentConfig, AgentEvent, AgentResult};
 pub use auth::{Auth, Credential};
 pub use authorization::{ExecutionMode, ToolPolicy};
 pub use client::{Client, ClientBuilder};
+pub use context_scope::{ContextScope, SharedContextScope};
 pub use credentials::{CredentialKind, CredentialRecord};
 pub use graph::{
     Bookmark, Branch, BranchExport, BranchId, Checkpoint, ExportBookmark, ExportNode, GraphError,
