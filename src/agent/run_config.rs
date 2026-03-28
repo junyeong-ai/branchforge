@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use crate::authorization::ExecutionMode;
 
-/// Overrides applied to a single execution without mutating the shared [`AgentConfig`].
+/// Overrides applied to a single execution without mutating the shared [`super::AgentConfig`].
 ///
 /// Any field set to `Some` overrides the corresponding value from the agent's
 /// configuration for that execution only.

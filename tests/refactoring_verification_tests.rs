@@ -355,7 +355,7 @@ mod phase11_persistence {
     async fn memory_persistence_with_session_lock() {
         let persistence = MemoryPersistence::new();
         let id = SessionId::new();
-        let session = Session::from_id(id.clone(), SessionConfig::default());
+        let session = Session::from_id(id, SessionConfig::default());
         persistence.save(&session).await.unwrap();
 
         let result = persistence

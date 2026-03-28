@@ -1,7 +1,7 @@
 //! Optional execution context scope for propagating task-locals, tracing spans,
 //! or other per-request context into agent tool execution and event callbacks.
 //!
-//! When set on an agent via [`AgentBuilder::context_scope()`], every tool
+//! When set on an agent via [`crate::AgentBuilder::context_scope()`], every tool
 //! execution future will be wrapped by [`ContextScope::wrap_tool_future()`]
 //! before awaiting.
 //!
