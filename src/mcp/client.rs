@@ -21,7 +21,7 @@ use super::{McpContent, McpServerInfo};
 #[cfg(feature = "mcp")]
 use rmcp::{
     RoleClient,
-    model::{CallToolRequestParam, ReadResourceRequestParam},
+    model::{CallToolRequestParams, ReadResourceRequestParams},
     service::{RunningService, ServiceError, ServiceExt},
     transport::{ConfigureCommandExt, TokioChildProcess},
 };
@@ -228,9 +228,12 @@ impl McpClient {
         let service = service.read().await;
         let result = timeout(
             super::MCP_CALL_TIMEOUT,
-            service.call_tool(CallToolRequestParam {
-                name: name.to_string().into(),
-                arguments: arguments.as_object().cloned(),
+            service.call_tool({
+                let mut params = CallToolRequestParams::new(name.to_string());
+                if let Some(args) = arguments.as_object().cloned() {
+                    params = params.with_arguments(args);
+                }
+                params
             }),
         )
         .await
@@ -327,7 +330,7 @@ impl McpClient {
         let service = service.read().await;
         let result = timeout(
             super::MCP_RESOURCE_TIMEOUT,
-            service.read_resource(ReadResourceRequestParam { uri: uri.into() }),
+            service.read_resource(ReadResourceRequestParams::new(uri)),
         )
         .await
         .map_err(|_| McpError::ResourceNotFound {
