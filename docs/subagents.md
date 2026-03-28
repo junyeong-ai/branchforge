@@ -4,10 +4,10 @@ Subagents are independent agent executions launched through the task system.
 
 ## Built-in Types
 
-- `Bash`
-- `Explore`
-- `Plan`
-- `general-purpose`
+- `bash`
+- `explore`
+- `plan`
+- `general`
 
 ## What Subagents Are For
 
@@ -24,7 +24,7 @@ Subagents are typically launched through the `Task` tool.
 {
   "description": "Review the auth module",
   "prompt": "Inspect authentication code for risks and summarize findings",
-  "subagent_type": "Explore"
+  "subagent_type": "explore"
 }
 ```
 
@@ -32,12 +32,12 @@ Subagents are typically launched through the `Task` tool.
 
 Subagents can run in the background and later be polled through `TaskOutput`.
 
-Built-in subagent names are case-sensitive:
+Built-in subagent names are case-sensitive and lowercase:
 
-- `Bash`
-- `Explore`
-- `Plan`
-- `general-purpose`
+- `bash`
+- `explore`
+- `plan`
+- `general`
 
 ## Relationship to Sessions
 
