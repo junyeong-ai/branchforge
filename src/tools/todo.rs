@@ -172,7 +172,7 @@ mod tests {
         let state = ToolState::new(session_id);
         let tool = TodoWriteTool::new(state.clone(), session_id);
         let execution_context = ExecutionContext::permissive()
-            .session_manager(manager.clone())
+            .with_session_manager(manager.clone())
             .session_scope(scope.clone());
 
         let result = tool

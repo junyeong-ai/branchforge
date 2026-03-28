@@ -12,9 +12,15 @@
 
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
+use std::sync::Weak;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use dashmap::DashMap;
 use tokio::sync::broadcast;
+
+/// Unique identifier for a subscription registered with [`EventBus`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct SubscriptionId(u64);
 
 /// Event kinds for the observability bus.
 ///
@@ -136,8 +142,9 @@ pub type SubscriberFn = Arc<dyn Fn(Event) + Send + Sync>;
 /// - Subscriber failures are silently ignored
 /// - No event can block or cancel execution
 pub struct EventBus {
-    subscribers: DashMap<EventKind, Vec<SubscriberFn>>,
+    subscribers: DashMap<EventKind, Vec<(SubscriptionId, SubscriberFn)>>,
     broadcast: broadcast::Sender<Event>,
+    next_id: AtomicU64,
 }
 
 impl EventBus {
@@ -151,6 +158,7 @@ impl EventBus {
         Self {
             subscribers: DashMap::new(),
             broadcast: tx,
+            next_id: AtomicU64::new(0),
         }
     }
 
@@ -158,8 +166,38 @@ impl EventBus {
     ///
     /// The callback will be spawned as a tokio task each time a matching
     /// event is emitted, so it must not block.
-    pub fn subscribe(&self, kind: EventKind, callback: SubscriberFn) {
-        self.subscribers.entry(kind).or_default().push(callback);
+    ///
+    /// Returns a [`SubscriptionId`] that can be passed to [`unsubscribe`](Self::unsubscribe)
+    /// to remove this subscription.
+    pub fn subscribe(&self, kind: EventKind, callback: SubscriberFn) -> SubscriptionId {
+        let id = SubscriptionId(self.next_id.fetch_add(1, Ordering::Relaxed));
+        self.subscribers
+            .entry(kind)
+            .or_default()
+            .push((id, callback));
+        id
+    }
+
+    /// Remove a previously registered subscription.
+    pub fn unsubscribe(&self, kind: EventKind, id: SubscriptionId) {
+        if let Some(mut subs) = self.subscribers.get_mut(&kind) {
+            subs.retain(|(sub_id, _)| *sub_id != id);
+        }
+    }
+
+    /// Subscribe and return a [`SubscriptionHandle`] that automatically
+    /// unsubscribes when dropped.
+    pub fn subscribe_with_handle(
+        self: &Arc<Self>,
+        kind: EventKind,
+        callback: SubscriberFn,
+    ) -> SubscriptionHandle {
+        let id = self.subscribe(kind, callback);
+        SubscriptionHandle {
+            id,
+            kind,
+            bus: Arc::downgrade(self),
+        }
     }
 
     /// Subscribe to all events via a broadcast channel.
@@ -183,7 +221,7 @@ impl EventBus {
 
         // Dispatch to per-kind subscribers.
         if let Some(subs) = self.subscribers.get(&event.kind) {
-            for callback in subs.value().iter() {
+            for (_, callback) in subs.value().iter() {
                 let cb = Arc::clone(callback);
                 let ev = event.clone();
                 tokio::spawn(async move {
@@ -220,6 +258,21 @@ impl EventBus {
 impl Default for EventBus {
     fn default() -> Self {
         Self::new(1024)
+    }
+}
+
+/// RAII handle that unsubscribes when dropped.
+pub struct SubscriptionHandle {
+    id: SubscriptionId,
+    kind: EventKind,
+    bus: Weak<EventBus>,
+}
+
+impl Drop for SubscriptionHandle {
+    fn drop(&mut self) {
+        if let Some(bus) = self.bus.upgrade() {
+            bus.unsubscribe(self.kind, self.id);
+        }
     }
 }
 
@@ -286,7 +339,7 @@ mod tests {
         let bus = EventBus::default();
 
         let c = Arc::clone(&counter);
-        bus.subscribe(
+        let _id = bus.subscribe(
             EventKind::ToolExecuted,
             Arc::new(move |_event| {
                 c.fetch_add(1, Ordering::SeqCst);
@@ -306,7 +359,7 @@ mod tests {
         let bus = EventBus::default();
 
         let c = Arc::clone(&counter);
-        bus.subscribe(
+        let _id = bus.subscribe(
             EventKind::Error,
             Arc::new(move |_event| {
                 c.fetch_add(1, Ordering::SeqCst);
@@ -326,8 +379,8 @@ mod tests {
 
         assert_eq!(bus.subscriber_count(EventKind::Error), 0);
 
-        bus.subscribe(EventKind::Error, Arc::new(|_| {}));
-        bus.subscribe(EventKind::Error, Arc::new(|_| {}));
+        let _id1 = bus.subscribe(EventKind::Error, Arc::new(|_| {}));
+        let _id2 = bus.subscribe(EventKind::Error, Arc::new(|_| {}));
         assert_eq!(bus.subscriber_count(EventKind::Error), 2);
 
         bus.clear_subscribers(EventKind::Error);
@@ -346,7 +399,7 @@ mod tests {
     async fn subscriber_panic_does_not_propagate() {
         let bus = EventBus::default();
 
-        bus.subscribe(
+        let _id = bus.subscribe(
             EventKind::Error,
             Arc::new(|_| {
                 panic!("intentional test panic");
@@ -366,5 +419,61 @@ mod tests {
         let bus = EventBus::default();
         // Must not panic or error.
         bus.emit_simple(EventKind::StreamChunk, serde_json::json!({"chunk": 1}));
+    }
+
+    #[test]
+    fn subscribe_returns_unique_ids() {
+        let bus = EventBus::default();
+        let id1 = bus.subscribe(EventKind::Error, Arc::new(|_| {}));
+        let id2 = bus.subscribe(EventKind::Error, Arc::new(|_| {}));
+        assert_ne!(id1, id2);
+    }
+
+    #[tokio::test]
+    async fn unsubscribe_removes_callback() {
+        let counter = Arc::new(AtomicUsize::new(0));
+        let bus = EventBus::default();
+
+        let c = Arc::clone(&counter);
+        let id = bus.subscribe(
+            EventKind::ToolExecuted,
+            Arc::new(move |_event| {
+                c.fetch_add(1, Ordering::SeqCst);
+            }),
+        );
+        assert_eq!(bus.subscriber_count(EventKind::ToolExecuted), 1);
+
+        bus.unsubscribe(EventKind::ToolExecuted, id);
+        assert_eq!(bus.subscriber_count(EventKind::ToolExecuted), 0);
+
+        bus.emit_simple(EventKind::ToolExecuted, serde_json::json!({}));
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        assert_eq!(counter.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn subscription_handle_unsubscribes_on_drop() {
+        let counter = Arc::new(AtomicUsize::new(0));
+        let bus = Arc::new(EventBus::default());
+
+        let c = Arc::clone(&counter);
+        {
+            let _handle = bus.subscribe_with_handle(
+                EventKind::ToolExecuted,
+                Arc::new(move |_event| {
+                    c.fetch_add(1, Ordering::SeqCst);
+                }),
+            );
+            assert_eq!(bus.subscriber_count(EventKind::ToolExecuted), 1);
+            // _handle drops here
+        }
+
+        assert_eq!(bus.subscriber_count(EventKind::ToolExecuted), 0);
+
+        bus.emit_simple(EventKind::ToolExecuted, serde_json::json!({}));
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        assert_eq!(counter.load(Ordering::SeqCst), 0);
     }
 }

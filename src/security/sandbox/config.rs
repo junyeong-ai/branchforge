@@ -135,8 +135,8 @@ impl SandboxConfig {
 
     pub fn to_network_sandbox(&self) -> super::NetworkSandbox {
         super::NetworkSandbox::new()
-            .allowed_domains(self.allowed_domains.iter().cloned())
-            .blocked_domains(self.blocked_domains.iter().cloned())
+            .with_allowed_domains(self.allowed_domains.iter().cloned())
+            .with_blocked_domains(self.blocked_domains.iter().cloned())
     }
 
     pub fn is_command_excluded(&self, command: &str) -> bool {

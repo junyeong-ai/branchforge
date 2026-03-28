@@ -10,7 +10,7 @@ pub struct CloudConfig {
     pub provider: ProviderSelection,
     pub tokens: TokenLimits,
     pub caching: PromptCachingConfig,
-    pub gateway: GatewayOptions,
+    pub gateway: GatewayConfig,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -41,7 +41,7 @@ pub struct PromptCachingConfig {
 }
 
 #[derive(Clone, Debug, Default)]
-pub struct GatewayOptions {
+pub struct GatewayConfig {
     pub disable_experimental_betas: bool,
 }
 
@@ -95,7 +95,7 @@ impl CloudConfig {
             provider: ProviderSelection::from_env(),
             tokens: TokenLimits::from_env(),
             caching: PromptCachingConfig::from_env(),
-            gateway: GatewayOptions::from_env(),
+            gateway: GatewayConfig::from_env(),
         }
     }
 
@@ -141,7 +141,7 @@ impl PromptCachingConfig {
     }
 }
 
-impl GatewayOptions {
+impl GatewayConfig {
     pub fn from_env() -> Self {
         Self {
             disable_experimental_betas: is_flag_set("CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS"),

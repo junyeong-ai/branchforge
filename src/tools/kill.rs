@@ -23,26 +23,20 @@ pub struct KillShellTool {
 }
 
 impl KillShellTool {
-    pub fn new() -> Self {
-        Self {
-            process_manager: Arc::new(ProcessManager::new()),
-        }
-    }
-
-    pub fn process_manager(manager: Arc<ProcessManager>) -> Self {
+    pub fn new(manager: Arc<ProcessManager>) -> Self {
         Self {
             process_manager: manager,
         }
     }
 
-    pub fn get_process_manager(&self) -> &Arc<ProcessManager> {
+    pub fn process_manager(&self) -> &Arc<ProcessManager> {
         &self.process_manager
     }
 }
 
 impl Default for KillShellTool {
     fn default() -> Self {
-        Self::new()
+        Self::new(Arc::new(ProcessManager::new()))
     }
 }
 
@@ -75,7 +69,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_kill_nonexistent_shell() {
-        let tool = KillShellTool::new();
+        let tool = KillShellTool::default();
         let context = ExecutionContext::default();
         let result = tool
             .execute(
@@ -91,7 +85,7 @@ mod tests {
         let mgr = Arc::new(ProcessManager::new());
         let id = mgr.spawn("sleep 10", &PathBuf::from("/tmp")).await.unwrap();
 
-        let tool = KillShellTool::process_manager(mgr.clone());
+        let tool = KillShellTool::new(mgr.clone());
         let context = ExecutionContext::default();
         let result = tool
             .execute(serde_json::json!({"shell_id": id}), &context)

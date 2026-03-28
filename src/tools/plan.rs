@@ -326,7 +326,7 @@ mod tests {
         let tool_state = ToolState::new(session_id);
         let tool = PlanTool::new(tool_state);
         let context = ExecutionContext::permissive()
-            .session_manager(manager.clone())
+            .with_session_manager(manager.clone())
             .session_scope(scope.clone());
 
         let start = tool

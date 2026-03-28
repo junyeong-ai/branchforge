@@ -40,19 +40,13 @@ pub struct BashTool {
 }
 
 impl BashTool {
-    pub fn new() -> Self {
-        Self {
-            process_manager: Arc::new(ProcessManager::new()),
-        }
-    }
-
-    pub fn process_manager(manager: Arc<ProcessManager>) -> Self {
+    pub fn new(manager: Arc<ProcessManager>) -> Self {
         Self {
             process_manager: manager,
         }
     }
 
-    pub fn get_process_manager(&self) -> &Arc<ProcessManager> {
+    pub fn process_manager(&self) -> &Arc<ProcessManager> {
         &self.process_manager
     }
 
@@ -206,7 +200,7 @@ impl BashTool {
 
 impl Default for BashTool {
     fn default() -> Self {
-        Self::new()
+        Self::new(Arc::new(ProcessManager::new()))
     }
 }
 
@@ -240,7 +234,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_simple_command() {
-        let tool = BashTool::new();
+        let tool = BashTool::default();
         let context = ExecutionContext::permissive();
         let result = tool
             .execute(
@@ -258,7 +252,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_background_command() {
-        let tool = BashTool::new();
+        let tool = BashTool::default();
         let context = ExecutionContext::permissive();
         let result = tool
             .execute(
@@ -279,7 +273,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_stderr_output() {
-        let tool = BashTool::new();
+        let tool = BashTool::default();
         let context = ExecutionContext::permissive();
         let result = tool
             .execute(
@@ -297,7 +291,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_exit_code_nonzero() {
-        let tool = BashTool::new();
+        let tool = BashTool::default();
         let context = ExecutionContext::permissive();
         let result = tool
             .execute(serde_json::json!({"command": "exit 42"}), &context)
@@ -312,7 +306,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_short_timeout() {
-        let tool = BashTool::new();
+        let tool = BashTool::default();
         let context = ExecutionContext::permissive();
         let result = tool
             .execute(
@@ -337,7 +331,7 @@ mod tests {
         let test_context = TestContext::new();
         test_context.write_file("testfile.txt", "content");
 
-        let tool = BashTool::new();
+        let tool = BashTool::default();
         let result = tool
             .execute(
                 serde_json::json!({"command": "ls testfile.txt"}),
@@ -355,12 +349,12 @@ mod tests {
     #[tokio::test]
     async fn test_shared_process_manager() {
         let manager = Arc::new(ProcessManager::new());
-        let tool1 = BashTool::process_manager(manager.clone());
-        let tool2 = BashTool::process_manager(manager.clone());
+        let tool1 = BashTool::new(manager.clone());
+        let tool2 = BashTool::new(manager.clone());
 
         assert!(Arc::ptr_eq(
-            tool1.get_process_manager(),
-            tool2.get_process_manager()
+            tool1.process_manager(),
+            tool2.process_manager()
         ));
     }
 }

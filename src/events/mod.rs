@@ -6,4 +6,4 @@
 
 mod bus;
 
-pub use bus::{Event, EventBus, EventKind, SubscriberFn};
+pub use bus::{Event, EventBus, EventKind, SubscriberFn, SubscriptionHandle, SubscriptionId};

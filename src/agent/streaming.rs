@@ -6,9 +6,9 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use futures::{Stream, StreamExt, future::join_all, stream};
-use tokio::sync::RwLock;
 use tracing::{debug, warn};
 
+use super::AgentMetrics;
 use super::common::{
     BudgetContext, accumulate_inner_usage, accumulate_response_usage, emit_tokens_consumed,
     emit_tool_executed, handle_compaction, maybe_emit_budget_alert,
@@ -18,20 +18,16 @@ use super::common::{
 use super::events::{AgentEvent, AgentResult};
 use super::executor::Agent;
 use super::request::RequestBuilder;
-use super::{AgentConfig, AgentMetrics};
-use crate::authorization::ExecutionMode;
-use crate::budget::{BudgetTracker, TenantBudget};
+use super::run_config::RunConfig;
+use super::runtime::AgentRuntime;
 use crate::client::StreamItem;
-use crate::context::PromptOrchestrator;
-use crate::context_scope::SharedContextScope;
-use crate::hooks::{HookContext, HookEvent, HookInput, HookManager};
+use crate::hooks::{HookContext, HookEvent, HookInput};
 use crate::session::ToolExecution;
 use crate::session::{MessageMetadata, SessionAccessScope, SessionManager, ToolState};
 use crate::types::{
     AuthorizationDenied, ContentBlock, ContentDelta, StopReason, StreamEvent, ToolResultBlock,
     ToolUseBlock, Usage, context_window,
 };
-use crate::{Client, ToolRegistry};
 
 type BoxedItemStream = Pin<Box<dyn Stream<Item = crate::Result<StreamItem>> + Send>>;
 
@@ -40,19 +36,42 @@ impl Agent {
         &self,
         prompt: &str,
     ) -> crate::Result<impl Stream<Item = crate::Result<AgentEvent>> + Send> {
-        let timeout = self
+        self.execute_stream_inner(prompt.to_string(), None).await
+    }
+
+    /// Stream execution with per-run configuration overrides.
+    pub async fn execute_stream_with(
+        &self,
+        prompt: impl Into<String>,
+        run_config: RunConfig,
+    ) -> crate::Result<impl Stream<Item = crate::Result<AgentEvent>> + Send> {
+        self.execute_stream_inner(prompt.into(), Some(run_config))
+            .await
+    }
+
+    async fn execute_stream_inner(
+        &self,
+        prompt: String,
+        run_config: Option<RunConfig>,
+    ) -> crate::Result<impl Stream<Item = crate::Result<AgentEvent>> + Send> {
+        let default_timeout = self
+            .runtime
             .config
             .execution
             .timeout
             .unwrap_or(std::time::Duration::from_secs(600));
+        let timeout = run_config
+            .as_ref()
+            .and_then(|rc| rc.timeout_override())
+            .unwrap_or(default_timeout);
 
         if self.state.is_executing() {
             self.state
-                .enqueue(prompt)
+                .enqueue(&*prompt)
                 .await
                 .map_err(|e| crate::Error::Session(format!("Queue full: {}", e)))?;
         }
-        let static_context = match &self.orchestrator {
+        let static_context = match &self.runtime.orchestrator {
             Some(orchestrator) => orchestrator.read().await.static_context().clone(),
             None => crate::context::StaticContext::new(),
         };
@@ -67,32 +86,43 @@ impl Agent {
             })
             .await;
 
+        let mut request_builder = RequestBuilder::new(
+            &self.runtime.config,
+            Arc::clone(&self.runtime.tools),
+            static_context,
+        )
+        .metadata(metadata);
+
+        // Apply RunConfig overrides.
+        if let Some(ref rc) = run_config {
+            if let Some(model) = rc.model_override() {
+                request_builder.set_model(model);
+            }
+            if let Some(max_tokens) = rc.max_tokens_override() {
+                request_builder.set_max_tokens(max_tokens);
+            }
+            if let Some(prompt) = rc.system_prompt_override() {
+                request_builder.set_system_prompt_override(prompt);
+            }
+        }
+
+        let max_iterations_override = run_config
+            .as_ref()
+            .map(|rc| rc.effective_max_iterations(self.runtime.config.execution.max_iterations));
+
         let state = StreamState::new(
             StreamStateConfig {
                 tool_state: self.state.clone(),
-                client: Arc::clone(&self.client),
-                config: Arc::clone(&self.config),
-                tools: Arc::clone(&self.tools),
-                hooks: Arc::clone(&self.hooks),
+                runtime: Arc::clone(&self.runtime),
                 hook_context: self.hook_context(),
-                request_builder: RequestBuilder::new(
-                    &self.config,
-                    Arc::clone(&self.tools),
-                    static_context,
-                )
-                .metadata(metadata),
-                orchestrator: self.orchestrator.clone(),
+                request_builder,
                 session_id: Arc::clone(&self.session_id),
-                budget_tracker: Arc::clone(&self.budget_tracker),
-                tenant_budget: self.tenant_budget.clone(),
                 session_manager: self.session_manager.clone(),
                 session_scope: self.session_scope.clone(),
-                event_bus: self.event_bus.clone(),
-                execution_mode: self.execution_mode.clone(),
-                context_scope: self.context_scope.clone(),
             },
             timeout,
-            prompt.to_string(),
+            prompt,
+            max_iterations_override,
         );
 
         Ok(stream::unfold(state, |mut state| async move {
@@ -103,21 +133,12 @@ impl Agent {
 
 struct StreamStateConfig {
     tool_state: ToolState,
-    client: Arc<Client>,
-    config: Arc<AgentConfig>,
-    tools: Arc<ToolRegistry>,
-    hooks: Arc<HookManager>,
+    runtime: Arc<AgentRuntime>,
     hook_context: HookContext,
     request_builder: RequestBuilder,
-    orchestrator: Option<Arc<RwLock<PromptOrchestrator>>>,
     session_id: Arc<str>,
-    budget_tracker: Arc<BudgetTracker>,
-    tenant_budget: Option<Arc<TenantBudget>>,
     session_manager: Option<SessionManager>,
     session_scope: Option<SessionAccessScope>,
-    event_bus: Option<Arc<crate::events::EventBus>>,
-    execution_mode: ExecutionMode,
-    context_scope: Option<SharedContextScope>,
 }
 
 enum StreamPollResult {
@@ -161,11 +182,17 @@ struct StreamState {
     session_started: bool,
     prompt_submitted: bool,
     initial_prompt: Option<String>,
+    max_iterations_override: Option<usize>,
 }
 
 impl StreamState {
-    fn new(cfg: StreamStateConfig, timeout: std::time::Duration, prompt: String) -> Self {
-        let chunk_timeout = cfg.config.execution.chunk_timeout;
+    fn new(
+        cfg: StreamStateConfig,
+        timeout: std::time::Duration,
+        prompt: String,
+        max_iterations_override: Option<usize>,
+    ) -> Self {
+        let chunk_timeout = cfg.runtime.config.execution.chunk_timeout;
         let now = Instant::now();
         Self {
             cfg,
@@ -185,12 +212,13 @@ impl StreamState {
             session_started: false,
             prompt_submitted: false,
             initial_prompt: Some(prompt),
+            max_iterations_override,
         }
     }
 
     fn extract_structured_output(&self, text: &str) -> Option<serde_json::Value> {
         super::common::extract_structured_output(
-            self.cfg.config.prompt.output_schema.as_ref(),
+            self.cfg.runtime.config.prompt.output_schema.as_ref(),
             text,
         )
     }
@@ -269,7 +297,7 @@ impl StreamState {
                         self.metrics.execution_time_ms =
                             self.start_time.elapsed().as_millis() as u64;
                         run_stop_hooks(
-                            &self.cfg.hooks,
+                            &self.cfg.runtime.hooks,
                             &self.cfg.hook_context,
                             &self.cfg.session_id,
                         )
@@ -295,9 +323,9 @@ impl StreamState {
 
     fn check_budget_exceeded(&mut self) -> Option<crate::Result<AgentEvent>> {
         let result = BudgetContext {
-            tracker: &self.cfg.budget_tracker,
-            tenant: self.cfg.tenant_budget.as_deref(),
-            config: &self.cfg.config.budget,
+            tracker: &self.cfg.runtime.budget_tracker,
+            tenant: self.cfg.runtime.tenant_budget.as_deref(),
+            config: &self.cfg.runtime.config.budget,
         }
         .check();
 
@@ -315,13 +343,14 @@ impl StreamState {
 
             // Propagate EventBus to Session/Graph for SessionChanged,
             // BranchForked, and CheckpointCreated events.
-            if let Some(ref bus) = self.cfg.event_bus {
+            if let Some(ref bus) = self.cfg.runtime.event_bus {
                 self.cfg.tool_state.with_event_bus(Arc::clone(bus)).await;
             }
 
             let session_start_input = HookInput::session_start(&*self.cfg.session_id);
             if let Err(e) = self
                 .cfg
+                .runtime
                 .hooks
                 .execute(
                     HookEvent::SessionStart,
@@ -339,6 +368,7 @@ impl StreamState {
                 let prompt_input = HookInput::user_prompt_submit(&*self.cfg.session_id, &prompt);
                 let prompt_output = match self
                     .cfg
+                    .runtime
                     .hooks
                     .execute(
                         HookEvent::UserPromptSubmit,
@@ -363,12 +393,15 @@ impl StreamState {
                     )));
                 }
 
-                self.cfg
+                if let Err(e) = self
+                    .cfg
                     .tool_state
-                    .with_session_mut(|session| {
-                        session.add_user_message(&prompt);
-                    })
-                    .await;
+                    .with_session_mut(|session| session.add_user_message(&prompt))
+                    .await
+                {
+                    self.phase = Phase::Done;
+                    return Some(Err(e.into()));
+                }
                 if let Err(e) = persist_stream_session_state(
                     self.cfg.session_manager.clone(),
                     self.cfg.session_scope.clone(),
@@ -381,9 +414,9 @@ impl StreamState {
                 }
 
                 match maybe_invoke_explicit_skill_command(
-                    &self.cfg.tools,
+                    &self.cfg.runtime.tools,
                     &self.cfg.tool_state,
-                    &self.cfg.hooks,
+                    &self.cfg.runtime.hooks,
                     &self.cfg.hook_context,
                     &self.cfg.session_id,
                     &prompt,
@@ -413,13 +446,46 @@ impl StreamState {
             self.prompt_submitted = true;
         }
 
-        self.metrics.iterations += 1;
-        if self.metrics.iterations > self.cfg.config.execution.max_iterations {
+        if self.cfg.runtime.shutdown.is_cancelled() {
+            if let Err(e) = persist_stream_session_state(
+                self.cfg.session_manager.clone(),
+                self.cfg.session_scope.clone(),
+                self.cfg.tool_state.clone(),
+            )
+            .await
+            {
+                self.phase = Phase::Done;
+                return Some(Err(e));
+            }
             self.phase = Phase::Done;
             self.metrics.execution_time_ms = self.start_time.elapsed().as_millis() as u64;
 
             run_stop_hooks(
-                &self.cfg.hooks,
+                &self.cfg.runtime.hooks,
+                &self.cfg.hook_context,
+                &self.cfg.session_id,
+            )
+            .await;
+
+            let messages = self
+                .cfg
+                .tool_state
+                .with_session(|session| session.to_api_messages())
+                .await;
+            let result = self.build_result(self.metrics.iterations, StopReason::EndTurn, messages);
+            return Some(Ok(AgentEvent::Complete(Box::new(result))));
+        }
+
+        self.metrics.iterations += 1;
+        let effective_max_iterations = self
+            .max_iterations_override
+            .unwrap_or(self.cfg.runtime.config.execution.max_iterations);
+        if self.metrics.iterations > effective_max_iterations {
+            self.phase = Phase::Done;
+            self.metrics.execution_time_ms = self.start_time.elapsed().as_millis() as u64;
+
+            run_stop_hooks(
+                &self.cfg.runtime.hooks,
                 &self.cfg.hook_context,
                 &self.cfg.session_id,
             )
@@ -436,9 +502,9 @@ impl StreamState {
         }
 
         let budget_ctx = BudgetContext {
-            tracker: &self.cfg.budget_tracker,
-            tenant: self.cfg.tenant_budget.as_deref(),
-            config: &self.cfg.config.budget,
+            tracker: &self.cfg.runtime.budget_tracker,
+            tenant: self.cfg.runtime.tenant_budget.as_deref(),
+            config: &self.cfg.runtime.config.budget,
         };
         if let Some(fallback) = budget_ctx.fallback_model() {
             self.cfg.request_builder.set_model(fallback);
@@ -448,7 +514,9 @@ impl StreamState {
             .cfg
             .tool_state
             .with_session(|session| {
-                session.to_api_messages_with_cache(self.cfg.config.cache.conversation_ttl_option())
+                session.to_api_messages_with_cache(
+                    self.cfg.runtime.config.cache.conversation_ttl_option(),
+                )
             })
             .await;
 
@@ -461,6 +529,7 @@ impl StreamState {
         );
         match self
             .cfg
+            .runtime
             .hooks
             .execute(
                 HookEvent::ModelSelection,
@@ -471,7 +540,8 @@ impl StreamState {
         {
             Ok(output) => {
                 if let Some(ref updated) = output.updated_input
-                    && let Some(model_override) = updated.get("model").and_then(|v| v.as_str())
+                    && let Some(model_override) =
+                        updated.get("model").and_then(serde_json::Value::as_str)
                 {
                     self.cfg.request_builder.set_model(model_override);
                 }
@@ -495,6 +565,7 @@ impl StreamState {
         );
         match self
             .cfg
+            .runtime
             .hooks
             .execute(HookEvent::PreMessage, pre_msg_input, &self.cfg.hook_context)
             .await
@@ -523,6 +594,7 @@ impl StreamState {
 
         let response = match self
             .cfg
+            .runtime
             .client
             .send_stream_with_auth_retry(stream_request)
             .await
@@ -539,14 +611,24 @@ impl StreamState {
         // Select the appropriate stream parser based on the provider.
         // Providers that use a binary format (e.g. Bedrock's AWS EventStream)
         // return a custom stream from create_binary_stream; others use SSE.
-        let item_stream: BoxedItemStream = if self.cfg.client.adapter().stream_format()
+        let item_stream: BoxedItemStream = if self.cfg.runtime.client.adapter().stream_format()
             != crate::client::adapter::StreamFormat::Sse
         {
-            self.cfg
+            match self
+                .cfg
+                .runtime
                 .client
                 .adapter()
                 .create_binary_stream(Box::pin(response.bytes_stream()))
-                .expect("non-SSE provider must implement create_binary_stream")
+            {
+                Some(stream) => stream,
+                None => {
+                    self.phase = Phase::Done;
+                    return Some(Err(crate::Error::Config(
+                        "binary stream provider must implement create_binary_stream".into(),
+                    )));
+                }
+            }
         } else {
             Box::pin(crate::client::StreamParser::new(response.bytes_stream()))
         };
@@ -595,7 +677,7 @@ impl StreamState {
             StreamItem::Text(text) => {
                 self.final_text.push_str(&text);
                 self.fire_post_stream_chunk_sync(&text, "text");
-                if let Some(ref bus) = self.cfg.event_bus {
+                if let Some(ref bus) = self.cfg.runtime.event_bus {
                     bus.emit_simple(
                         crate::events::EventKind::StreamChunk,
                         serde_json::json!({
@@ -608,7 +690,7 @@ impl StreamState {
             }
             StreamItem::Thinking(thinking) => {
                 self.fire_post_stream_chunk_sync(&thinking, "thinking");
-                if let Some(ref bus) = self.cfg.event_bus {
+                if let Some(ref bus) = self.cfg.runtime.event_bus {
                     bus.emit_simple(
                         crate::events::EventKind::StreamChunk,
                         serde_json::json!({
@@ -622,7 +704,7 @@ impl StreamState {
             StreamItem::Citation(_) => StreamPollResult::Continue,
             StreamItem::ToolUseComplete(tool_use) => {
                 self.fire_post_stream_chunk_sync(&tool_use.name, "tool_use");
-                if let Some(ref bus) = self.cfg.event_bus {
+                if let Some(ref bus) = self.cfg.runtime.event_bus {
                     bus.emit_simple(
                         crate::events::EventKind::StreamChunk,
                         serde_json::json!({
@@ -640,7 +722,7 @@ impl StreamState {
 
     /// Fire PostStreamChunk hook in a non-blocking, fail-open manner.
     fn fire_post_stream_chunk_sync(&self, chunk_text: &str, chunk_type: &str) {
-        let hooks = Arc::clone(&self.cfg.hooks);
+        let hooks = Arc::clone(&self.cfg.runtime.hooks);
         let hook_context = self.cfg.hook_context.clone();
         let input = HookInput::post_stream_chunk(
             &*self.cfg.session_id,
@@ -726,6 +808,7 @@ impl StreamState {
         );
         let _ = self
             .cfg
+            .runtime
             .hooks
             .execute(
                 HookEvent::PostMessage,
@@ -737,29 +820,30 @@ impl StreamState {
         accumulate_response_usage(
             &mut self.total_usage,
             &mut self.metrics,
-            &self.cfg.budget_tracker,
-            self.cfg.tenant_budget.as_deref(),
-            &self.cfg.config.model.primary,
+            &self.cfg.runtime.budget_tracker,
+            self.cfg.runtime.tenant_budget.as_deref(),
+            &self.cfg.runtime.config.model.primary,
             &accumulated_usage,
         );
 
         emit_tokens_consumed(
-            self.cfg.event_bus.as_deref(),
+            self.cfg.runtime.event_bus.as_deref(),
             &accumulated_usage,
-            &self.cfg.config.model.primary,
+            &self.cfg.runtime.config.model.primary,
         );
 
         maybe_emit_budget_alert(
-            &self.cfg.budget_tracker,
-            self.cfg.event_bus.as_deref(),
-            self.cfg.config.budget.alert_threshold_pct,
+            &self.cfg.runtime.budget_tracker,
+            self.cfg.runtime.event_bus.as_deref(),
+            self.cfg.runtime.config.budget.alert_threshold_pct,
         );
 
         let structured_output = self.extract_structured_output(&self.final_text);
 
-        self.cfg
+        if let Err(e) = self
+            .cfg
             .tool_state
-            .with_session_mut(|session| {
+            .with_session_mut(|session| -> crate::session::SessionResult<()> {
                 let text_count = if self.final_text.is_empty() { 0 } else { 1 };
                 let mut content = Vec::with_capacity(text_count + self.pending_tool_uses.len());
                 if !self.final_text.is_empty() {
@@ -780,10 +864,15 @@ impl StreamState {
                             structured_output: structured_output.clone(),
                             ..Default::default()
                         },
-                    );
+                    )?;
                 }
+                Ok(())
             })
-            .await;
+            .await
+        {
+            self.phase = Phase::Done;
+            return Some(Err(e.into()));
+        }
         if let Err(e) = persist_stream_session_state(
             self.cfg.session_manager.clone(),
             self.cfg.session_scope.clone(),
@@ -800,7 +889,7 @@ impl StreamState {
             self.metrics.execution_time_ms = self.start_time.elapsed().as_millis() as u64;
 
             run_stop_hooks(
-                &self.cfg.hooks,
+                &self.cfg.runtime.hooks,
                 &self.cfg.hook_context,
                 &self.cfg.session_id,
             )
@@ -851,6 +940,7 @@ impl StreamState {
             );
             let pre_output = self
                 .cfg
+                .runtime
                 .hooks
                 .execute(HookEvent::PreToolUse, pre_input, &self.cfg.hook_context)
                 .await?;
@@ -876,8 +966,8 @@ impl StreamState {
                 let actual_input = pre_output.updated_input.unwrap_or(tool_use.input.clone());
 
                 // ExecutionMode: Plan mode blocks non-plan tools
-                if self.cfg.execution_mode.is_plan()
-                    && !self.cfg.execution_mode.allows_tool(&tool_use.name)
+                if self.cfg.runtime.execution_mode.is_plan()
+                    && !self.cfg.runtime.execution_mode.allows_tool(&tool_use.name)
                 {
                     let reason = format!(
                         "Tool '{}' is not available in plan mode. Only read/navigation tools are allowed.",
@@ -893,7 +983,12 @@ impl StreamState {
                 }
 
                 // ExecutionMode: Supervised mode requires review
-                if self.cfg.execution_mode.requires_review(&tool_use.name) {
+                if self
+                    .cfg
+                    .runtime
+                    .execution_mode
+                    .requires_review(&tool_use.name)
+                {
                     events.push(AgentEvent::ToolReview {
                         id: tool_use.id.clone(),
                         name: tool_use.name.clone(),
@@ -930,8 +1025,8 @@ impl StreamState {
         }
 
         // Phase 2: Parallel tool execution
-        let tools = Arc::clone(&self.cfg.tools);
-        let context_scope = self.cfg.context_scope.clone();
+        let tools = Arc::clone(&self.cfg.runtime.tools);
+        let context_scope = self.cfg.runtime.context_scope.clone();
         let tool_futures = prepared.into_iter().map(|(id, name, input)| {
             let tools = Arc::clone(&tools);
             let context_scope = context_scope.clone();
@@ -965,7 +1060,7 @@ impl StreamState {
                 &self.cfg.tool_state,
                 &mut self.total_usage,
                 &mut self.metrics,
-                &self.cfg.budget_tracker,
+                &self.cfg.runtime.budget_tracker,
                 &result,
                 &name,
             )
@@ -974,13 +1069,13 @@ impl StreamState {
             try_activate_dynamic_rules(
                 &name,
                 &input,
-                &self.cfg.orchestrator,
+                &self.cfg.runtime.orchestrator,
                 &mut self.dynamic_rules,
             )
             .await;
 
             run_post_tool_hooks(
-                &self.cfg.hooks,
+                &self.cfg.runtime.hooks,
                 &self.cfg.hook_context,
                 &self.cfg.session_id,
                 &name,
@@ -989,7 +1084,12 @@ impl StreamState {
             )
             .await;
 
-            emit_tool_executed(self.cfg.event_bus.as_deref(), &name, duration_ms, is_error);
+            emit_tool_executed(
+                self.cfg.runtime.event_bus.as_deref(),
+                &name,
+                duration_ms,
+                is_error,
+            );
 
             self.cfg
                 .tool_state
@@ -1023,14 +1123,12 @@ impl StreamState {
 
     async fn finalize_tool_results(&mut self) -> crate::Result<()> {
         let results = std::mem::take(&mut self.pending_tool_results);
-        let max_tokens = context_window::for_model(&self.cfg.config.model.primary);
+        let max_tokens = context_window::for_model(&self.cfg.runtime.config.model.primary);
 
         self.cfg
             .tool_state
-            .with_session_mut(|session| {
-                session.add_tool_results(results);
-            })
-            .await;
+            .with_session_mut(|session| session.add_tool_results(results))
+            .await?;
         persist_stream_session_state(
             self.cfg.session_manager.clone(),
             self.cfg.session_scope.clone(),
@@ -1040,15 +1138,15 @@ impl StreamState {
 
         handle_compaction(
             &self.cfg.tool_state,
-            &self.cfg.client,
-            &self.cfg.tools,
-            &self.cfg.hooks,
+            &self.cfg.runtime.client,
+            &self.cfg.runtime.tools,
+            &self.cfg.runtime.hooks,
             &self.cfg.hook_context,
             &self.cfg.session_id,
-            &self.cfg.config.execution,
+            &self.cfg.runtime.config.execution,
             max_tokens,
             &mut self.metrics,
-            self.cfg.event_bus.as_deref(),
+            self.cfg.runtime.event_bus.as_deref(),
         )
         .await;
         persist_stream_session_state(

@@ -65,7 +65,7 @@ pub struct AgentBuilder {
     pub(super) execution_mode: ExecutionMode,
     pub(super) custom_tools: Vec<Arc<dyn Tool>>,
     pub(super) memory_provider: Option<LeveledMemoryProvider>,
-    pub(super) sandbox_settings: Option<crate::config::SandboxSettings>,
+    pub(super) sandbox_settings: Option<crate::config::SandboxConfig>,
     pub(super) initial_messages: Option<Vec<crate::types::Message>>,
     pub(super) resume_session_id: Option<String>,
     pub(super) resumed_session: Option<crate::session::Session>,
@@ -519,7 +519,7 @@ impl AgentBuilder {
     /// Adds a domain to the network allowlist.
     pub fn allow_domain(mut self, domain: impl Into<String>) -> Self {
         self.sandbox_settings
-            .get_or_insert_with(crate::config::SandboxSettings::default)
+            .get_or_insert_with(crate::config::SandboxConfig::default)
             .network
             .allowed_domains
             .insert(domain.into());
@@ -529,7 +529,7 @@ impl AgentBuilder {
     /// Adds a domain to the network blocklist.
     pub fn deny_domain(mut self, domain: impl Into<String>) -> Self {
         self.sandbox_settings
-            .get_or_insert_with(crate::config::SandboxSettings::default)
+            .get_or_insert_with(crate::config::SandboxConfig::default)
             .network
             .blocked_domains
             .insert(domain.into());
@@ -539,7 +539,7 @@ impl AgentBuilder {
     /// Enables or disables sandbox isolation.
     pub fn sandbox_enabled(mut self, enabled: bool) -> Self {
         self.sandbox_settings
-            .get_or_insert_with(crate::config::SandboxSettings::default)
+            .get_or_insert_with(crate::config::SandboxConfig::default)
             .enabled = enabled;
         self
     }
@@ -547,7 +547,7 @@ impl AgentBuilder {
     /// Excludes a command from sandbox restrictions.
     pub fn exclude_command(mut self, command: impl Into<String>) -> Self {
         self.sandbox_settings
-            .get_or_insert_with(crate::config::SandboxSettings::default)
+            .get_or_insert_with(crate::config::SandboxConfig::default)
             .excluded_commands
             .push(command.into());
         self
@@ -919,7 +919,7 @@ impl AgentBuilder {
     }
 
     /// Replaces sandbox settings directly.
-    pub fn sandbox_settings(mut self, settings: crate::config::SandboxSettings) -> Self {
+    pub fn sandbox_settings(mut self, settings: crate::config::SandboxConfig) -> Self {
         self.sandbox_settings = Some(settings);
         self
     }

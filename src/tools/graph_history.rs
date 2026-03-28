@@ -69,7 +69,7 @@ Actions:
 - fork_bookmark / fork_checkpoint: Create new branch from a saved point (requires query)"#;
 
     async fn handle(&self, input: Self::Input, context: &ExecutionContext) -> ToolResult {
-        let Some(manager) = context.graph_manager() else {
+        let Some(manager) = context.session_manager() else {
             return ToolResult::error("Graph history requires a configured SessionManager");
         };
 
@@ -438,7 +438,7 @@ mod tests {
             .await
             .unwrap();
 
-        let context = ExecutionContext::permissive().session_manager(manager);
+        let context = ExecutionContext::permissive().with_session_manager(manager);
         let tool = GraphHistoryTool;
         let result = tool
             .execute(
@@ -466,7 +466,7 @@ mod tests {
             .await
             .unwrap();
 
-        let context = ExecutionContext::permissive().session_manager(manager);
+        let context = ExecutionContext::permissive().with_session_manager(manager);
         let tool = GraphHistoryTool;
         let result = tool
             .execute(
@@ -495,7 +495,7 @@ mod tests {
             .unwrap();
 
         let context = ExecutionContext::permissive()
-            .session_manager(manager)
+            .with_session_manager(manager)
             .session_scope(
                 SessionAccessScope::default()
                     .tenant("tenant-a")
@@ -528,7 +528,7 @@ mod tests {
     #[tokio::test]
     async fn graph_history_tool_rejects_invalid_session_id() {
         let manager = SessionManager::in_memory();
-        let context = ExecutionContext::permissive().session_manager(manager);
+        let context = ExecutionContext::permissive().with_session_manager(manager);
         let tool = GraphHistoryTool;
         let result = tool
             .execute(

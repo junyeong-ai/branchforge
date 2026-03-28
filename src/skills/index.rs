@@ -102,7 +102,7 @@ impl SkillIndex {
 
     /// Set the base directory for relative path resolution.
     /// This is useful for InMemory sources where the ContentSource doesn't have a file path.
-    pub fn base_dir(mut self, dir: impl Into<PathBuf>) -> Self {
+    pub fn with_base_dir(mut self, dir: impl Into<PathBuf>) -> Self {
         self.base_dir_override = Some(dir.into());
         self
     }
@@ -163,7 +163,7 @@ impl SkillIndex {
 
     /// Get the base directory for this skill (for relative path resolution).
     /// Checks base_dir_override first, then falls back to ContentSource's base_dir.
-    pub fn get_base_dir(&self) -> Option<PathBuf> {
+    pub fn base_dir(&self) -> Option<PathBuf> {
         self.base_dir_override
             .clone()
             .or_else(|| self.source.base_dir())
@@ -171,14 +171,14 @@ impl SkillIndex {
 
     /// Resolve a relative path against this skill's base directory.
     pub fn resolve_path(&self, relative: &str) -> Option<PathBuf> {
-        self.get_base_dir().map(|base| base.join(relative))
+        self.base_dir().map(|base| base.join(relative))
     }
 
     /// Load content with resolved relative paths.
     pub async fn load_content_with_resolved_paths(&self) -> crate::Result<String> {
         let content = self.load_content().await?;
 
-        if let Some(base_dir) = self.get_base_dir() {
+        if let Some(base_dir) = self.base_dir() {
             Ok(processing::resolve_markdown_paths(&content, &base_dir))
         } else {
             Ok(content)
@@ -208,7 +208,7 @@ impl SkillIndex {
     /// 5. Substitute arguments ($ARGUMENTS, $1-$9)
     pub async fn execute(&self, arguments: &str, content: &str) -> String {
         let base_dir = self
-            .get_base_dir()
+            .base_dir()
             .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
 
         // 1. Strip frontmatter
@@ -331,7 +331,7 @@ description: Review code
 Check [guide](guide.md)
 Run !`echo should-not-run`"#,
             ))
-            .base_dir("/tmp/skills");
+            .with_base_dir("/tmp/skills");
 
         let content = skill.load_preloaded_content().await.unwrap();
 

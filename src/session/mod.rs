@@ -24,7 +24,7 @@ pub use archive::{
     ArchivePolicy, RestoreVerificationReport, RestoreVerifier, SessionArchiveBundle,
     SessionArchiveService,
 };
-pub use compact::{CompactExecutor, CompactStrategy, DEFAULT_COMPACT_THRESHOLD};
+pub use compact::{CompactService, CompactStrategy, DEFAULT_COMPACT_THRESHOLD};
 pub use export::{AuditBundle, ExportPolicy, SessionExporter};
 #[cfg(feature = "postgres")]
 pub use lock::PostgresLock;
@@ -49,7 +49,7 @@ pub use persistence_postgres::{
 pub use persistence_redis::{RedisConfig, RedisPersistence};
 pub use queue::{InputQueue, MergedInput, QueueError, QueuedInput, SharedInputQueue};
 pub use replay::ReplayService;
-pub use session_state::{ExecutionGuard, ToolState};
+pub use session_state::{ExecutionGuard, ExecutionState, SessionSnapshot, ToolState};
 pub use state::{
     ExecutionMetadata, MessageId, MessageMetadata, Session, SessionAuthorization, SessionConfig,
     SessionId, SessionMessage, SessionState, SessionToolLimits, SessionType, ThinkingMetadata,

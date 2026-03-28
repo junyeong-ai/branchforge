@@ -60,6 +60,13 @@ impl HookManager {
         self.rebuild_cache();
     }
 
+    pub fn register_many(&mut self, hooks: impl IntoIterator<Item = Arc<dyn Hook>>) {
+        for hook in hooks {
+            self.hooks.push(hook);
+        }
+        self.rebuild_cache();
+    }
+
     pub fn unregister(&mut self, name: &str) {
         self.hooks.retain(|h| h.name() != name);
         self.rebuild_cache();

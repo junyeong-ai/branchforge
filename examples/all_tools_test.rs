@@ -199,7 +199,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("\nSection 2: Process Tools");
     println!("------------------------------------------------------------------------");
 
-    let bash = BashTool::process_manager(process_manager.clone());
+    let bash = BashTool::new(process_manager.clone());
     let result = bash
         .execute(
             serde_json::json!({"command": "echo 'Hello from Bash'"}),
@@ -245,7 +245,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         },
     );
 
-    let kill = KillShellTool::process_manager(process_manager.clone());
+    let kill = KillShellTool::new(process_manager.clone());
     let result = kill
         .execute(serde_json::json!({"shell_id": "nonexistent_12345"}), &ctx)
         .await;

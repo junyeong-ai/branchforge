@@ -162,7 +162,7 @@ impl ToolRegistryBuilder {
         let session_id = self.session_id.unwrap_or_default();
         let mut context = ExecutionContext::new(security);
         if let Some(ref manager) = self.session_manager {
-            context = context.session_manager(manager.clone());
+            context = context.with_session_manager(manager.clone());
         }
         if let Some(ref hooks) = self.hooks {
             context = context.hooks(hooks.clone(), session_id.to_string());
@@ -210,10 +210,8 @@ impl ToolRegistryBuilder {
             Arc::new(super::EditTool),
             Arc::new(super::GlobTool),
             Arc::new(super::GrepTool),
-            Arc::new(super::BashTool::process_manager(process_manager.clone())),
-            Arc::new(super::KillShellTool::process_manager(
-                process_manager.clone(),
-            )),
+            Arc::new(super::BashTool::new(process_manager.clone())),
+            Arc::new(super::KillShellTool::new(process_manager.clone())),
             task_tool,
             Arc::new(TaskOutputTool::new(task_registry.clone())),
             Arc::new(super::TodoWriteTool::new(tool_state.clone(), session_id)),
@@ -225,11 +223,9 @@ impl ToolRegistryBuilder {
         }
         all_tools.extend(self.custom_tools);
 
-        let env = ToolExecutionEnv {
-            context,
-            tool_state: Some(tool_state),
-            process_manager: Some(process_manager),
-        };
+        let env = ToolExecutionEnv::new(context)
+            .with_tool_state(tool_state)
+            .with_process_manager(process_manager);
 
         let registry = ToolRegistry::from_env(task_registry, env);
 

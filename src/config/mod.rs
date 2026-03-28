@@ -29,8 +29,8 @@ pub use file::FileConfigProvider;
 pub use memory::MemoryConfigProvider;
 pub use provider::{ConfigProvider, ConfigProviderExt};
 pub use settings::{
-    AuthorizationSettings, HookConfig, HooksSettings, NetworkSandboxSettings, SandboxSettings,
-    Settings, SettingsLoader, SettingsSource, ToolSearchSettings,
+    AuthorizationConfig, HookConfig, HooksConfig, NetworkSandboxConfig, SandboxConfig, Settings,
+    SettingsLoader, SettingsSource, ToolSearchConfig,
 };
 pub use validator::{ConfigValidator, ValueType};
 

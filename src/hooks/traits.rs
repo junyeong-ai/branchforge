@@ -411,7 +411,7 @@ impl HookInput {
     }
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 pub struct HookOutput {
     pub continue_execution: bool,
     pub stop_reason: Option<String>,
@@ -419,6 +419,19 @@ pub struct HookOutput {
     pub system_message: Option<String>,
     pub updated_input: Option<Value>,
     pub additional_context: Option<String>,
+}
+
+impl Default for HookOutput {
+    fn default() -> Self {
+        Self {
+            continue_execution: true,
+            stop_reason: None,
+            suppress_logging: false,
+            system_message: None,
+            updated_input: None,
+            additional_context: None,
+        }
+    }
 }
 
 impl HookOutput {

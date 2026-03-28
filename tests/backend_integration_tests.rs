@@ -59,11 +59,13 @@ fn seeded_session() -> Session {
         .add_message(SessionMessage::assistant(vec![ContentBlock::text("world")]))
         .unwrap();
     session.bookmark_current_head("head", Some("bookmark".to_string()));
-    session.checkpoint_current_head(
-        "checkpoint",
-        Some("saved".to_string()),
-        vec!["tag".to_string()],
-    );
+    session
+        .checkpoint_current_head(
+            "checkpoint",
+            Some("saved".to_string()),
+            vec!["tag".to_string()],
+        )
+        .unwrap();
     session
 }
 

@@ -2,9 +2,9 @@
 
 use crate::{Error, Result};
 
-pub struct RequestExecutor;
+pub struct RequestService;
 
-impl RequestExecutor {
+impl RequestService {
     #[cfg(any(feature = "gcp", feature = "azure"))]
     pub async fn post(
         http: &reqwest::Client,

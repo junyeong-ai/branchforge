@@ -296,7 +296,10 @@ impl AgentBuilder {
         let mut tool_limits = from_settings.tool_limits;
         tool_limits.extend(programmatic.tool_limits);
 
-        ToolPolicy { rules, tool_limits }
+        let mut policy = ToolPolicy::new();
+        policy.rules = rules;
+        policy.tool_limits = tool_limits;
+        policy
     }
 }
 
@@ -408,7 +411,7 @@ mod tests {
     #[test]
     fn test_settings_permissions_mark_policy_explicit() {
         let settings = Settings {
-            authorization: crate::config::AuthorizationSettings {
+            authorization: crate::config::AuthorizationConfig {
                 default_mode: Some("default".to_string()),
                 ..Default::default()
             },

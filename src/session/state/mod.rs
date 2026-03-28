@@ -256,7 +256,7 @@ impl Session {
         label: impl Into<String>,
         note: Option<String>,
         tags: Vec<String>,
-    ) -> uuid::Uuid {
+    ) -> SessionResult<uuid::Uuid> {
         let checkpoint = self
             .graph
             .create_checkpoint(
@@ -267,10 +267,12 @@ impl Session {
                 self.principal_id.clone(),
                 self.graph_provenance(),
             )
-            .expect("session primary branch should exist for checkpoints");
+            .map_err(|e| SessionError::Storage {
+                message: format!("failed to create checkpoint on primary branch: {}", e),
+            })?;
         self.current_leaf_id = Some(MessageId::from_string(checkpoint.to_string()));
         self.updated_at = Utc::now();
-        checkpoint
+        Ok(checkpoint)
     }
 
     pub fn replay_input(
@@ -351,6 +353,7 @@ impl Session {
 
     pub fn refresh_summary_cache(&mut self) {
         self.summary = self.graph_summary();
+        self.updated_at = Utc::now();
     }
 
     /// Convert session messages to API format with default caching (5m TTL).
@@ -461,7 +464,7 @@ impl Session {
         self.updated_at = Utc::now();
     }
 
-    pub fn update_summary(&mut self, summary: impl Into<String>) {
+    pub fn update_summary(&mut self, summary: impl Into<String>) -> SessionResult<()> {
         let summary = summary.into();
         self.graph.append_node_with_actor(
             self.graph.primary_branch,
@@ -472,20 +475,26 @@ impl Session {
             }),
             self.principal_id.clone(),
             self.graph_provenance(),
-        ).expect("session primary branch should exist when updating summary");
+        ).map_err(|e| SessionError::Storage {
+            message: format!("failed to append summary to primary branch: {}", e),
+        })?;
         self.refresh_summary_cache();
         self.refresh_message_projection();
         self.updated_at = Utc::now();
+        Ok(())
     }
 
-    pub fn add_user_message(&mut self, content: impl Into<String>) {
+    pub fn add_user_message(&mut self, content: impl Into<String>) -> SessionResult<()> {
         let msg = SessionMessage::user(vec![ContentBlock::text(content.into())]);
         self.add_message(msg)
-            .expect("internally generated user messages must produce valid graph ids");
     }
 
-    pub fn add_assistant_message(&mut self, content: Vec<ContentBlock>, usage: Option<Usage>) {
-        self.add_assistant_message_with_metadata(content, usage, MessageMetadata::default());
+    pub fn add_assistant_message(
+        &mut self,
+        content: Vec<ContentBlock>,
+        usage: Option<Usage>,
+    ) -> SessionResult<()> {
+        self.add_assistant_message_with_metadata(content, usage, MessageMetadata::default())
     }
 
     pub fn add_assistant_message_with_metadata(
@@ -493,7 +502,7 @@ impl Session {
         content: Vec<ContentBlock>,
         usage: Option<Usage>,
         metadata: MessageMetadata,
-    ) {
+    ) -> SessionResult<()> {
         let mut msg = SessionMessage::assistant(content);
         msg.metadata = metadata;
         if let Some(u) = usage {
@@ -507,15 +516,16 @@ impl Session {
             });
         }
         self.add_message(msg)
-            .expect("internally generated assistant messages must produce valid graph ids");
     }
 
-    pub fn add_tool_results(&mut self, results: Vec<crate::types::ToolResultBlock>) {
+    pub fn add_tool_results(
+        &mut self,
+        results: Vec<crate::types::ToolResultBlock>,
+    ) -> SessionResult<()> {
         let content: Vec<ContentBlock> =
             results.into_iter().map(ContentBlock::ToolResult).collect();
         let msg = SessionMessage::user(content);
         self.add_message(msg)
-            .expect("internally generated tool result messages must produce valid graph ids");
     }
 
     pub fn update_latest_assistant_metadata(&mut self, metadata: MessageMetadata) -> bool {
@@ -544,7 +554,7 @@ impl Session {
 
     pub fn should_compact(&self, max_tokens: u64, threshold: f32) -> bool {
         !self.current_branch_messages().is_empty()
-            && self.current_input_tokens as f32 > max_tokens as f32 * threshold
+            && self.current_input_tokens as f64 > max_tokens as f64 * threshold as f64
     }
 
     pub fn update_usage(&mut self, usage: &Usage) {
@@ -556,7 +566,7 @@ impl Session {
         &mut self,
         client: &crate::Client,
     ) -> crate::Result<crate::types::CompactResult> {
-        let executor = crate::session::compact::CompactExecutor::new(
+        let executor = crate::session::compact::CompactService::new(
             crate::session::compact::CompactStrategy::default(),
         );
         let result = executor.execute(self, client).await?;
@@ -874,13 +884,13 @@ mod tests {
     fn test_message_caching_applies_to_last_user_turn() {
         let mut session = Session::new(SessionConfig::default());
 
-        session.add_user_message("First question");
+        session.add_user_message("First question").unwrap();
         session
             .add_message(SessionMessage::assistant(vec![ContentBlock::text(
                 "First answer",
             )]))
             .unwrap();
-        session.add_user_message("Second question");
+        session.add_user_message("Second question").unwrap();
 
         let messages = session.to_api_messages();
 
@@ -894,7 +904,7 @@ mod tests {
     fn test_message_caching_disabled() {
         let mut session = Session::new(SessionConfig::default());
 
-        session.add_user_message("Question");
+        session.add_user_message("Question").unwrap();
 
         // Pass None to disable caching
         let messages = session.to_api_messages_with_cache(None);

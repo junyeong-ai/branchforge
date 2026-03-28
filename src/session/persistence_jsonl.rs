@@ -1537,10 +1537,10 @@ impl Persistence for JsonlPersistence {
             return self.fallback_append_graph_event(session_id, event).await;
         }
 
-        let mut session_meta_entry = meta
-            .last_session_meta
-            .clone()
-            .expect("checked above: last_session_meta exists");
+        let mut session_meta_entry = match meta.last_session_meta.clone() {
+            Some(entry) => entry,
+            None => return self.fallback_append_graph_event(session_id, event).await,
+        };
         session_meta_entry.project_path = target_project_path.clone();
         session_meta_entry.updated_at = event.metadata.occurred_at;
 

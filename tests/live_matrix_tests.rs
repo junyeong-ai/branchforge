@@ -7,7 +7,7 @@
 #![cfg(feature = "cli-auth")]
 
 use branchforge::session::{
-    ArchivePolicy, CompactExecutor, CompactStrategy, ExportPolicy, MemoryPersistence, Persistence,
+    ArchivePolicy, CompactService, CompactStrategy, ExportPolicy, MemoryPersistence, Persistence,
     SessionAccessScope, SessionArchiveService, SessionId, SessionManager,
 };
 use branchforge::types::CompactResult;
@@ -252,7 +252,7 @@ mod live_tests {
             .await
             .expect("Failed to build live client");
 
-        let executor = CompactExecutor::new(CompactStrategy::default());
+        let executor = CompactService::new(CompactStrategy::default());
         let compact_result = executor
             .execute(&mut session, &client)
             .await

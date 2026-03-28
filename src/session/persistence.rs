@@ -32,6 +32,9 @@ pub(crate) fn validate_session_graph(session: &Session, backend: &str) -> Sessio
     })
 }
 
+/// A boxed synchronous mutation applied to a session inside [`Persistence::with_session_lock`].
+pub type SessionMutationFn = Box<dyn FnOnce(&mut Session) -> SessionResult<()> + Send>;
+
 #[async_trait::async_trait]
 pub trait Persistence: Send + Sync {
     fn name(&self) -> &str;
@@ -88,28 +91,42 @@ pub trait Persistence: Send + Sync {
     // Cleanup
     async fn cleanup_expired(&self) -> SessionResult<usize>;
 
+    /// Apply a synchronous mutation to a session under an advisory lock.
+    ///
+    /// The default implementation performs an unlocked load-modify-save cycle.
+    /// Backends **should** override this with a single-lock approach to avoid
+    /// race conditions when concurrent callers mutate the same session.
+    async fn with_session_lock(&self, id: &SessionId, f: SessionMutationFn) -> SessionResult<()> {
+        let mut session = self
+            .load(id)
+            .await?
+            .ok_or_else(|| SessionError::NotFound { id: id.to_string() })?;
+        f(&mut session)?;
+        self.save(&session).await
+    }
+
     async fn append_graph_event(
         &self,
         session_id: &SessionId,
         event: GraphEvent,
     ) -> SessionResult<()> {
-        let mut session = self
-            .load(session_id)
-            .await?
-            .ok_or_else(|| SessionError::NotFound {
-                id: session_id.to_string(),
-            })?;
-        let graph_id = session.graph.id;
-        let created_at = session.graph.created_at;
-        let primary_branch = session.graph.primary_branch;
-        session.graph.events.push(event);
-        session.graph = GraphMaterializer::from_events_with_primary(
-            &session.graph.events,
-            Some(primary_branch),
-        );
-        session.graph.id = graph_id;
-        session.graph.created_at = created_at;
-        self.save(&session).await
+        self.with_session_lock(
+            session_id,
+            Box::new(move |session| {
+                let graph_id = session.graph.id;
+                let created_at = session.graph.created_at;
+                let primary_branch = session.graph.primary_branch;
+                session.graph.events.push(event);
+                session.graph = GraphMaterializer::from_events_with_primary(
+                    &session.graph.events,
+                    Some(primary_branch),
+                );
+                session.graph.id = graph_id;
+                session.graph.created_at = created_at;
+                Ok(())
+            }),
+        )
+        .await
     }
 
     async fn load_graph(&self, session_id: &SessionId) -> SessionResult<Option<SessionGraph>> {
@@ -130,25 +147,25 @@ pub trait Persistence: Send + Sync {
         session_id: &SessionId,
         message: SessionMessage,
     ) -> SessionResult<()> {
-        let mut session = self
-            .load(session_id)
-            .await?
-            .ok_or_else(|| SessionError::NotFound {
-                id: session_id.to_string(),
-            })?;
-        session.add_message(message)?;
-        self.save(&session).await
+        self.with_session_lock(
+            session_id,
+            Box::new(move |session| {
+                session.add_message(message)?;
+                Ok(())
+            }),
+        )
+        .await
     }
 
     async fn set_state(&self, session_id: &SessionId, state: SessionState) -> SessionResult<()> {
-        let mut session = self
-            .load(session_id)
-            .await?
-            .ok_or_else(|| SessionError::NotFound {
-                id: session_id.to_string(),
-            })?;
-        session.set_state(state);
-        self.save(&session).await
+        self.with_session_lock(
+            session_id,
+            Box::new(move |session| {
+                session.set_state(state);
+                Ok(())
+            }),
+        )
+        .await
     }
 }
 
@@ -181,6 +198,16 @@ impl MemoryPersistence {
 impl Persistence for MemoryPersistence {
     fn name(&self) -> &str {
         "memory"
+    }
+
+    async fn with_session_lock(&self, id: &SessionId, f: SessionMutationFn) -> SessionResult<()> {
+        let mut sessions = self.sessions.write().await;
+        let session = sessions
+            .get_mut(&id.to_string())
+            .ok_or_else(|| SessionError::NotFound { id: id.to_string() })?;
+        f(session)?;
+        validate_session_graph(session, "memory")?;
+        Ok(())
     }
 
     async fn save(&self, session: &Session) -> SessionResult<()> {

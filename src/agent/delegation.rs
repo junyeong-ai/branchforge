@@ -6,7 +6,7 @@ use crate::auth::Auth;
 use crate::authorization::{ExecutionMode, ToolPolicy, ToolRule};
 use crate::client::{ModelConfig, ModelType, ProviderConfig};
 use crate::common::{IndexRegistry, matches_tool_pattern};
-use crate::config::SandboxSettings;
+use crate::config::SandboxConfig;
 use crate::context::MemoryContent;
 use crate::hooks::{CommandHook, HookEvent, HookManager, HookRule};
 use crate::mcp::{is_mcp_name, parse_mcp_name};
@@ -26,7 +26,7 @@ pub(crate) struct DelegationRuntime {
     subagent_registry: IndexRegistry<SubagentIndex>,
     hooks: HookManager,
     memory_content: MemoryContent,
-    sandbox_settings: Option<SandboxSettings>,
+    sandbox_settings: Option<SandboxConfig>,
     session_manager: Option<SessionManager>,
     mcp_manager: Option<Arc<crate::mcp::McpManager>>,
     tool_search_manager: Option<Arc<crate::tools::ToolSearchManager>>,
@@ -42,7 +42,7 @@ pub(crate) struct DelegationRuntimeConfig {
     pub subagent_registry: IndexRegistry<SubagentIndex>,
     pub hooks: HookManager,
     pub memory_content: MemoryContent,
-    pub sandbox_settings: Option<SandboxSettings>,
+    pub sandbox_settings: Option<SandboxConfig>,
     pub session_manager: Option<SessionManager>,
     pub mcp_manager: Option<Arc<crate::mcp::McpManager>>,
     pub tool_search_manager: Option<Arc<crate::tools::ToolSearchManager>>,
@@ -649,7 +649,7 @@ description: Review guidance
 Check [guide](guide.md)
 Run !`echo should-not-run`"#,
                 ))
-                .base_dir("/tmp/skills"),
+                .with_base_dir("/tmp/skills"),
         );
 
         let runtime = runtime_with_skills(skills);

@@ -208,7 +208,7 @@ impl SanitizedEnv {
         self
     }
 
-    pub fn vars(mut self, vars: HashMap<String, String>) -> Self {
+    pub fn with_vars(mut self, vars: HashMap<String, String>) -> Self {
         for (key, value) in vars {
             if !Self::is_blocked(&key) {
                 self.vars.insert(key, value);
@@ -217,7 +217,7 @@ impl SanitizedEnv {
         self
     }
 
-    pub fn get_vars(&self) -> &HashMap<String, String> {
+    pub fn vars(&self) -> &HashMap<String, String> {
         &self.vars
     }
 

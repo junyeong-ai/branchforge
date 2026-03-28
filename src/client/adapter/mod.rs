@@ -26,8 +26,8 @@ mod vertex;
 
 pub use anthropic::AnthropicAdapter;
 pub use config::{
-    BetaConfig, BetaFeature, DEFAULT_MODEL, DEFAULT_REASONING_MODEL, DEFAULT_SMALL_MODEL,
-    FRONTIER_MODEL, ModelConfig, ModelType, ProviderConfig,
+    BetaConfig, BetaFeature, DEFAULT_FAST_MODEL, DEFAULT_MODEL, DEFAULT_REASONING_MODEL,
+    ModelConfig, ModelType, ProviderConfig,
 };
 pub use traits::{ProviderAdapter, StreamFormat};
 

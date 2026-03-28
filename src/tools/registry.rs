@@ -5,6 +5,9 @@ use std::time::Duration;
 
 use dashmap::DashMap;
 
+/// Default timeout for tool execution in milliseconds (2 minutes).
+const DEFAULT_TOOL_TIMEOUT_MS: u64 = 120_000;
+
 use super::ProcessManager;
 use super::builder::ToolRegistryBuilder;
 use super::context::ExecutionContext;
@@ -69,18 +72,18 @@ impl ToolRegistry {
     }
 
     #[inline]
-    pub fn get_context(&self) -> &ExecutionContext {
-        &self.env.context
+    pub fn context(&self) -> &ExecutionContext {
+        self.env.context()
     }
 
     #[inline]
     pub fn tool_state(&self) -> Option<&crate::session::session_state::ToolState> {
-        self.env.tool_state.as_ref()
+        self.env.tool_state()
     }
 
     #[inline]
     pub fn process_manager(&self) -> Option<&Arc<ProcessManager>> {
-        self.env.process_manager.as_ref()
+        self.env.process_manager()
     }
 
     #[inline]
@@ -110,21 +113,21 @@ impl ToolRegistry {
 
         // Security validation first — catches structural violations
         // regardless of tool policy
-        if let Err(e) = self.env.context.validate_security(name, &input) {
+        if let Err(e) = self.env.context().validate_security(name, &input) {
             return ToolResult::security_error(e);
         }
 
-        let decision = self.env.context.check_tool_policy(name, &input);
+        let decision = self.env.context().check_tool_policy(name, &input);
         if decision.is_denied() {
             return ToolResult::authorization_denied(name, decision.reason());
         }
 
-        let limits = self.env.context.limits_for(name);
-        let timeout_ms = limits.timeout_ms.unwrap_or(120_000);
+        let limits = self.env.context().limits_for(name);
+        let timeout_ms = limits.timeout_ms.unwrap_or(DEFAULT_TOOL_TIMEOUT_MS);
 
         let result = tokio::time::timeout(
             Duration::from_millis(timeout_ms),
-            tool.execute(input, &self.env.context),
+            tool.execute(input, self.env.context()),
         )
         .await;
 

@@ -2,7 +2,7 @@
 
 use std::path::Path;
 
-use crate::client::FRONTIER_MODEL;
+use crate::client::DEFAULT_REASONING_MODEL;
 
 /// Generates the environment block with runtime information.
 pub fn environment_block(
@@ -36,7 +36,7 @@ Assistant knowledge cutoff is May 2025.
 <claude_background_info>
 The most recent frontier Claude model is Claude Opus 4.6 (model ID: '{frontier}').
 </claude_background_info>"#,
-        frontier = FRONTIER_MODEL
+        frontier = DEFAULT_REASONING_MODEL
     )
 }
 

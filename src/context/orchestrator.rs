@@ -51,7 +51,7 @@ impl PromptOrchestrator {
         self
     }
 
-    pub fn skill_registry(mut self, registry: IndexRegistry<SkillIndex>) -> Self {
+    pub fn with_skill_registry(mut self, registry: IndexRegistry<SkillIndex>) -> Self {
         self.skill_registry = registry;
         self
     }
@@ -71,7 +71,7 @@ impl PromptOrchestrator {
         self.rule_registry.read().await
     }
 
-    pub fn get_skill_registry(&self) -> &IndexRegistry<SkillIndex> {
+    pub fn skill_registry(&self) -> &IndexRegistry<SkillIndex> {
         &self.skill_registry
     }
 
@@ -335,9 +335,9 @@ mod tests {
         );
 
         let orchestrator = PromptOrchestrator::new(static_context, "claude-sonnet-4-5")
-            .skill_registry(skill_registry);
+            .with_skill_registry(skill_registry);
 
-        assert!(orchestrator.get_skill_registry().contains("test"));
+        assert!(orchestrator.skill_registry().contains("test"));
     }
 
     #[test]
@@ -348,7 +348,7 @@ mod tests {
         skill_registry.register(SkillIndex::new("review", "Review code"));
 
         let orchestrator = PromptOrchestrator::new(static_context, "claude-sonnet-4-5")
-            .skill_registry(skill_registry);
+            .with_skill_registry(skill_registry);
 
         let summary = orchestrator.build_skill_summary();
         assert!(summary.contains("commit"));
@@ -364,7 +364,7 @@ mod tests {
         skill_registry.register(skill);
 
         let orchestrator = PromptOrchestrator::new(static_context, "claude-sonnet-4-5")
-            .skill_registry(skill_registry);
+            .with_skill_registry(skill_registry);
 
         let skill = orchestrator.find_skill_by_command("/internal");
         assert!(skill.is_some());

@@ -160,12 +160,12 @@ mod auth_tests {
 // =============================================================================
 
 mod client_tests {
-    use branchforge::client::{DEFAULT_SMALL_MODEL, GatewayConfig, ModelConfig, ProviderConfig};
+    use branchforge::client::{DEFAULT_FAST_MODEL, GatewayConfig, ModelConfig, ProviderConfig};
     use branchforge::{Auth, BetaConfig, BetaFeature, Client, OAuthConfig};
 
     #[tokio::test]
     async fn test_client_builder() {
-        let models = ModelConfig::new("claude-sonnet-4-5-20250514", DEFAULT_SMALL_MODEL);
+        let models = ModelConfig::new("claude-sonnet-4-5-20250514", DEFAULT_FAST_MODEL);
         let config = ProviderConfig::new(models).max_tokens(4096);
         let client = Client::builder()
             .auth("test-key")
@@ -1024,7 +1024,7 @@ mod tool_execution_tests {
     #[tokio::test]
     async fn test_tool_bash_basic() {
         let temp_dir = TempDir::new().unwrap();
-        let tool = BashTool::new();
+        let tool = BashTool::default();
         let ctx = create_test_context(&temp_dir);
         let result = tool
             .execute(
@@ -1041,7 +1041,7 @@ mod tool_execution_tests {
     #[tokio::test]
     async fn test_tool_bash_with_timeout() {
         let temp_dir = TempDir::new().unwrap();
-        let tool = BashTool::new();
+        let tool = BashTool::default();
         let ctx = create_test_context(&temp_dir);
         let result = tool
             .execute(json!({"command": "echo 'done'", "timeout": 5000}), &ctx)
@@ -1055,7 +1055,7 @@ mod tool_execution_tests {
     #[tokio::test]
     async fn test_tool_bash_background() {
         let process_manager = Arc::new(branchforge::tools::ProcessManager::new());
-        let tool = BashTool::process_manager(process_manager);
+        let tool = BashTool::new(process_manager);
         let ctx = ExecutionContext::default();
         let result = tool
             .execute(

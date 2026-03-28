@@ -10,7 +10,7 @@ use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
 
 use super::{Hook, HookContext, HookEvent, HookInput, HookOutput};
-use crate::config::{HookConfig, HooksSettings};
+use crate::config::{HookConfig, HooksConfig};
 
 pub struct CommandHook {
     name: String,
@@ -52,7 +52,7 @@ impl CommandHook {
         self
     }
 
-    pub fn from_settings(settings: &HooksSettings) -> Vec<Self> {
+    pub fn from_settings(settings: &HooksConfig) -> Vec<Self> {
         let mut hooks = Vec::new();
 
         for (name, config) in &settings.pre_tool_use {
@@ -253,7 +253,7 @@ mod tests {
 
     #[test]
     fn test_from_settings() {
-        let mut settings = HooksSettings::default();
+        let mut settings = HooksConfig::default();
         settings.pre_tool_use.insert(
             "security".to_string(),
             HookConfig::Full {

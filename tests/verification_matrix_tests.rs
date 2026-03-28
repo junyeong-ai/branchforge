@@ -9,7 +9,7 @@ use std::path::Path;
 
 use branchforge::common::ToolRestricted;
 use branchforge::session::{
-    ArchivePolicy, CompactExecutor, CompactStrategy, ExportPolicy, MemoryPersistence, Persistence,
+    ArchivePolicy, CompactService, CompactStrategy, ExportPolicy, MemoryPersistence, Persistence,
     QueueItem, SessionArchiveService,
 };
 use branchforge::types::TokenUsage;
@@ -118,12 +118,14 @@ async fn graph_first_compaction_archive_roundtrip_preserves_identity_and_history
         .unwrap();
     session.current_input_tokens = 180_000;
 
-    let executor = CompactExecutor::new(CompactStrategy::default());
-    let compact = executor.apply_compact(
-        &mut session,
-        "Auth refresh bug traced to stale session ordering; next step is durable verification."
-            .to_string(),
-    );
+    let executor = CompactService::new(CompactStrategy::default());
+    let compact = executor
+        .apply_compact(
+            &mut session,
+            "Auth refresh bug traced to stale session ordering; next step is durable verification."
+                .to_string(),
+        )
+        .unwrap();
     executor.record_compact(&mut session, &compact);
 
     assert_eq!(session.current_branch_messages().len(), 1);

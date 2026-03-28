@@ -7,6 +7,7 @@
 mod cache;
 mod config;
 mod credential;
+pub mod credentials;
 mod helper;
 mod provider;
 mod providers;
@@ -20,6 +21,7 @@ use secrecy::{ExposeSecret, SecretString};
 pub use cache::CachedProvider;
 pub use config::{CLAUDE_CODE_BETA, OAuthConfig, OAuthConfigBuilder};
 pub use credential::{Credential, OAuthCredential};
+pub use credentials::{CredentialKind, CredentialRecord};
 pub use helper::{ApiKeyHelper, AwsCredentialRefresh, AwsCredentials, CredentialManager};
 pub use provider::CredentialProvider;
 #[cfg(feature = "cli-auth")]

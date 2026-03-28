@@ -134,7 +134,7 @@ impl ContextBuilder {
 
         let orchestrator = PromptOrchestrator::new(static_context, &self.model)
             .rule_registry(self.rule_registry)
-            .skill_registry(self.skill_registry);
+            .with_skill_registry(self.skill_registry);
 
         Ok(orchestrator)
     }

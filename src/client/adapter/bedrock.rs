@@ -20,7 +20,7 @@ use std::pin::Pin;
 
 use futures::Stream;
 
-use super::base::RequestExecutor;
+use super::base::RequestService;
 use super::config::ProviderConfig;
 use super::token_cache::{AwsCredentialsCache, CachedAwsCredentials, new_aws_credentials_cache};
 use super::traits::ProviderAdapter;
@@ -487,7 +487,7 @@ impl BedrockAdapter {
         let headers = self
             .get_auth_headers("POST", url, &body_bytes, region)
             .await?;
-        RequestExecutor::post_bytes(http, url, body_bytes, headers).await
+        RequestService::post_bytes(http, url, body_bytes, headers).await
     }
 
     async fn execute_stream_request(

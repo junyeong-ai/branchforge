@@ -7,9 +7,8 @@ use crate::client::messages::{DEFAULT_MAX_TOKENS, MIN_THINKING_BUDGET};
 
 // Anthropic API models
 pub const DEFAULT_MODEL: &str = "claude-sonnet-4-5-20250929";
-pub const DEFAULT_SMALL_MODEL: &str = "claude-haiku-4-5-20251001";
+pub const DEFAULT_FAST_MODEL: &str = "claude-haiku-4-5-20251001";
 pub const DEFAULT_REASONING_MODEL: &str = "claude-opus-4-6";
-pub const FRONTIER_MODEL: &str = DEFAULT_REASONING_MODEL;
 
 // AWS Bedrock models (using global endpoint prefix for maximum availability)
 #[cfg(feature = "aws")]
@@ -61,7 +60,7 @@ impl ModelConfig {
     }
 
     pub fn anthropic() -> Self {
-        Self::from_env_with_defaults(DEFAULT_MODEL, DEFAULT_SMALL_MODEL, DEFAULT_REASONING_MODEL)
+        Self::from_env_with_defaults(DEFAULT_MODEL, DEFAULT_FAST_MODEL, DEFAULT_REASONING_MODEL)
     }
 
     fn from_env_with_defaults(

@@ -7,15 +7,15 @@ pub mod files;
 pub mod gateway;
 pub mod messages;
 pub mod network;
+pub mod provider_profile;
 pub mod recovery;
 pub mod resilience;
 pub mod schema;
 mod streaming;
 
 pub use adapter::{
-    AnthropicAdapter, BetaConfig, BetaFeature, CloudProvider, DEFAULT_MODEL,
-    DEFAULT_REASONING_MODEL, DEFAULT_SMALL_MODEL, FRONTIER_MODEL, ModelConfig, ModelType,
-    ProviderAdapter, ProviderConfig,
+    AnthropicAdapter, BetaConfig, BetaFeature, CloudProvider, DEFAULT_FAST_MODEL, DEFAULT_MODEL,
+    DEFAULT_REASONING_MODEL, ModelConfig, ModelType, ProviderAdapter, ProviderConfig,
 };
 pub use batch::{
     BatchClient, BatchRequest, BatchResult, BatchStatus, CreateBatchRequest, MessageBatch,
@@ -30,6 +30,7 @@ pub use messages::{
     OutputConfig, OutputFormat, ThinkingConfig, ThinkingType, TokenValidationError, ToolChoice,
 };
 pub use network::{ClientCertConfig, HttpNetworkConfig, PoolConfig, ProxyConfig};
+pub use provider_profile::{CapabilitySupport, ProviderProfile};
 pub use recovery::StreamRecoveryState;
 pub use resilience::{
     CircuitBreaker, CircuitConfig, CircuitState, ExponentialBackoff, Resilience, ResilienceConfig,
@@ -107,12 +108,12 @@ impl Client {
         self
     }
 
-    pub fn resilience(mut self, config: ResilienceConfig) -> Self {
+    pub fn with_resilience(mut self, config: ResilienceConfig) -> Self {
         self.resilience = Some(Arc::new(Resilience::new(config)));
         self
     }
 
-    pub fn resilience_ref(&self) -> Option<&Arc<Resilience>> {
+    pub fn resilience(&self) -> Option<&Arc<Resilience>> {
         self.resilience.as_ref()
     }
 
@@ -330,7 +331,11 @@ impl Client {
             let binary_stream = self
                 .adapter
                 .create_binary_stream(Box::pin(response.bytes_stream()))
-                .expect("binary stream provider must return Some from create_binary_stream");
+                .ok_or_else(|| {
+                    crate::Error::Config(
+                        "binary stream provider must implement create_binary_stream".into(),
+                    )
+                })?;
             return Ok(futures::future::Either::Left(binary_stream));
         }
 
@@ -638,7 +643,7 @@ impl ClientBuilder {
         self
     }
 
-    pub fn resilience(mut self, config: ResilienceConfig) -> Self {
+    pub fn with_resilience(mut self, config: ResilienceConfig) -> Self {
         self.resilience_config = Some(config);
         self
     }

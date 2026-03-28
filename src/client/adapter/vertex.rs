@@ -7,7 +7,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use gcp_auth::TokenProvider;
 
-use super::base::RequestExecutor;
+use super::base::RequestService;
 use super::config::ProviderConfig;
 use super::request::build_cloud_request_body;
 use super::token_cache::{CachedToken, TokenCache, new_token_cache};
@@ -164,7 +164,7 @@ impl VertexAdapter {
     ) -> Result<reqwest::Response> {
         let token = self.get_token().await?;
         let headers = vec![("Authorization".into(), format!("Bearer {}", token))];
-        RequestExecutor::post(http, url, body, headers).await
+        RequestService::post(http, url, body, headers).await
     }
 }
 

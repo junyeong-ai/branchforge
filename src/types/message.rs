@@ -126,7 +126,7 @@ impl Message {
     pub fn cache_on_last_block(mut self) -> Self {
         if let Some(last) = self.content.pop() {
             self.content
-                .push(last.cache_control(CacheControl::ephemeral()));
+                .push(last.with_cache_control(CacheControl::ephemeral()));
         }
         self
     }

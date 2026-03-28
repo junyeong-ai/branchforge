@@ -1,10 +1,13 @@
 //! Tool policy rules and evaluation.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+
+use super::extractors::{InputExtractor, default_extractors};
 
 fn anchor_pattern(pattern: &str) -> String {
     let has_start = pattern.starts_with('^');
@@ -40,8 +43,7 @@ impl ToolDecision {
         }
     }
 
-    pub fn allowed(reason: impl Into<String>) -> Self {
-        let _ = reason.into(); // kept for compat but Allow carries no reason
+    pub fn allowed() -> Self {
         Self::Allow
     }
 
@@ -223,34 +225,51 @@ impl ToolRule {
     }
 
     pub fn matches_with_input(&self, tool_name: &str, input: &Value) -> bool {
+        self.matches_with_input_extractors(tool_name, input, None)
+    }
+
+    pub fn matches_with_input_extractors(
+        &self,
+        tool_name: &str,
+        input: &Value,
+        extractors: Option<&HashMap<String, Arc<dyn InputExtractor>>>,
+    ) -> bool {
         if !self.matches(tool_name) {
             return false;
         }
 
         match &self.input_pattern {
-            Some(pattern) => self.match_input_pattern(pattern, tool_name, input),
+            Some(pattern) => self.match_input_pattern(pattern, tool_name, input, extractors),
             None => true,
         }
     }
 
-    fn match_input_pattern(&self, pattern: &str, tool_name: &str, input: &Value) -> bool {
-        let input_str = match tool_name {
-            "Bash" => input.get("command").and_then(|v| v.as_str()),
-            "Skill" => input.get("skill").and_then(|v| v.as_str()),
-            "Read" | "Write" | "Edit" => input.get("file_path").and_then(|v| v.as_str()),
-            "Glob" | "Grep" => input.get("path").and_then(|v| v.as_str()),
-            "WebFetch" => {
-                if let Some(domain) = pattern.strip_prefix("domain:") {
-                    return input
-                        .get("url")
-                        .and_then(|v| v.as_str())
-                        .map(|url| Self::matches_domain(url, domain))
-                        .unwrap_or(false);
-                }
-                input.get("url").and_then(|v| v.as_str())
+    fn match_input_pattern(
+        &self,
+        pattern: &str,
+        tool_name: &str,
+        input: &Value,
+        extractors: Option<&HashMap<String, Arc<dyn InputExtractor>>>,
+    ) -> bool {
+        // WebFetch domain matching is a special case that requires more than
+        // simple field extraction.
+        if tool_name == "WebFetch" {
+            if let Some(domain) = pattern.strip_prefix("domain:") {
+                return input
+                    .get("url")
+                    .and_then(|v| v.as_str())
+                    .map(|url| Self::matches_domain(url, domain))
+                    .unwrap_or(false);
             }
-            _ => None,
-        };
+            let input_str = input.get("url").and_then(|v| v.as_str());
+            return input_str
+                .map(|s| self.match_pattern(pattern, s))
+                .unwrap_or(false);
+        }
+
+        let input_str = extractors
+            .and_then(|map| map.get(tool_name))
+            .and_then(|ext| ext.extract(input));
 
         let Some(input_str) = input_str else {
             return false;
@@ -271,7 +290,7 @@ impl ToolRule {
                 input == pattern
             }
         } else {
-            input == pattern || input.starts_with(&format!("{}/", pattern))
+            input == pattern || std::path::Path::new(input).starts_with(pattern)
         }
     }
 
@@ -284,38 +303,71 @@ impl ToolRule {
     /// This prevents bypass attacks like:
     /// - `evil.github.com.attacker.com` (subdomain of attacker.com, not github.com)
     /// - `https://attacker.com?redirect=github.com` (domain in query string)
-    fn matches_domain(url: &str, domain: &str) -> bool {
-        // Extract host from URL
-        let host = url
-            // Remove protocol
-            .strip_prefix("https://")
-            .or_else(|| url.strip_prefix("http://"))
-            .unwrap_or(url)
-            // Take only the host part (before path, query, or port)
-            .split('/')
-            .next()
-            .unwrap_or("")
-            .split('?')
-            .next()
-            .unwrap_or("")
-            .split(':')
-            .next()
-            .unwrap_or("");
-
-        // Check exact match or subdomain match
+    fn matches_domain(url_str: &str, domain: &str) -> bool {
+        let Ok(parsed) = url::Url::parse(url_str) else {
+            return false;
+        };
+        let Some(host) = parsed.host_str() else {
+            return false;
+        };
         host == domain || host.ends_with(&format!(".{}", domain))
     }
 }
 
-#[derive(Clone, Debug, Default)]
 pub struct ToolPolicy {
     pub rules: Vec<ToolRule>,
     pub tool_limits: HashMap<String, ToolLimits>,
+    extractors: HashMap<String, Arc<dyn InputExtractor>>,
+}
+
+impl std::fmt::Debug for ToolPolicy {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ToolPolicy")
+            .field("rules", &self.rules)
+            .field("tool_limits", &self.tool_limits)
+            .field(
+                "extractors",
+                &format!("({} entries)", self.extractors.len()),
+            )
+            .finish()
+    }
+}
+
+impl Default for ToolPolicy {
+    fn default() -> Self {
+        Self {
+            rules: Vec::new(),
+            tool_limits: HashMap::new(),
+            extractors: default_extractors()
+                .into_iter()
+                .map(|(k, v)| (k.to_string(), v))
+                .collect(),
+        }
+    }
+}
+
+impl Clone for ToolPolicy {
+    fn clone(&self) -> Self {
+        Self {
+            rules: self.rules.clone(),
+            tool_limits: self.tool_limits.clone(),
+            extractors: self.extractors.clone(),
+        }
+    }
 }
 
 impl ToolPolicy {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Register a custom input extractor for a tool name.
+    pub fn register_extractor(
+        &mut self,
+        tool_name: impl Into<String>,
+        extractor: Arc<dyn InputExtractor>,
+    ) {
+        self.extractors.insert(tool_name.into(), extractor);
     }
 
     pub fn builder() -> ToolPolicyBuilder {
@@ -339,7 +391,7 @@ impl ToolPolicy {
             .iter()
             .filter(|r| r.decision == ToolRuleDecision::Deny)
         {
-            if rule.matches_with_input(tool_name, input) {
+            if rule.matches_with_input_extractors(tool_name, input, Some(&self.extractors)) {
                 return ToolDecision::denied(
                     rule.reason
                         .clone()
@@ -354,7 +406,7 @@ impl ToolPolicy {
             .iter()
             .filter(|r| r.decision == ToolRuleDecision::Allow)
         {
-            if rule.matches_with_input(tool_name, input) {
+            if rule.matches_with_input_extractors(tool_name, input, Some(&self.extractors)) {
                 return ToolDecision::Allow;
             }
         }
@@ -376,7 +428,7 @@ impl ToolPolicy {
             .iter()
             .filter(|r| r.decision == ToolRuleDecision::Deny)
         {
-            if rule.matches_with_input("Skill", input) {
+            if rule.matches_with_input_extractors("Skill", input, Some(&self.extractors)) {
                 return ToolDecision::denied(
                     rule.reason
                         .clone()
@@ -390,7 +442,7 @@ impl ToolPolicy {
             .iter()
             .filter(|r| r.decision == ToolRuleDecision::Allow)
         {
-            if rule.matches_with_input("Skill", input) {
+            if rule.matches_with_input_extractors("Skill", input, Some(&self.extractors)) {
                 return ToolDecision::Allow;
             }
         }
@@ -487,9 +539,20 @@ mod tests {
 
     #[test]
     fn test_skill_scoped_rule_matches_skill_name() {
-        let rule = ToolRule::deny_scoped("Skill(internal)");
-        assert!(rule.matches_with_input("Skill", &serde_json::json!({"skill": "internal"})));
-        assert!(!rule.matches_with_input("Skill", &serde_json::json!({"skill": "commit"})));
+        let policy = ToolPolicy::builder()
+            .allow(".*")
+            .deny("Skill(internal)")
+            .build();
+        assert!(
+            policy
+                .check("Skill", &serde_json::json!({"skill": "internal"}))
+                .is_denied()
+        );
+        assert!(
+            policy
+                .check("Skill", &serde_json::json!({"skill": "commit"}))
+                .is_allowed()
+        );
     }
 
     #[test]

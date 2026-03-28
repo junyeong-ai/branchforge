@@ -314,7 +314,7 @@ mod static_context_tests {
 
 mod session_tests {
     use branchforge::session::{
-        CompactExecutor, CompactStrategy, Session, SessionAccessScope, SessionConfig,
+        CompactService, CompactStrategy, Session, SessionAccessScope, SessionConfig,
         SessionManager, SessionMessage,
     };
     use branchforge::types::ContentBlock;
@@ -337,7 +337,7 @@ mod session_tests {
     #[test]
     fn test_context_compaction_threshold() {
         let strategy = CompactStrategy::default().threshold(0.8);
-        let executor = CompactExecutor::new(strategy);
+        let executor = CompactService::new(strategy);
 
         assert!(!executor.needs_compact(70_000, 100_000));
         assert!(executor.needs_compact(80_000, 100_000));

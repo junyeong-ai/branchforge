@@ -104,6 +104,22 @@ impl ToolStateInner {
     }
 }
 
+/// Snapshot of session state: session ID, todo count, and current plan.
+#[derive(Debug, Clone)]
+pub struct SessionSnapshot {
+    pub session_id: SessionId,
+    pub todo_count: usize,
+    pub current_plan: Option<Plan>,
+}
+
+/// Current execution state: session ID, plan mode status, and in-progress todo count.
+#[derive(Debug, Clone)]
+pub struct ExecutionState {
+    pub session_id: SessionId,
+    pub in_plan_mode: bool,
+    pub todos_in_progress: usize,
+}
+
 /// Thread-safe tool state handle.
 #[derive(Debug, Clone)]
 pub struct ToolState(Arc<ToolStateInner>);
@@ -245,23 +261,23 @@ impl ToolState {
     }
 
     #[inline]
-    pub async fn session_snapshot(&self) -> (SessionId, usize, Option<Plan>) {
+    pub async fn session_snapshot(&self) -> SessionSnapshot {
         let session = self.0.session.read().await;
-        (
-            session.id,
-            session.todos.len(),
-            session.current_plan.clone(),
-        )
+        SessionSnapshot {
+            session_id: session.id,
+            todo_count: session.todos.len(),
+            current_plan: session.current_plan.clone(),
+        }
     }
 
     #[inline]
-    pub async fn execution_state(&self) -> (SessionId, bool, usize) {
+    pub async fn execution_state(&self) -> ExecutionState {
         let session = self.0.session.read().await;
-        (
-            session.id,
-            session.is_in_plan_mode(),
-            session.todos_in_progress_count(),
-        )
+        ExecutionState {
+            session_id: session.id,
+            in_plan_mode: session.is_in_plan_mode(),
+            todos_in_progress: session.todos_in_progress_count(),
+        }
     }
 
     pub async fn enqueue(&self, content: impl Into<String>) -> Result<Uuid, QueueError> {
@@ -297,19 +313,17 @@ impl ToolState {
         self.0.queue_notify.notified().await;
     }
 
-    pub async fn acquire_execution(&self) -> ExecutionGuard<'_> {
-        let permit = self
-            .0
-            .execution_lock
-            .acquire()
-            .await
-            .expect("semaphore should not be closed");
+    pub async fn acquire_execution(&self) -> crate::Result<ExecutionGuard<'_>> {
+        let permit =
+            self.0.execution_lock.acquire().await.map_err(|_| {
+                crate::Error::Session("execution semaphore unexpectedly closed".into())
+            })?;
         self.0.executing.store(true, Ordering::Release);
-        ExecutionGuard {
+        Ok(ExecutionGuard {
             permit,
             executing: &self.0.executing,
             queue_notify: &self.0.queue_notify,
-        }
+        })
     }
 
     pub fn try_acquire_execution(&self) -> Option<ExecutionGuard<'_>> {

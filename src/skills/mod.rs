@@ -298,7 +298,7 @@ mod tests {
             .source(ContentSource::file(
                 "/home/user/.claude/skills/reviewer/skill.md",
             ))
-            .base_dir("/home/user/.claude/skills/reviewer");
+            .with_base_dir("/home/user/.claude/skills/reviewer");
 
         assert_eq!(
             skill.resolve_path("style-guide.md"),
@@ -318,7 +318,7 @@ Absolute: [config](/etc/config.md)"#;
 
         let skill = SkillIndex::new("test", "Test")
             .source(ContentSource::in_memory(content))
-            .base_dir("/skills/test");
+            .with_base_dir("/skills/test");
 
         let resolved = skill.load_content_with_resolved_paths().await.unwrap();
 

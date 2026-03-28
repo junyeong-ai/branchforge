@@ -20,6 +20,9 @@ use super::config::{BudgetConfig, ExecutionConfig};
 use super::state::AgentMetrics;
 use super::state_formatter::collect_compaction_state;
 
+/// Default fallback model used when inner tool usage does not specify a model.
+const DEFAULT_FALLBACK_MODEL: &str = "claude-haiku-4-5";
+
 /// Extract structured output from text if an output schema is configured.
 pub(crate) fn extract_structured_output(schema: Option<&Value>, text: &str) -> Option<Value> {
     schema?;
@@ -211,7 +214,10 @@ pub(crate) async fn accumulate_inner_usage(
             .output_tokens
             .saturating_add(inner_usage.output_tokens);
         metrics.add_usage_with_cache(inner_usage);
-        let inner_model = result.inner_model.as_deref().unwrap_or("claude-haiku-4-5");
+        let inner_model = result
+            .inner_model
+            .as_deref()
+            .unwrap_or(DEFAULT_FALLBACK_MODEL);
         metrics.record_model_usage(inner_model, inner_usage);
 
         let inner_cost = budget_tracker.record(inner_model, inner_usage);
@@ -267,7 +273,7 @@ pub(crate) async fn maybe_invoke_explicit_skill_command(
 
     let actual_input = pre_output.updated_input.unwrap_or(raw_input);
     let permission = tools
-        .get_context()
+        .context()
         .check_explicit_skill_permission(&actual_input);
     if !permission.is_allowed() {
         return Err(crate::Error::Authorization(permission.reason().to_string()));
@@ -295,7 +301,7 @@ pub(crate) async fn maybe_invoke_explicit_skill_command(
         .await?;
 
     tool_state
-        .with_session_mut(|session| {
+        .with_session_mut(|session| -> crate::session::SessionResult<()> {
             session.add_assistant_message(
                 vec![ContentBlock::ToolUse(ToolUseBlock {
                     id: tool_use_id.clone(),
@@ -303,13 +309,14 @@ pub(crate) async fn maybe_invoke_explicit_skill_command(
                     input: actual_input.clone(),
                 })],
                 None,
-            );
+            )?;
             session.add_tool_results(vec![ToolResultBlock::from_tool_result(
                 &tool_use_id,
                 &result,
-            )]);
+            )])?;
+            Ok(())
         })
-        .await;
+        .await?;
 
     Ok(true)
 }
@@ -432,12 +439,12 @@ pub(crate) async fn handle_compaction(
 
             let state_sections = collect_compaction_state(tools).await;
             if !state_sections.is_empty() {
-                tool_state
+                let _ = tool_state
                     .with_session_mut(|session| {
                         session.add_user_message(format!(
                             "<system-reminder>\n# State preserved after compaction\n\n{}\n</system-reminder>",
                             state_sections.join("\n\n")
-                        ));
+                        ))
                     })
                     .await;
             }

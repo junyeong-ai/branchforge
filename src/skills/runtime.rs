@@ -82,7 +82,7 @@ impl SkillRuntime {
         Ok(SkillSpec {
             allowed_tools: skill.allowed_tools.clone(),
             model: skill.model.clone(),
-            base_dir: skill.get_base_dir(),
+            base_dir: skill.base_dir(),
             agent: skill.agent.clone(),
             index: skill,
             execution_kind,
@@ -207,7 +207,7 @@ mod tests {
             .source_type(crate::common::SourceType::Project)
             .allowed_tools(["Read"])
             .model("haiku")
-            .base_dir(".")
+            .with_base_dir(".")
             .triggers(["research"]);
         skill.context = Some("fork".to_string());
         skill.agent = Some("explore".to_string());

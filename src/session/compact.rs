@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use super::state::{Session, SessionMessage};
 use super::types::CompactRecord;
 use super::{SessionError, SessionResult};
-use crate::client::DEFAULT_SMALL_MODEL;
+use crate::client::DEFAULT_FAST_MODEL;
 use crate::types::{CompactResult, ContentBlock, Message, Role};
 
 /// Context usage threshold for triggering compaction (80%).
@@ -58,7 +58,7 @@ impl Default for CompactStrategy {
         Self {
             enabled: true,
             threshold_percent: DEFAULT_COMPACT_THRESHOLD,
-            summary_model: DEFAULT_SMALL_MODEL.to_string(),
+            summary_model: DEFAULT_FAST_MODEL.to_string(),
             max_summary_tokens: 4000,
             keep_coding_instructions: true,
             custom_instructions: None,
@@ -107,11 +107,11 @@ impl CompactStrategy {
     }
 }
 
-pub struct CompactExecutor {
+pub struct CompactService {
     strategy: CompactStrategy,
 }
 
-impl CompactExecutor {
+impl CompactService {
     pub fn new(strategy: CompactStrategy) -> Self {
         Self { strategy }
     }
@@ -163,12 +163,16 @@ impl CompactExecutor {
         )
         .max_tokens(self.strategy.max_summary_tokens);
         let response = client.send(request).await?;
-        let result = self.apply_compact(session, response.text());
+        let result = self.apply_compact(session, response.text())?;
         self.record_compact(session, &result);
         Ok(result)
     }
 
-    pub fn apply_compact(&self, session: &mut Session, summary: String) -> CompactResult {
+    pub fn apply_compact(
+        &self,
+        session: &mut Session,
+        summary: String,
+    ) -> SessionResult<CompactResult> {
         let projected_messages = session.current_branch_messages();
         let original_count = projected_messages.len();
 
@@ -192,12 +196,14 @@ impl CompactExecutor {
                 "content": [ContentBlock::text(format!("[Previous conversation summary]\n\n{}", summary))],
                 "summary": summary,
             }),
-        ).expect("compaction should append summary to an existing primary branch");
+        ).map_err(|e| SessionError::Storage {
+            message: format!("compaction failed to append summary to primary branch: {}", e),
+        })?;
         session.checkpoint_current_head(
             "compaction",
             Some("Context compaction summary appended".to_string()),
             vec!["compaction".to_string()],
-        );
+        )?;
 
         // Projection replacement only; graph history remains intact.
         let summary_msg = SessionMessage::assistant(vec![ContentBlock::text(format!(
@@ -212,12 +218,12 @@ impl CompactExecutor {
         session.refresh_summary_cache();
         session.updated_at = chrono::Utc::now();
 
-        CompactResult::Compacted {
+        Ok(CompactResult::Compacted {
             original_count,
             new_count: 1,
             saved_tokens: saved_tokens as usize,
             summary,
-        }
+        })
     }
 
     pub fn record_compact(&self, session: &mut Session, result: &CompactResult) {
@@ -506,7 +512,7 @@ mod tests {
 
     #[test]
     fn test_needs_compact() {
-        let executor = CompactExecutor::new(CompactStrategy::default().threshold(0.8));
+        let executor = CompactService::new(CompactStrategy::default().threshold(0.8));
 
         assert!(!executor.needs_compact(70_000, 100_000));
         assert!(executor.needs_compact(80_000, 100_000));
@@ -516,7 +522,7 @@ mod tests {
     #[test]
     fn test_prepare_compact_empty() {
         let session = Session::new(SessionConfig::default());
-        let executor = CompactExecutor::new(CompactStrategy::default());
+        let executor = CompactService::new(CompactStrategy::default());
 
         let result = executor.prepare_compact(&session).unwrap();
         assert!(matches!(result, PreparedCompact::NotNeeded));
@@ -526,7 +532,7 @@ mod tests {
     fn test_prepare_compact_ready_full_prompt() {
         let session = create_test_session(10);
         let executor =
-            CompactExecutor::new(CompactStrategy::default().keep_coding_instructions(true));
+            CompactService::new(CompactStrategy::default().keep_coding_instructions(true));
 
         let result = executor.prepare_compact(&session).unwrap();
 
@@ -552,7 +558,7 @@ mod tests {
     fn test_prepare_compact_ready_minimal_prompt() {
         let session = create_test_session(10);
         let executor =
-            CompactExecutor::new(CompactStrategy::default().keep_coding_instructions(false));
+            CompactService::new(CompactStrategy::default().keep_coding_instructions(false));
 
         let result = executor.prepare_compact(&session).unwrap();
 
@@ -578,7 +584,7 @@ mod tests {
     #[test]
     fn test_prepare_compact_with_custom_instructions() {
         let session = create_test_session(5);
-        let executor = CompactExecutor::new(
+        let executor = CompactService::new(
             CompactStrategy::default()
                 .custom_instructions("Focus on Rust code changes and test results."),
         );
@@ -597,9 +603,11 @@ mod tests {
     #[test]
     fn test_apply_compact() {
         let mut session = create_test_session(10);
-        let executor = CompactExecutor::new(CompactStrategy::default());
+        let executor = CompactService::new(CompactStrategy::default());
 
-        let result = executor.apply_compact(&mut session, "Test summary".to_string());
+        let result = executor
+            .apply_compact(&mut session, "Test summary".to_string())
+            .unwrap();
 
         match result {
             CompactResult::Compacted {

@@ -30,7 +30,7 @@ impl Default for AgentModelConfig {
     fn default() -> Self {
         Self {
             primary: crate::client::DEFAULT_MODEL.to_string(),
-            small: crate::client::DEFAULT_SMALL_MODEL.to_string(),
+            small: crate::client::DEFAULT_FAST_MODEL.to_string(),
             max_tokens: DEFAULT_MAX_TOKENS,
             extended_context: false,
         }

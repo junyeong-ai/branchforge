@@ -443,6 +443,8 @@ impl SessionArchiveService {
         };
         session.refresh_summary_cache();
         session.refresh_message_projection();
+        // Restore the original updated_at after refresh methods that set it to now().
+        session.updated_at = bundle.updated_at;
         Ok(session)
     }
 

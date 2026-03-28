@@ -1,8 +1,10 @@
 //! Authorization system for controlling tool execution.
 
+pub mod extractors;
 mod modes;
 mod rules;
 
+pub use extractors::{FieldExtractor, InputExtractor};
 pub use modes::ExecutionMode;
 pub use rules::{
     ToolDecision, ToolLimits, ToolPolicy, ToolPolicyBuilder, ToolRule, ToolRuleDecision,

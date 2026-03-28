@@ -63,7 +63,7 @@ impl ExecutionContext {
         self.session_id.as_deref()
     }
 
-    pub fn session_manager(mut self, manager: SessionManager) -> Self {
+    pub fn with_session_manager(mut self, manager: SessionManager) -> Self {
         self.session_manager = Some(manager);
         self
     }
@@ -73,7 +73,7 @@ impl ExecutionContext {
         self
     }
 
-    pub fn graph_manager(&self) -> Option<&SessionManager> {
+    pub fn session_manager(&self) -> Option<&SessionManager> {
         self.session_manager.as_ref()
     }
 
@@ -217,7 +217,7 @@ impl ExecutionContext {
 
     pub fn sanitized_env_with_sandbox(&self) -> SanitizedEnv {
         let sandbox_env = self.sandbox_env();
-        self.sanitized_env().vars(sandbox_env)
+        self.sanitized_env().with_vars(sandbox_env)
     }
 
     pub fn check_tool_policy(&self, tool_name: &str, input: &serde_json::Value) -> ToolDecision {

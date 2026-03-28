@@ -1501,7 +1501,9 @@ mod tests {
             .unwrap();
         {
             let mut session = manager.get(&session_id).await.unwrap();
-            session.checkpoint_current_head("stable", None, vec![]);
+            session
+                .checkpoint_current_head("stable", None, vec![])
+                .unwrap();
             manager.persistence.save(&session).await.unwrap();
         }
         manager

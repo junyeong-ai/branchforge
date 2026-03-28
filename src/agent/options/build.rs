@@ -51,13 +51,13 @@ impl AgentBuilder {
             orchestrator,
         );
 
-        agent.execution_mode = self.execution_mode;
+        agent.runtime_mut().execution_mode = self.execution_mode;
 
         if let Some(messages) = self.initial_messages {
             agent = agent.initial_messages(messages);
         }
         if let Some(id) = self.resume_session_id {
-            agent = agent.session_id(id);
+            agent = agent.with_session_id(id);
         }
         if let Some(mcp) = self.mcp_manager {
             agent = agent.mcp_manager(mcp);
@@ -97,7 +97,7 @@ impl AgentBuilder {
         }
 
         if let Some(scope) = self.context_scope {
-            agent.context_scope = Some(scope);
+            agent.runtime_mut().context_scope = Some(scope);
         }
 
         agent.persist_session_state().await?;
@@ -388,7 +388,7 @@ impl AgentBuilder {
 
         PromptOrchestrator::new(static_context, &self.config.model.primary)
             .rule_registry(rule_registry)
-            .skill_registry(skill_registry)
+            .with_skill_registry(skill_registry)
     }
 
     async fn build_tools(

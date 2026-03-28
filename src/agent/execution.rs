@@ -15,6 +15,7 @@ use super::common::{
 use super::events::AgentResult;
 use super::executor::Agent;
 use super::request::RequestBuilder;
+use super::run_config::RunConfig;
 use crate::graph::ReplayInput;
 use crate::hooks::{HookContext, HookEvent, HookInput};
 use crate::session::{MessageMetadata, ToolExecution};
@@ -25,19 +26,42 @@ use crate::types::{
 impl Agent {
     fn check_budget(&self) -> crate::Result<()> {
         BudgetContext {
-            tracker: &self.budget_tracker,
-            tenant: self.tenant_budget.as_deref(),
-            config: &self.config.budget,
+            tracker: &self.runtime.budget_tracker,
+            tenant: self.runtime.tenant_budget.as_deref(),
+            config: &self.runtime.config.budget,
         }
         .check()
     }
 
     pub async fn execute(&self, prompt: &str) -> crate::Result<AgentResult> {
-        let timeout = self
+        self.execute_with_optional_config(prompt, None).await
+    }
+
+    /// Execute with per-run configuration overrides.
+    pub async fn execute_with(
+        &self,
+        prompt: impl Into<String>,
+        run_config: RunConfig,
+    ) -> crate::Result<AgentResult> {
+        self.execute_with_optional_config(&prompt.into(), Some(run_config))
+            .await
+    }
+
+    async fn execute_with_optional_config(
+        &self,
+        prompt: &str,
+        run_config: Option<RunConfig>,
+    ) -> crate::Result<AgentResult> {
+        let default_timeout = self
+            .runtime
             .config
             .execution
             .timeout
             .unwrap_or(std::time::Duration::from_secs(600));
+        let timeout = run_config
+            .as_ref()
+            .and_then(|rc| rc.timeout_override())
+            .unwrap_or(default_timeout);
 
         if self.state.is_executing() {
             self.state
@@ -47,7 +71,7 @@ impl Agent {
             return self.wait_for_execution(timeout).await;
         }
 
-        tokio::time::timeout(timeout, self.execute_inner(prompt))
+        tokio::time::timeout(timeout, self.execute_inner(prompt, run_config.as_ref()))
             .await
             .map_err(|_| crate::Error::Timeout(timeout))?
     }
@@ -59,7 +83,7 @@ impl Agent {
                 if !self.state.is_executing()
                     && let Some(merged) = self.state.dequeue_or_merge().await
                 {
-                    return self.execute_inner(&merged.content).await;
+                    return self.execute_inner(&merged.content, None).await;
                 }
             }
         })
@@ -106,13 +130,17 @@ impl Agent {
         self.execute_with_messages(replay.messages, prompt).await
     }
 
-    #[instrument(skip(self, prompt), fields(session_id = %self.session_id))]
-    async fn execute_inner(&self, prompt: &str) -> crate::Result<AgentResult> {
-        let _guard = self.state.acquire_execution().await;
+    #[instrument(skip(self, prompt, run_config), fields(session_id = %self.session_id))]
+    async fn execute_inner(
+        &self,
+        prompt: &str,
+        run_config: Option<&RunConfig>,
+    ) -> crate::Result<AgentResult> {
+        let _guard = self.state.acquire_execution().await?;
 
         // Propagate EventBus to Session and its inner Graph so that
         // SessionChanged, BranchForked, and CheckpointCreated events fire.
-        if let Some(ref bus) = self.event_bus {
+        if let Some(ref bus) = self.runtime.event_bus {
             self.state.with_event_bus(Arc::clone(bus)).await;
         }
 
@@ -121,6 +149,7 @@ impl Agent {
 
         let session_start_input = HookInput::session_start(&*self.session_id);
         if let Err(e) = self
+            .runtime
             .hooks
             .execute(HookEvent::SessionStart, session_start_input, &hook_ctx)
             .await
@@ -136,6 +165,7 @@ impl Agent {
 
         let prompt_input = HookInput::user_prompt_submit(&*self.session_id, &final_prompt);
         let prompt_output = self
+            .runtime
             .hooks
             .execute(HookEvent::UserPromptSubmit, prompt_input, &hook_ctx)
             .await?;
@@ -143,6 +173,7 @@ impl Agent {
         if !prompt_output.continue_execution {
             let session_end_input = HookInput::session_end(&*self.session_id);
             if let Err(e) = self
+                .runtime
                 .hooks
                 .execute(HookEvent::SessionEnd, session_end_input, &hook_ctx)
                 .await
@@ -157,10 +188,8 @@ impl Agent {
         }
 
         self.state
-            .with_session_mut(|session| {
-                session.add_user_message(&final_prompt);
-            })
-            .await;
+            .with_session_mut(|session| session.add_user_message(&final_prompt))
+            .await?;
         self.persist_session_state().await?;
 
         let mut metrics = AgentMetrics::default();
@@ -170,9 +199,9 @@ impl Agent {
         let mut total_usage = Usage::default();
 
         if maybe_invoke_explicit_skill_command(
-            &self.tools,
+            &self.runtime.tools,
             &self.state,
-            &self.hooks,
+            &self.runtime.hooks,
             &hook_ctx,
             &self.session_id,
             &final_prompt,
@@ -184,7 +213,7 @@ impl Agent {
         }
 
         let mut request_builder = {
-            let static_context = match &self.orchestrator {
+            let static_context = match &self.runtime.orchestrator {
                 Some(orchestrator) => orchestrator.read().await.static_context().clone(),
                 None => crate::context::StaticContext::new(),
             };
@@ -198,13 +227,16 @@ impl Agent {
                     )
                 })
                 .await;
-            let builder =
-                RequestBuilder::new(&self.config, Arc::clone(&self.tools), static_context)
-                    .metadata(metadata);
+            let builder = RequestBuilder::new(
+                &self.runtime.config,
+                Arc::clone(&self.runtime.tools),
+                static_context,
+            )
+            .metadata(metadata);
 
-            if let Some(ref tsm) = self.tool_search_manager {
+            if let Some(ref tsm) = self.runtime.tool_search_manager {
                 let prepared = tsm
-                    .prepare_tools_for_access(&self.config.security.tool_surface)
+                    .prepare_tools_for_access(&self.runtime.config.security.tool_surface)
                     .await;
                 if prepared.use_search {
                     info!(
@@ -219,26 +251,45 @@ impl Agent {
                 builder
             }
         };
-        let max_tokens = context_window::for_model(&self.config.model.primary);
+        // Apply RunConfig overrides.
+        if let Some(rc) = run_config {
+            if let Some(model) = rc.model_override() {
+                request_builder.set_model(model);
+            }
+            if let Some(max_tokens) = rc.max_tokens_override() {
+                request_builder.set_max_tokens(max_tokens);
+            }
+            if let Some(prompt) = rc.system_prompt_override() {
+                request_builder.set_system_prompt_override(prompt);
+            }
+        }
+
+        let effective_max_iterations = run_config
+            .map(|rc| rc.effective_max_iterations(self.runtime.config.execution.max_iterations))
+            .unwrap_or(self.runtime.config.execution.max_iterations);
+
+        let max_tokens = context_window::for_model(&self.runtime.config.model.primary);
 
         info!(prompt_len = final_prompt.len(), "Starting agent execution");
 
         loop {
+            if self.runtime.shutdown.is_cancelled() {
+                self.persist_session_state().await?;
+                break;
+            }
+
             metrics.iterations += 1;
-            if metrics.iterations > self.config.execution.max_iterations {
-                warn!(
-                    max = self.config.execution.max_iterations,
-                    "Max iterations reached"
-                );
+            if metrics.iterations > effective_max_iterations {
+                warn!(max = effective_max_iterations, "Max iterations reached");
                 break;
             }
 
             self.check_budget()?;
 
             let budget_ctx = BudgetContext {
-                tracker: &self.budget_tracker,
-                tenant: self.tenant_budget.as_deref(),
-                config: &self.config.budget,
+                tracker: &self.runtime.budget_tracker,
+                tenant: self.runtime.tenant_budget.as_deref(),
+                config: &self.runtime.config.budget,
             };
             if let Some(fallback) = budget_ctx.fallback_model() {
                 request_builder.set_model(fallback);
@@ -249,7 +300,9 @@ impl Agent {
             let messages = self
                 .state
                 .with_session(|session| {
-                    session.to_api_messages_with_cache(self.config.cache.conversation_ttl_option())
+                    session.to_api_messages_with_cache(
+                        self.runtime.config.cache.conversation_ttl_option(),
+                    )
                 })
                 .await;
 
@@ -261,6 +314,7 @@ impl Agent {
                 request_builder.has_tools(),
             );
             match self
+                .runtime
                 .hooks
                 .execute(HookEvent::ModelSelection, model_input, &hook_ctx)
                 .await
@@ -289,6 +343,7 @@ impl Agent {
                 request_builder.current_model(),
             );
             let pre_msg_output = self
+                .runtime
                 .hooks
                 .execute(HookEvent::PreMessage, pre_msg_input, &hook_ctx)
                 .await?;
@@ -303,7 +358,7 @@ impl Agent {
 
             let api_start = Instant::now();
             let request = request_builder.build(messages, &dynamic_rules_context);
-            let response = self.client.send_with_auth_retry(request).await?;
+            let response = self.runtime.client.send_with_auth_retry(request).await?;
             let api_duration_ms = api_start.elapsed().as_millis() as u64;
             metrics.record_api_call_with_timing(api_duration_ms);
             debug!(api_time_ms = api_duration_ms, "API call completed");
@@ -318,6 +373,7 @@ impl Agent {
                 response.usage.output_tokens,
             );
             let _ = self
+                .runtime
                 .hooks
                 .execute(HookEvent::PostMessage, post_msg_input, &hook_ctx)
                 .await;
@@ -325,22 +381,22 @@ impl Agent {
             accumulate_response_usage(
                 &mut total_usage,
                 &mut metrics,
-                &self.budget_tracker,
-                self.tenant_budget.as_deref(),
-                &self.config.model.primary,
+                &self.runtime.budget_tracker,
+                self.runtime.tenant_budget.as_deref(),
+                &self.runtime.config.model.primary,
                 &response.usage,
             );
 
             emit_tokens_consumed(
-                self.event_bus.as_deref(),
+                self.runtime.event_bus.as_deref(),
                 &response.usage,
-                &self.config.model.primary,
+                &self.runtime.config.model.primary,
             );
 
             maybe_emit_budget_alert(
-                &self.budget_tracker,
-                self.event_bus.as_deref(),
-                self.config.budget.alert_threshold_pct,
+                &self.runtime.budget_tracker,
+                self.runtime.event_bus.as_deref(),
+                self.runtime.config.budget.alert_threshold_pct,
             );
 
             final_text = response.text();
@@ -358,9 +414,9 @@ impl Agent {
                         response.content.clone(),
                         Some(response.usage),
                         assistant_metadata,
-                    );
+                    )
                 })
-                .await;
+                .await?;
             self.persist_session_state().await?;
 
             if !response.wants_tool_use() {
@@ -381,6 +437,7 @@ impl Agent {
                     tool_use.input.clone(),
                 );
                 let pre_output = self
+                    .runtime
                     .hooks
                     .execute(HookEvent::PreToolUse, pre_input, &hook_ctx)
                     .await?;
@@ -416,9 +473,9 @@ impl Agent {
                 }
             }
 
-            let context_scope = self.context_scope.clone();
+            let context_scope = self.runtime.context_scope.clone();
             let tool_futures = prepared.into_iter().map(|(id, name, input)| {
-                let tools = &self.tools;
+                let tools = &self.runtime.tools;
                 let context_scope = context_scope.clone();
                 async move {
                     let start = Instant::now();
@@ -450,7 +507,7 @@ impl Agent {
                     &self.state,
                     &mut total_usage,
                     &mut metrics,
-                    &self.budget_tracker,
+                    &self.runtime.budget_tracker,
                     &result,
                     &name,
                 )
@@ -459,13 +516,13 @@ impl Agent {
                 try_activate_dynamic_rules(
                     &name,
                     &input,
-                    &self.orchestrator,
+                    &self.runtime.orchestrator,
                     &mut dynamic_rules_context,
                 )
                 .await;
 
                 run_post_tool_hooks(
-                    &self.hooks,
+                    &self.runtime.hooks,
                     &hook_ctx,
                     &self.session_id,
                     &name,
@@ -474,7 +531,12 @@ impl Agent {
                 )
                 .await;
 
-                emit_tool_executed(self.event_bus.as_deref(), &name, duration_ms, is_error);
+                emit_tool_executed(
+                    self.runtime.event_bus.as_deref(),
+                    &name,
+                    duration_ms,
+                    is_error,
+                );
 
                 self.state
                     .record_tool_execution(
@@ -489,10 +551,8 @@ impl Agent {
             }
 
             self.state
-                .with_session_mut(|session| {
-                    session.add_tool_results(results);
-                })
-                .await;
+                .with_session_mut(|session| session.add_tool_results(results))
+                .await?;
             self.persist_session_state().await?;
 
             if all_non_retryable {
@@ -502,15 +562,15 @@ impl Agent {
 
             handle_compaction(
                 &self.state,
-                &self.client,
-                &self.tools,
-                &self.hooks,
+                &self.runtime.client,
+                &self.runtime.tools,
+                &self.runtime.hooks,
                 &hook_ctx,
                 &self.session_id,
-                &self.config.execution,
+                &self.runtime.config.execution,
                 max_tokens,
                 &mut metrics,
-                self.event_bus.as_deref(),
+                self.runtime.event_bus.as_deref(),
             )
             .await;
             self.persist_session_state().await?;
@@ -518,7 +578,7 @@ impl Agent {
 
         metrics.execution_time_ms = execution_start.elapsed().as_millis() as u64;
 
-        run_stop_hooks(&self.hooks, &hook_ctx, &self.session_id).await;
+        run_stop_hooks(&self.runtime.hooks, &hook_ctx, &self.session_id).await;
 
         info!(
             iterations = metrics.iterations,
@@ -549,16 +609,16 @@ impl Agent {
 
     pub(crate) fn hook_context(&self) -> HookContext {
         let ctx = HookContext::new(&*self.session_id)
-            .cwd(self.config.working_dir.clone().unwrap_or_default())
-            .env(self.config.security.env.clone());
-        match self.context_scope {
+            .cwd(self.runtime.config.working_dir.clone().unwrap_or_default())
+            .env(self.runtime.config.security.env.clone());
+        match self.runtime.context_scope {
             Some(ref scope) => ctx.context_scope(Arc::clone(scope)),
             None => ctx,
         }
     }
 
     fn extract_structured_output(&self, text: &str) -> Option<serde_json::Value> {
-        common::extract_structured_output(self.config.prompt.output_schema.as_ref(), text)
+        common::extract_structured_output(self.runtime.config.prompt.output_schema.as_ref(), text)
     }
 }
 

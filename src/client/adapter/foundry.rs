@@ -7,7 +7,7 @@ use async_trait::async_trait;
 use azure_core::credentials::TokenCredential;
 use azure_identity::DeveloperToolsCredential;
 
-use super::base::RequestExecutor;
+use super::base::RequestService;
 use super::config::ProviderConfig;
 use super::request::build_messages_body;
 use super::token_cache::{CachedToken, TokenCache, new_token_cache};
@@ -133,7 +133,7 @@ impl FoundryAdapter {
             (header_name, header_value),
             ("anthropic-version".into(), ANTHROPIC_VERSION.into()),
         ];
-        RequestExecutor::post(http, url, body, headers).await
+        RequestService::post(http, url, body, headers).await
     }
 }
 

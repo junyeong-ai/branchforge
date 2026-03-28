@@ -8,9 +8,9 @@ use crate::session::session_state::ToolState;
 
 #[derive(Clone)]
 pub struct ToolExecutionEnv {
-    pub context: ExecutionContext,
-    pub tool_state: Option<ToolState>,
-    pub process_manager: Option<Arc<ProcessManager>>,
+    context: ExecutionContext,
+    tool_state: Option<ToolState>,
+    process_manager: Option<Arc<ProcessManager>>,
 }
 
 impl ToolExecutionEnv {
@@ -22,14 +22,26 @@ impl ToolExecutionEnv {
         }
     }
 
-    pub fn tool_state(mut self, state: ToolState) -> Self {
+    pub fn with_tool_state(mut self, state: ToolState) -> Self {
         self.tool_state = Some(state);
         self
     }
 
-    pub fn process_manager(mut self, pm: Arc<ProcessManager>) -> Self {
+    pub fn with_process_manager(mut self, pm: Arc<ProcessManager>) -> Self {
         self.process_manager = Some(pm);
         self
+    }
+
+    pub fn context(&self) -> &ExecutionContext {
+        &self.context
+    }
+
+    pub fn tool_state(&self) -> Option<&ToolState> {
+        self.tool_state.as_ref()
+    }
+
+    pub fn process_manager(&self) -> Option<&Arc<ProcessManager>> {
+        self.process_manager.as_ref()
     }
 }
 

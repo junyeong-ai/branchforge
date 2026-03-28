@@ -50,7 +50,7 @@ mod security_tests {
     async fn test_security_bash_dangerous_blocked() {
         use branchforge::tools::{BashTool, ExecutionContext, Tool};
 
-        let tool = BashTool::new();
+        let tool = BashTool::default();
         let security = SecurityContext::builder()
             .root(".")
             .build()
@@ -235,8 +235,8 @@ mod network_sandbox_tests {
     #[test]
     fn test_network_sandbox_wildcards() {
         let sandbox = NetworkSandbox::new()
-            .allowed_domains(vec!["*.example.com".to_string()])
-            .blocked_domains(vec!["*.malware.com".to_string()]);
+            .with_allowed_domains(vec!["*.example.com".to_string()])
+            .with_blocked_domains(vec!["*.malware.com".to_string()]);
 
         assert_eq!(sandbox.check("sub.example.com"), DomainCheck::Allowed);
         assert_eq!(sandbox.check("sub.malware.com"), DomainCheck::Blocked);
@@ -245,8 +245,8 @@ mod network_sandbox_tests {
     #[test]
     fn test_network_sandbox_block_precedence() {
         let sandbox = NetworkSandbox::new()
-            .allowed_domains(vec!["example.com".to_string()])
-            .blocked_domains(vec!["example.com".to_string()]);
+            .with_allowed_domains(vec!["example.com".to_string()])
+            .with_blocked_domains(vec!["example.com".to_string()]);
 
         assert_eq!(sandbox.check("example.com"), DomainCheck::Blocked);
     }

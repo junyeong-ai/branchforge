@@ -55,5 +55,13 @@ pub use crate::HookContext;
 pub use crate::HookEvent;
 pub use crate::HookManager;
 
+// Authorization
+pub use crate::ExecutionMode;
+pub use crate::ToolPolicy;
+
+// Agent runtime
+pub use crate::AgentRuntime;
+pub use crate::RunConfig;
+
 // Output
 pub use crate::OutputStyle;

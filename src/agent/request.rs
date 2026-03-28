@@ -79,6 +79,15 @@ impl RequestBuilder {
         self.model = model.to_string();
     }
 
+    pub fn set_max_tokens(&mut self, max_tokens: u32) {
+        self.max_tokens = max_tokens;
+    }
+
+    pub fn set_system_prompt_override(&mut self, prompt: &str) {
+        self.custom_system_prompt = Some(prompt.to_string());
+        self.system_prompt_mode = SystemPromptMode::Replace;
+    }
+
     pub fn build(&self, messages: Vec<Message>, dynamic_rules: &str) -> CreateMessageRequest {
         let prepared_tools = self.prepare_request_tools();
         let system_prompt = self.build_system_prompt_blocks(dynamic_rules, &prepared_tools);

@@ -63,7 +63,6 @@ pub mod common;
 pub mod config;
 pub mod context;
 pub mod context_scope;
-pub mod credentials;
 pub mod events;
 pub mod graph;
 pub mod hooks;
@@ -74,10 +73,7 @@ pub mod output_style;
 #[cfg(feature = "plugins")]
 pub mod plugins;
 pub mod prelude;
-pub mod prompting;
 pub mod prompts;
-pub mod provider;
-pub mod runtime;
 pub mod security;
 pub mod session;
 pub mod skills;
@@ -90,20 +86,22 @@ pub mod types;
 // Core API re-exports (user-facing types)
 // =========================================================================
 
-pub use agent::{Agent, AgentBuilder, AgentConfig, AgentEvent, AgentResult};
+pub use agent::{
+    Agent, AgentBuilder, AgentConfig, AgentEvent, AgentResult, AgentRuntime, RunConfig,
+};
+pub use agent::{RunDescriptor, RuntimeEventRecorder};
 pub use auth::{Auth, Credential};
+pub use auth::{CredentialKind, CredentialRecord};
 pub use authorization::{ExecutionMode, ToolPolicy};
+pub use client::{CapabilitySupport, ProviderProfile};
 pub use client::{Client, ClientBuilder};
+pub use context::PromptFrame;
 pub use context_scope::{ContextScope, SharedContextScope};
-pub use credentials::{CredentialKind, CredentialRecord};
 pub use graph::{
     Bookmark, Branch, BranchExport, BranchId, Checkpoint, ExportBookmark, ExportNode, GraphError,
     GraphEvent, GraphEventBody, GraphMaterializer, GraphNode, NodeId, NodeKind, ReplayInput,
     SessionGraph,
 };
-pub use prompting::PromptFrame;
-pub use provider::{CapabilitySupport, ProviderProfile};
-pub use runtime::{RunDescriptor, RuntimeEventRecorder};
 pub use tools::{ExecutionContext, SchemaTool, Tool, ToolRegistry, ToolSurface};
 pub use types::{ContentBlock, Message, Role, ToolDefinition, ToolError, ToolOutput, ToolResult};
 

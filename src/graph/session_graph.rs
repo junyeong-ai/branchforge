@@ -34,12 +34,20 @@ impl SessionGraph {
     }
 
     /// Walk up the parent chain from a node to compute its depth in the tree.
+    ///
+    /// If a cycle is detected in the parent chain, traversal stops early to
+    /// avoid infinite loops.
     pub fn node_depth(&self, node_id: NodeId) -> usize {
         let mut depth = 0;
-        let mut current = self.nodes.get(&node_id).and_then(|node| node.parent_id);
-        while let Some(parent_id) = current {
+        let mut visited = std::collections::HashSet::new();
+        visited.insert(node_id);
+        let mut current = self.nodes.get(&node_id).and_then(|n| n.parent_id);
+        while let Some(id) = current {
+            if !visited.insert(id) {
+                break; // cycle detected
+            }
             depth += 1;
-            current = self.nodes.get(&parent_id).and_then(|node| node.parent_id);
+            current = self.nodes.get(&id).and_then(|n| n.parent_id);
         }
         depth
     }

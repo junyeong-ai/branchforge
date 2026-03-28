@@ -9,7 +9,7 @@ use super::state_formatter::format_todo_summary;
 use super::{AgentConfig, AgentState};
 use crate::Client;
 use crate::authorization::ToolPolicy;
-use crate::client::{DEFAULT_SMALL_MODEL, GatewayConfig, ModelConfig, ProviderConfig};
+use crate::client::{DEFAULT_FAST_MODEL, GatewayConfig, ModelConfig, ProviderConfig};
 use crate::common::{ContentSource, IndexRegistry};
 use crate::context::{PromptOrchestrator, StaticContext};
 use crate::hooks::{HookContext, HookEvent, HookInput, HookManager, HookOutput};
@@ -302,14 +302,14 @@ fn test_session_messages_basic() {
     let mut session = Session::new(SessionConfig::default());
     assert!(session.current_branch_messages().is_empty());
 
-    session.add_user_message("Hello");
+    session.add_user_message("Hello").unwrap();
     assert_eq!(session.current_branch_messages().len(), 1);
 }
 
 #[test]
 fn test_session_usage_update() {
     let mut session = Session::new(SessionConfig::default());
-    session.add_user_message("Test");
+    session.add_user_message("Test").unwrap();
 
     session.update_usage(&Usage {
         input_tokens: 100,
@@ -437,7 +437,7 @@ async fn mock_client_with_message(text: &str) -> (MockServer, Client) {
 
     let config = ProviderConfig::new(ModelConfig::new(
         "claude-sonnet-4-5-20250514",
-        DEFAULT_SMALL_MODEL,
+        DEFAULT_FAST_MODEL,
     ))
     .max_tokens(1024);
     let client = Client::builder()
@@ -476,7 +476,7 @@ async fn test_execute_persists_live_session_when_session_manager_is_configured()
     let result = agent.execute("hello persistence").await.unwrap();
     assert_eq!(result.text(), "persisted reply");
 
-    let session_id = SessionId::parse(agent.get_session_id()).unwrap();
+    let session_id = SessionId::parse(agent.session_id()).unwrap();
     let stored = manager.scoped(scope).get(&session_id).await.unwrap();
     let messages = stored.current_branch_messages();
     assert_eq!(messages.len(), 2);
@@ -505,7 +505,7 @@ async fn test_execute_routes_explicit_manual_only_skill_before_model_request() {
     );
 
     let orchestrator = PromptOrchestrator::new(StaticContext::new(), "claude-sonnet-4-5")
-        .skill_registry(skill_registry);
+        .with_skill_registry(skill_registry);
 
     let agent = Agent::from_parts(
         Arc::new(client),
@@ -561,7 +561,7 @@ async fn test_execute_routes_explicit_skill_with_default_authorization_mode() {
     );
 
     let orchestrator = PromptOrchestrator::new(StaticContext::new(), "claude-sonnet-4-5")
-        .skill_registry(skill_registry);
+        .with_skill_registry(skill_registry);
 
     let agent = Agent::from_parts(
         Arc::new(client),
@@ -606,7 +606,7 @@ async fn test_execute_explicit_skill_respects_deny_rule() {
     );
 
     let orchestrator = PromptOrchestrator::new(StaticContext::new(), "claude-sonnet-4-5")
-        .skill_registry(skill_registry);
+        .with_skill_registry(skill_registry);
 
     let agent = Agent::from_parts(
         Arc::new(client),

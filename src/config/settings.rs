@@ -33,10 +33,10 @@ pub struct Settings {
     pub env: HashMap<String, String>,
 
     #[serde(default)]
-    pub authorization: AuthorizationSettings,
+    pub authorization: AuthorizationConfig,
 
     #[serde(default)]
-    pub sandbox: SandboxSettings,
+    pub sandbox: SandboxConfig,
 
     #[serde(default, rename = "mcpServers")]
     pub mcp_servers: HashMap<String, serde_json::Value>,
@@ -51,7 +51,7 @@ pub struct Settings {
     pub max_tokens: Option<u32>,
 
     #[serde(default)]
-    pub hooks: Option<HooksSettings>,
+    pub hooks: Option<HooksConfig>,
 
     #[serde(default, rename = "outputStyle")]
     pub output_style: Option<String>,
@@ -66,7 +66,7 @@ pub struct Settings {
     pub api_key_helper: Option<String>,
 
     #[serde(default, rename = "toolSearch")]
-    pub tool_search: ToolSearchSettings,
+    pub tool_search: ToolSearchConfig,
 
     #[serde(flatten)]
     pub extra: HashMap<String, serde_json::Value>,
@@ -84,7 +84,7 @@ impl Settings {
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct HooksSettings {
+pub struct HooksConfig {
     #[serde(default, rename = "PreToolUse")]
     pub pre_tool_use: HashMap<String, HookConfig>,
 
@@ -112,7 +112,7 @@ pub enum HookConfig {
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct AuthorizationSettings {
+pub struct AuthorizationConfig {
     #[serde(default)]
     pub deny: Vec<String>,
     #[serde(default)]
@@ -121,7 +121,7 @@ pub struct AuthorizationSettings {
     pub default_mode: Option<String>,
 }
 
-impl AuthorizationSettings {
+impl AuthorizationConfig {
     pub fn to_policy(&self) -> crate::authorization::ToolPolicy {
         use crate::authorization::ToolPolicy;
 
@@ -144,12 +144,12 @@ impl AuthorizationSettings {
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct SandboxSettings {
+pub struct SandboxConfig {
     #[serde(default)]
     pub enabled: bool,
 
     #[serde(default)]
-    pub network: NetworkSandboxSettings,
+    pub network: NetworkSandboxConfig,
 
     #[serde(default, rename = "excludedCommands")]
     pub excluded_commands: Vec<String>,
@@ -161,7 +161,7 @@ pub struct SandboxSettings {
     pub auto_allow_bash_if_sandboxed: Option<bool>,
 }
 
-impl SandboxSettings {
+impl SandboxConfig {
     /// Convert settings to SandboxConfig for use with SecurityContext.
     ///
     /// # Default Behaviors
@@ -205,7 +205,7 @@ impl SandboxSettings {
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct NetworkSandboxSettings {
+pub struct NetworkSandboxConfig {
     #[serde(default, rename = "allowedDomains")]
     pub allowed_domains: HashSet<String>,
 
@@ -220,7 +220,7 @@ pub struct NetworkSandboxSettings {
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct ToolSearchSettings {
+pub struct ToolSearchConfig {
     #[serde(default)]
     pub enabled: Option<bool>,
 
@@ -237,7 +237,7 @@ pub struct ToolSearchSettings {
     pub always_load: Option<Vec<String>>,
 }
 
-impl ToolSearchSettings {
+impl ToolSearchConfig {
     pub fn is_enabled(&self) -> bool {
         self.enabled.unwrap_or(true)
     }
@@ -542,7 +542,7 @@ mod tests {
 
     #[test]
     fn test_authorization_settings_to_policy() {
-        let settings = AuthorizationSettings {
+        let settings = AuthorizationConfig {
             deny: vec!["Bash(rm:*)".to_string()],
             allow: vec!["Bash(git:*)".to_string()],
             default_mode: Some("auto".to_string()),
@@ -554,10 +554,10 @@ mod tests {
 
     #[test]
     fn test_authorization_settings_is_empty() {
-        let empty = AuthorizationSettings::default();
+        let empty = AuthorizationConfig::default();
         assert!(empty.is_empty());
 
-        let with_deny = AuthorizationSettings {
+        let with_deny = AuthorizationConfig {
             deny: vec!["Bash".to_string()],
             ..Default::default()
         };
@@ -566,13 +566,13 @@ mod tests {
 
     #[test]
     fn test_sandbox_settings_enabled() {
-        let settings = SandboxSettings {
+        let settings = SandboxConfig {
             enabled: true,
             ..Default::default()
         };
         assert!(settings.is_enabled());
 
-        let disabled = SandboxSettings::default();
+        let disabled = SandboxConfig::default();
         assert!(!disabled.is_enabled());
     }
 
@@ -580,9 +580,9 @@ mod tests {
     fn test_sandbox_settings_to_sandbox_config() {
         use std::path::PathBuf;
 
-        let settings = SandboxSettings {
+        let settings = SandboxConfig {
             enabled: true,
-            network: NetworkSandboxSettings {
+            network: NetworkSandboxConfig {
                 allowed_domains: ["example.com".to_string()].into_iter().collect(),
                 blocked_domains: ["malware.com".to_string()].into_iter().collect(),
                 ..Default::default()
@@ -604,7 +604,7 @@ mod tests {
 
     #[test]
     fn test_tool_search_settings_default() {
-        let settings = ToolSearchSettings::default();
+        let settings = ToolSearchConfig::default();
         assert!(settings.is_empty());
         assert!(settings.is_enabled()); // Default is enabled
     }
@@ -613,7 +613,7 @@ mod tests {
     fn test_tool_search_settings_to_config() {
         use crate::tools::SearchMode;
 
-        let settings = ToolSearchSettings {
+        let settings = ToolSearchConfig {
             enabled: Some(true),
             threshold: Some(0.15),
             mode: Some("bm25".to_string()),
@@ -632,7 +632,7 @@ mod tests {
     fn test_tool_search_settings_regex_mode() {
         use crate::tools::SearchMode;
 
-        let settings = ToolSearchSettings {
+        let settings = ToolSearchConfig {
             mode: Some("regex".to_string()),
             ..Default::default()
         };
@@ -644,7 +644,7 @@ mod tests {
 
     #[test]
     fn test_tool_search_settings_disabled() {
-        let settings = ToolSearchSettings {
+        let settings = ToolSearchConfig {
             enabled: Some(false),
             ..Default::default()
         };
@@ -659,7 +659,7 @@ mod tests {
 
         loader.merge_settings(
             Settings {
-                authorization: AuthorizationSettings {
+                authorization: AuthorizationConfig {
                     default_mode: Some("readOnly".to_string()),
                     ..Default::default()
                 },
@@ -670,7 +670,7 @@ mod tests {
 
         loader.merge_settings(
             Settings {
-                authorization: AuthorizationSettings {
+                authorization: AuthorizationConfig {
                     default_mode: Some("allowAll".to_string()),
                     ..Default::default()
                 },
