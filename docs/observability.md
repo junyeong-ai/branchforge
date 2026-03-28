@@ -51,6 +51,20 @@ Use `event.event_type()` for the type string (`"text"`, `"tool_start"`, etc.) an
 
 Events marked "Available" are defined for subscriber use but not yet emitted by the runtime. Use `EventBus::emit()` in hooks or custom code to produce them.
 
+Subscriptions return a `SubscriptionId` for manual removal, or use `subscribe_with_handle()` for RAII auto-unsubscribe:
+
+```rust
+let bus = Arc::new(EventBus::default());
+
+// Manual: returns SubscriptionId
+let id = bus.subscribe(EventKind::ToolExecuted, Arc::new(|event| { /* ... */ }));
+bus.unsubscribe(EventKind::ToolExecuted, id);
+
+// RAII: auto-unsubscribes when handle is dropped
+let handle = bus.subscribe_with_handle(EventKind::TokensConsumed, Arc::new(|event| { /* ... */ }));
+drop(handle); // subscriber removed
+```
+
 EventBus subscribers never block agent execution. Use for Prometheus metrics, structured logging, or vector store indexing.
 
 ## 4. Hook-Based Observation

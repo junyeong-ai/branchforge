@@ -38,6 +38,17 @@ The runtime treats prompt caching as three segments:
 
 This keeps graph history and prompt caching aligned without making tool execution semantics part of static context.
 
+## Agent Structure
+
+The `Agent` separates shared infrastructure from per-session state:
+
+- **`AgentRuntime`** (shared via `Arc`): `client`, `config`, `tools`, `hooks`, `budget_tracker`, `tenant_budget`, `mcp_manager`, `tool_search_manager`, `event_bus`, `execution_mode`, `context_scope`, `orchestrator`, `shutdown`
+- **`Agent`** (per-session): `runtime`, `session_id`, `state`, `initial_messages`, `session_manager`, `session_scope`
+
+This enables multi-session scenarios where a single runtime serves multiple concurrent agents.
+
+`RunConfig` provides per-execution overrides (`model`, `max_tokens`, `max_iterations`, `timeout`, `system_prompt`, `execution_mode`) without mutating the shared `AgentConfig`.
+
 ## Request Path
 
 1. `Agent` builds runtime state and prompt inputs.

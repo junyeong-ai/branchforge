@@ -30,6 +30,10 @@ Sessions are modeled as graphs, not flat chat transcripts.
 
 `RedisPersistence` is a support backend that stores full session snapshots for lightweight persistence, queue, and cache-oriented workloads. It preserves session state, but it is not the event-canonical backend.
 
+## Concurrent Session Access
+
+The `Persistence` trait provides `with_session_lock()` for atomic load-modify-save operations. Default implementations of `append_graph_event` and `add_message` use this method to prevent race conditions when multiple agents access the same session concurrently. `MemoryPersistence` overrides it with an internal write lock for true atomicity.
+
 ## Compaction Policy
 
 Compaction preserves graph history.

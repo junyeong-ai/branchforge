@@ -125,6 +125,43 @@ This makes long coding sessions reusable and navigable instead of reducing them 
 
 See [Session & Graph](docs/session.md) for details.
 
+## Runtime Architecture
+
+The agent separates shared infrastructure from per-session state:
+
+```rust
+use branchforge::{Agent, AgentRuntime, RunConfig};
+use std::sync::Arc;
+
+// AgentRuntime holds client, config, tools, hooks — shared across sessions.
+let agent = Agent::builder()
+    .auth(Auth::from_env()).await?
+    .tools(ToolSurface::core())
+    .build()
+    .await?;
+
+// Per-execution overrides via RunConfig — no need to rebuild the agent.
+let result = agent
+    .execute_with(
+        "Summarize this file",
+        RunConfig::new()
+            .model("claude-haiku-4-5-20251001")
+            .max_iterations(3)
+            .system_prompt("Be concise."),
+    )
+    .await?;
+
+// Graceful shutdown via CancellationToken.
+agent.shutdown_token().cancel();
+```
+
+Key capabilities:
+
+- **AgentRuntime**: shared infrastructure (`client`, `config`, `tools`, `hooks`, `budget`) wrapped in `Arc` for multi-session use
+- **RunConfig**: per-execution overrides for `model`, `max_tokens`, `max_iterations`, `timeout`, `system_prompt`, `execution_mode`
+- **Graceful shutdown**: cooperative cancellation via `CancellationToken` with session state persistence
+- **EventBus subscriptions**: `SubscriptionHandle` with RAII auto-unsubscribe on drop
+
 ## Tooling
 
 The default runtime exposes a minimal core tool surface. Optional workflow tools can be enabled when needed.

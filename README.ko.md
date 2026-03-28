@@ -94,6 +94,8 @@ async fn main() -> branchforge::Result<()> {
 - AWS Bedrock
 - Google Vertex AI
 - Azure AI Foundry
+- OpenAI (GPT-4o, o3, 호환 엔드포인트)
+- Google Gemini
 
 예시:
 
@@ -122,6 +124,43 @@ let agent = branchforge::Agent::builder()
 이 구조 덕분에 긴 코딩 세션을 단순 로그가 아니라 재개 가능한 작업 기록으로 다룰 수 있습니다.
 
 상세 내용은 [세션 & 그래프](docs/session.md)를 참고하세요.
+
+## 런타임 아키텍처
+
+에이전트는 공유 인프라와 세션별 상태를 분리합니다.
+
+```rust
+use branchforge::{Agent, AgentRuntime, RunConfig};
+use std::sync::Arc;
+
+// AgentRuntime은 client, config, tools, hooks를 보유 — 세션 간 공유 가능
+let agent = Agent::builder()
+    .auth(Auth::from_env()).await?
+    .tools(ToolSurface::core())
+    .build()
+    .await?;
+
+// RunConfig로 실행별 오버라이드 — 에이전트를 재생성할 필요 없음
+let result = agent
+    .execute_with(
+        "이 파일을 요약해줘",
+        RunConfig::new()
+            .model("claude-haiku-4-5-20251001")
+            .max_iterations(3)
+            .system_prompt("간결하게 답해."),
+    )
+    .await?;
+
+// CancellationToken을 통한 graceful shutdown
+agent.shutdown_token().cancel();
+```
+
+주요 기능:
+
+- **AgentRuntime**: 공유 인프라(`client`, `config`, `tools`, `hooks`, `budget`)를 `Arc`로 감싸 멀티세션 사용
+- **RunConfig**: 실행별 `model`, `max_tokens`, `max_iterations`, `timeout`, `system_prompt`, `execution_mode` 오버라이드
+- **Graceful shutdown**: `CancellationToken` 기반 협력적 취소, 세션 상태 저장 후 종료
+- **EventBus 구독**: `SubscriptionHandle`의 RAII 패턴으로 Drop 시 자동 구독 해제
 
 ## 도구 시스템
 

@@ -66,6 +66,21 @@ let agent = Agent::builder()
 
 When a tool requires review, the agent emits `AgentEvent::ToolReview` with the tool name and input.
 
+## Input Extractors
+
+`ToolPolicy` uses `InputExtractor` traits to determine which field to match for scoped patterns. Built-in extractors cover standard tools; custom tools can register their own:
+
+```rust
+use branchforge::authorization::{FieldExtractor, InputExtractor};
+use branchforge::ToolPolicy;
+use std::sync::Arc;
+
+let mut policy = ToolPolicy::new();
+policy.register_extractor("MyTool", Arc::new(FieldExtractor("target_path")));
+```
+
+Default extractors: `Bash→command`, `Read/Write/Edit→file_path`, `Glob/Grep→path`, `Skill→skill`.
+
 ## Decision Flow
 
 1. **ToolPolicy** evaluates allow/deny rules → `Allow` or `Deny`
