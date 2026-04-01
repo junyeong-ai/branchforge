@@ -12,6 +12,8 @@ mod helper;
 mod provider;
 mod providers;
 #[cfg(feature = "cli-auth")]
+pub(crate) mod refresh;
+#[cfg(feature = "cli-auth")]
 mod storage;
 
 use std::sync::Arc;

@@ -18,6 +18,37 @@ impl FileStorage {
         BaseDirs::new().map(|dirs| dirs.home_dir().join(CLAUDE_DIR).join(CREDENTIALS_FILE))
     }
 
+    /// Save credentials to file using atomic write (temp + rename).
+    pub async fn save(credentials: &CliCredentials) -> Result<()> {
+        let path = Self::credentials_path()
+            .ok_or_else(|| crate::Error::auth("Cannot determine credentials path"))?;
+
+        let content = serde_json::to_string_pretty(credentials)
+            .map_err(|e| crate::Error::auth(format!("Failed to serialize credentials: {}", e)))?;
+
+        // Atomic write: write to temp file, then rename
+        let tmp = path.with_extension("tmp");
+        tokio::fs::write(&tmp, &content)
+            .await
+            .map_err(|e| crate::Error::auth(format!("Failed to write credentials: {}", e)))?;
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            tokio::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600))
+                .await
+                .map_err(|e| {
+                    crate::Error::auth(format!("Failed to set credentials permissions: {}", e))
+                })?;
+        }
+
+        tokio::fs::rename(&tmp, &path)
+            .await
+            .map_err(|e| crate::Error::auth(format!("Failed to finalize credentials: {}", e)))?;
+
+        Ok(())
+    }
+
     /// Load credentials from file.
     pub async fn load() -> Result<Option<CliCredentials>> {
         let Some(path) = Self::credentials_path() else {

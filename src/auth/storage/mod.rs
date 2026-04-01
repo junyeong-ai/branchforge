@@ -29,6 +29,23 @@ impl CliCredentials {
     }
 }
 
+/// Save CLI credentials to platform-specific storage.
+///
+/// Always saves to file. On macOS, also attempts to save to Keychain
+/// (logs a warning on failure since file storage is the fallback).
+pub async fn save_cli_credentials(credentials: &CliCredentials) -> Result<()> {
+    FileStorage::save(credentials).await?;
+
+    #[cfg(target_os = "macos")]
+    {
+        if let Err(e) = KeychainStorage::save(credentials).await {
+            tracing::warn!("Failed to save to keychain, file storage used: {}", e);
+        }
+    }
+
+    Ok(())
+}
+
 /// Load CLI credentials from platform-specific storage.
 pub async fn load_cli_credentials() -> Result<Option<CliCredentials>> {
     #[cfg(target_os = "macos")]
