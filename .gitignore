@@ -50,5 +50,7 @@ doc/
 *~
 
 # Claude Code / AI tools
-.claude/
+.claude/*
+!.claude/rules/
+!.claude/CLAUDE.md
 .specify/

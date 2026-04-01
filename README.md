@@ -49,7 +49,7 @@ The project is designed around:
 
 ```toml
 [dependencies]
-branchforge = "0.2"
+branchforge = "0.3"
 tokio = { version = "1", features = ["full"] }
 ```
 
