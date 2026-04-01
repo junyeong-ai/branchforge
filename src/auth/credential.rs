@@ -84,7 +84,11 @@ impl fmt::Debug for OAuthCredential {
 impl OAuthCredential {
     pub fn expires_at_datetime(&self) -> Option<DateTime<Utc>> {
         self.expires_at.and_then(|ts| {
-            DateTime::from_timestamp(ts, 0).or_else(|| {
+            // Claude Code CLI stores expires_at in milliseconds,
+            // while standard OAuth2 uses seconds. Detect and normalize:
+            // timestamps > year 2100 in seconds (~4102444800) are likely milliseconds.
+            let ts_secs = if ts > 4_102_444_800 { ts / 1000 } else { ts };
+            DateTime::from_timestamp(ts_secs, 0).or_else(|| {
                 tracing::warn!(
                     timestamp = ts,
                     "Invalid expires_at timestamp, treating as expired"
@@ -222,6 +226,48 @@ mod tests {
             subscription_type: None,
         };
         assert!(!future.is_expired());
+
+        // Claude Code CLI stores expires_at in milliseconds
+        let expired_ms = OAuthCredential {
+            access_token: SecretString::from("test"),
+            refresh_token: None,
+            expires_at: Some(1_000), // 1 second in ms, epoch = expired
+            scopes: vec![],
+            subscription_type: None,
+        };
+        assert!(expired_ms.is_expired());
+
+        let future_ms = OAuthCredential {
+            access_token: SecretString::from("test"),
+            refresh_token: None,
+            expires_at: Some((Utc::now().timestamp() + 3600) * 1000), // 1 hour from now in ms
+            scopes: vec![],
+            subscription_type: None,
+        };
+        assert!(!future_ms.is_expired());
+    }
+
+    #[test]
+    fn test_oauth_needs_refresh_milliseconds() {
+        // Token expiring in 2 minutes (inside 5-min window) — in milliseconds
+        let expiring_soon_ms = OAuthCredential {
+            access_token: SecretString::from("test"),
+            refresh_token: None,
+            expires_at: Some((Utc::now().timestamp() + 120) * 1000),
+            scopes: vec![],
+            subscription_type: None,
+        };
+        assert!(expiring_soon_ms.needs_refresh());
+
+        // Token expiring in 10 minutes (outside 5-min window) — in milliseconds
+        let not_yet_ms = OAuthCredential {
+            access_token: SecretString::from("test"),
+            refresh_token: None,
+            expires_at: Some((Utc::now().timestamp() + 600) * 1000),
+            scopes: vec![],
+            subscription_type: None,
+        };
+        assert!(!not_yet_ms.needs_refresh());
     }
 
     #[test]
