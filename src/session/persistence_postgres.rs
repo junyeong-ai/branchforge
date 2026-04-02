@@ -430,6 +430,7 @@ fn reconstruct_session_from_row(
         compact_history: VecDeque::from(compacts),
         graph: SessionGraph::default(),
         event_bus: None,
+        content_overrides: crate::session::state::ContentOverrides::default(),
     };
     session.graph = build_session_graph(
         session_id,

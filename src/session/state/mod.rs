@@ -22,10 +22,34 @@ use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 
 use crate::events::EventBus;
-use crate::graph::{GraphNode, NodeKind, NodeProvenance, SessionGraph};
+use crate::graph::{NodeId, GraphNode, NodeKind, NodeProvenance, SessionGraph};
 use crate::session::types::{CompactRecord, Plan, TodoItem, TodoStatus};
 use crate::session::{SessionError, SessionResult};
 use crate::types::{CacheControl, CacheTtl, ContentBlock, Message, Role, TokenUsage, Usage};
+
+/// Transient content overrides for micro-compaction.
+///
+/// Applied in `to_api_messages()` to reduce token usage without
+/// modifying the append-only graph. Keyed by graph `NodeId`.
+/// Intentionally excluded from serialization: lost on reload.
+#[derive(Clone, Debug, Default)]
+pub struct ContentOverrides {
+    replacements: std::collections::HashMap<NodeId, Vec<ContentBlock>>,
+}
+
+impl ContentOverrides {
+    pub fn new() -> Self { Self::default() }
+    pub fn is_empty(&self) -> bool { self.replacements.is_empty() }
+    pub fn len(&self) -> usize { self.replacements.len() }
+    pub fn set(&mut self, node_id: NodeId, content: Vec<ContentBlock>) {
+        self.replacements.insert(node_id, content);
+    }
+    pub fn remove(&mut self, node_id: &NodeId) { self.replacements.remove(node_id); }
+    pub fn clear(&mut self) { self.replacements.clear(); }
+    pub fn get(&self, node_id: &NodeId) -> Option<&Vec<ContentBlock>> {
+        self.replacements.get(node_id)
+    }
+}
 
 const MAX_COMPACT_HISTORY_SIZE: usize = 50;
 
@@ -61,6 +85,8 @@ pub struct Session {
     pub compact_history: VecDeque<CompactRecord>,
     #[serde(skip)]
     pub(crate) event_bus: Option<Arc<EventBus>>,
+    #[serde(skip)]
+    pub content_overrides: ContentOverrides,
 }
 
 impl Session {
@@ -142,6 +168,7 @@ impl Session {
             current_plan: None,
             compact_history: VecDeque::new(),
             event_bus: None,
+            content_overrides: ContentOverrides::default(),
         }
     }
 
@@ -371,10 +398,27 @@ impl Session {
             return Vec::new();
         }
 
-        let mut messages: Vec<Message> = branch_messages
-            .iter()
-            .map(SessionMessage::to_api_message)
-            .collect();
+        let mut messages: Vec<Message> = if self.content_overrides.is_empty() {
+            branch_messages
+                .iter()
+                .map(SessionMessage::to_api_message)
+                .collect()
+        } else {
+            branch_messages
+                .iter()
+                .map(|sm| {
+                    if let Ok(node_id) = sm.id.0.parse::<uuid::Uuid>()
+                        && let Some(replacement) = self.content_overrides.get(&node_id)
+                    {
+                        return Message {
+                            role: sm.role,
+                            content: replacement.clone(),
+                        };
+                    }
+                    sm.to_api_message()
+                })
+                .collect()
+        };
 
         if let Some(ttl) = ttl {
             self.apply_cache_breakpoint(&mut messages, ttl);
@@ -567,7 +611,7 @@ impl Session {
         client: &crate::Client,
     ) -> crate::Result<crate::types::CompactResult> {
         let executor = crate::session::compact::CompactService::new(
-            crate::session::compact::CompactStrategy::default(),
+            crate::session::compact::CompactConfig::default(),
         );
         let result = executor.execute(self, client).await?;
         if matches!(result, crate::types::CompactResult::Compacted { .. }) {
@@ -588,6 +632,40 @@ impl Session {
             .graph
             .branch_head(self.graph.primary_branch)
             .map(|node_id| MessageId::from_string(node_id.to_string()));
+    }
+
+    /// Fork this session at a specific graph node (or current head).
+    ///
+    /// Creates a new `Session` with an independent branch in the graph,
+    /// sharing the full history up to the fork point. The forked session
+    /// gets a new ID and can be executed independently.
+    ///
+    /// Use cases: A/B testing, checkpoint recovery, async analysis branches.
+    pub fn fork_at(
+        &self,
+        node_id: Option<uuid::Uuid>,
+        branch_name: Option<String>,
+    ) -> SessionResult<Session> {
+        let mut forked = self.clone();
+        forked.id = SessionId::new();
+        forked.parent_id = Some(self.id);
+        forked.state = SessionState::Created;
+        forked.error = None;
+        forked.content_overrides = ContentOverrides::new();
+        forked.created_at = Utc::now();
+        forked.updated_at = Utc::now();
+
+        let name = branch_name
+            .unwrap_or_else(|| format!("fork-{}", &forked.id.to_string()[..8]));
+        forked.graph.fork_branch(node_id, name).map_err(|e| {
+            SessionError::Storage {
+                message: format!("Failed to fork graph branch: {e}"),
+            }
+        })?;
+
+        forked.refresh_message_projection();
+
+        Ok(forked)
     }
 }
 

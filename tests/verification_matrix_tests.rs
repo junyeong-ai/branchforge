@@ -9,7 +9,7 @@ use std::path::Path;
 
 use branchforge::common::ToolRestricted;
 use branchforge::session::{
-    ArchivePolicy, CompactService, CompactStrategy, ExportPolicy, MemoryPersistence, Persistence,
+    ArchivePolicy, CompactService, CompactConfig, ExportPolicy, MemoryPersistence, Persistence,
     QueueItem, SessionArchiveService,
 };
 use branchforge::types::TokenUsage;
@@ -118,7 +118,7 @@ async fn graph_first_compaction_archive_roundtrip_preserves_identity_and_history
         .unwrap();
     session.current_input_tokens = 180_000;
 
-    let executor = CompactService::new(CompactStrategy::default());
+    let executor = CompactService::new(CompactConfig::default());
     let compact = executor
         .apply_compact(
             &mut session,

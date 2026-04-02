@@ -24,7 +24,14 @@ pub use archive::{
     ArchivePolicy, RestoreVerificationReport, RestoreVerifier, SessionArchiveBundle,
     SessionArchiveService,
 };
-pub use compact::{CompactService, CompactStrategy, DEFAULT_COMPACT_THRESHOLD};
+pub use compact::recovery::{
+    ContextRecovery, RecoveryAction, RecoveryContext, RecoveryErrorKind, RecoveryStrategy,
+};
+pub use compact::{
+    CompactConfig, CompactService, CompactionChain, CompactionChainBuilder,
+    CompactionContext, CompactionPlan, CompactionStrategy, ContentOverrideEntry, FullCompaction,
+    MicroCompaction, TimeBasedCompaction, DEFAULT_COMPACT_THRESHOLD,
+};
 pub use export::{AuditBundle, ExportPolicy, SessionExporter};
 #[cfg(feature = "postgres")]
 pub use lock::PostgresLock;
@@ -36,7 +43,7 @@ pub use lock::{
 };
 pub use manager::{ScopedSessionManager, SessionManager};
 pub use memory::{InMemoryStore, MemoryEntry, MemoryStore};
-pub use persistence::{MemoryPersistence, Persistence, PersistenceFactory};
+pub use persistence::{MemoryPersistence, Persistence, PersistenceFactory, SessionFilter};
 #[cfg(feature = "jsonl")]
 pub use persistence_jsonl::{
     JsonlConfig, JsonlConfigBuilder, JsonlEntry, JsonlPersistence, SyncMode,
@@ -51,9 +58,9 @@ pub use queue::{InputQueue, MergedInput, QueueError, QueuedInput, SharedInputQue
 pub use replay::ReplayService;
 pub use session_state::{ExecutionGuard, ExecutionState, SessionSnapshot, ToolState};
 pub use state::{
-    ExecutionMetadata, MessageId, MessageMetadata, Session, SessionAuthorization, SessionConfig,
-    SessionId, SessionMessage, SessionState, SessionToolLimits, SessionType, ThinkingMetadata,
-    ToolResultMeta,
+    ContentOverrides, ExecutionMetadata, MessageId, MessageMetadata, Session,
+    SessionAuthorization, SessionConfig, SessionId, SessionMessage, SessionState,
+    SessionToolLimits, SessionType, ThinkingMetadata, ToolResultMeta,
 };
 pub use types::{
     CompactRecord, CompactTrigger, EnvironmentContext, Plan, PlanStatus, QueueItem, QueueOperation,

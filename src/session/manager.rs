@@ -108,6 +108,19 @@ impl SessionManager {
         self.persistence.save(session).await
     }
 
+    /// Fork an existing session, creating a new independent branch.
+    pub async fn fork_session(
+        &self,
+        parent_id: &SessionId,
+        node_id: Option<uuid::Uuid>,
+        branch_name: Option<String>,
+    ) -> SessionResult<Session> {
+        let parent = self.get(parent_id).await?;
+        let forked = parent.fork_at(node_id, branch_name)?;
+        self.persistence.save(&forked).await?;
+        Ok(forked)
+    }
+
     pub async fn persist_snapshot(
         &self,
         session: &Session,

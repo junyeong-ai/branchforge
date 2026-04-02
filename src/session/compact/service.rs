@@ -5,68 +5,64 @@
 
 use serde::{Deserialize, Serialize};
 
-use super::state::{Session, SessionMessage};
-use super::types::CompactRecord;
-use super::{SessionError, SessionResult};
+use crate::session::state::{Session, SessionMessage};
+use crate::session::types::CompactRecord;
+use crate::session::{SessionError, SessionResult};
 use crate::client::DEFAULT_FAST_MODEL;
 use crate::types::{CompactResult, ContentBlock, Message, Role};
 
 /// Context usage threshold for triggering compaction (80%).
 pub const DEFAULT_COMPACT_THRESHOLD: f32 = 0.8;
 
-/// Strategy for context compaction.
+/// Configuration for context compaction.
 ///
 /// Controls when and how conversation history is summarized to fit within
-/// context limits. The `keep_coding_instructions` flag determines whether
-/// detailed coding information (code snippets, file changes, function
-/// signatures) is preserved in summaries.
-///
-/// This flag mirrors `OutputStyle::keep_coding_instructions` for consistency.
+/// context limits. The `detailed_summary` flag determines whether
+/// detailed information (file names, code snippets, error details) is
+/// preserved in summaries or replaced with a minimal overview.
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct CompactStrategy {
+pub struct CompactConfig {
     pub enabled: bool,
     pub threshold_percent: f32,
     pub summary_model: String,
     pub max_summary_tokens: u32,
-    /// When true, includes detailed coding information in summaries:
-    /// - Full code snippets
-    /// - File names and changes
-    /// - Function signatures
-    /// - Error details and fixes
+    /// When true, summaries preserve detailed task information:
+    /// - Specific file names and changes
+    /// - Technical details and error descriptions
+    /// - Problem-solving steps and decisions
     ///
-    /// When false, creates a minimal summary focusing on:
+    /// When false, summaries are minimal:
     /// - Primary request and intent
     /// - Key decisions made
-    /// - Current work status
-    /// - Next steps
+    /// - Current status and next steps
     ///
-    /// This mirrors `OutputStyle::keep_coding_instructions` for API consistency.
-    #[serde(default = "default_keep_coding_instructions")]
-    pub keep_coding_instructions: bool,
+    /// Derived from `OutputStyle::domain_instructions` when using `from_output_style()`.
+    #[serde(default = "default_detailed_summary")]
+    pub detailed_summary: bool,
     /// Optional custom instructions to append to the compact prompt.
     /// These are user-provided instructions for customizing the summary.
     #[serde(default)]
     pub custom_instructions: Option<String>,
 }
 
-fn default_keep_coding_instructions() -> bool {
+fn default_detailed_summary() -> bool {
     true
 }
 
-impl Default for CompactStrategy {
+impl Default for CompactConfig {
     fn default() -> Self {
         Self {
             enabled: true,
             threshold_percent: DEFAULT_COMPACT_THRESHOLD,
             summary_model: DEFAULT_FAST_MODEL.to_string(),
             max_summary_tokens: 4000,
-            keep_coding_instructions: true,
+            detailed_summary: true,
             custom_instructions: None,
         }
     }
 }
 
-impl CompactStrategy {
+impl CompactConfig {
     pub fn disabled() -> Self {
         Self {
             enabled: false,
@@ -84,11 +80,11 @@ impl CompactStrategy {
         self
     }
 
-    /// Set whether to keep detailed coding information in summaries.
+    /// Set whether to keep detailed task information in summaries.
     ///
-    /// This mirrors the `keep_coding_instructions` flag in `OutputStyle`.
-    pub fn keep_coding_instructions(mut self, keep: bool) -> Self {
-        self.keep_coding_instructions = keep;
+    /// This mirrors the `detailed_summary` flag in `OutputStyle`.
+    pub fn detailed_summary(mut self, keep: bool) -> Self {
+        self.detailed_summary = keep;
         self
     }
 
@@ -98,34 +94,34 @@ impl CompactStrategy {
         self
     }
 
-    /// Create a CompactStrategy that inherits coding instruction preference from OutputStyle.
+    /// Create a CompactConfig derived from an OutputStyle's domain instruction presence.
     pub fn from_output_style(style: &crate::output_style::OutputStyle) -> Self {
         Self {
-            keep_coding_instructions: style.keep_coding_instructions,
+            detailed_summary: style.has_domain_instructions(),
             ..Default::default()
         }
     }
 }
 
 pub struct CompactService {
-    strategy: CompactStrategy,
+    config: CompactConfig,
 }
 
 impl CompactService {
-    pub fn new(strategy: CompactStrategy) -> Self {
-        Self { strategy }
+    pub fn new(config: CompactConfig) -> Self {
+        Self { config }
     }
 
     pub fn needs_compact(&self, current_tokens: u64, max_tokens: u64) -> bool {
-        if !self.strategy.enabled {
+        if !self.config.enabled {
             return false;
         }
-        let threshold = (max_tokens as f32 * self.strategy.threshold_percent) as u64;
+        let threshold = (max_tokens as f32 * self.config.threshold_percent) as u64;
         current_tokens >= threshold
     }
 
     pub fn prepare_compact(&self, session: &Session) -> SessionResult<PreparedCompact> {
-        if !self.strategy.enabled {
+        if !self.config.enabled {
             return Err(SessionError::Compact {
                 message: "Compact is disabled".to_string(),
             });
@@ -158,10 +154,10 @@ impl CompactService {
         };
 
         let request = CreateMessageRequest::new(
-            &self.strategy.summary_model,
+            &self.config.summary_model,
             vec![Message::user(&summary_prompt)],
         )
-        .max_tokens(self.strategy.max_summary_tokens);
+        .max_tokens(self.config.max_summary_tokens);
         let response = client.send(request).await?;
         let result = self.apply_compact(session, response.text())?;
         self.record_compact(session, &result);
@@ -245,8 +241,8 @@ impl CompactService {
     fn format_for_summary(&self, messages: &[&SessionMessage]) -> String {
         let mut formatted = String::new();
 
-        // Select prompt based on keep_coding_instructions flag
-        let prompt = if self.strategy.keep_coding_instructions {
+        // Select prompt based on detailed_summary flag
+        let prompt = if self.config.detailed_summary {
             COMPACTION_PROMPT_FULL
         } else {
             COMPACTION_PROMPT_MINIMAL
@@ -254,7 +250,7 @@ impl CompactService {
 
         formatted.push_str(prompt);
 
-        if let Some(ref instructions) = self.strategy.custom_instructions {
+        if let Some(ref instructions) = self.config.custom_instructions {
             formatted.push_str("\n\n");
             formatted.push_str("# Custom Summary Instructions\n\n");
             formatted.push_str(instructions);
@@ -297,13 +293,12 @@ impl CompactService {
         formatted
     }
 
-    pub fn strategy(&self) -> &CompactStrategy {
-        &self.strategy
+    pub fn config(&self) -> &CompactConfig {
+        &self.config
     }
 }
 
-/// Full compaction prompt with detailed coding information.
-/// Ported from Claude Code CLI for full compatibility.
+/// Full compaction prompt that preserves detailed task information.
 const COMPACTION_PROMPT_FULL: &str = r#"Your task is to create a detailed summary of the conversation so far, paying close attention to the user's explicit requests and your previous actions.
 
 This summary should be thorough in capturing technical details, code patterns, and architectural decisions that would be essential for continuing development work without losing context.
@@ -398,8 +393,8 @@ Here's an example of how your output should be structured:
 
 Please provide your summary based on the conversation so far, following this structure and ensuring precision and thoroughness in your response."#;
 
-/// Minimal compaction prompt without detailed coding information.
-/// Used when keep_coding_instructions is false.
+/// Minimal compaction prompt for concise summaries.
+/// Used when `detailed_summary` is false.
 const COMPACTION_PROMPT_MINIMAL: &str = r#"Your task is to create a concise summary of the conversation so far, focusing on the essential context needed to continue the interaction.
 
 Before providing your final summary, briefly analyze the conversation in <analysis> tags.
@@ -477,31 +472,31 @@ mod tests {
 
     #[test]
     fn test_compact_strategy_default() {
-        let strategy = CompactStrategy::default();
+        let strategy = CompactConfig::default();
         assert!(strategy.enabled);
         assert_eq!(strategy.threshold_percent, 0.8);
-        assert!(strategy.keep_coding_instructions);
+        assert!(strategy.detailed_summary);
         assert!(strategy.custom_instructions.is_none());
     }
 
     #[test]
     fn test_compact_strategy_disabled() {
-        let strategy = CompactStrategy::disabled();
+        let strategy = CompactConfig::disabled();
         assert!(!strategy.enabled);
     }
 
     #[test]
-    fn test_compact_strategy_with_keep_coding_instructions() {
-        let strategy = CompactStrategy::default().keep_coding_instructions(false);
-        assert!(!strategy.keep_coding_instructions);
+    fn test_compact_strategy_with_detailed_summary() {
+        let strategy = CompactConfig::default().detailed_summary(false);
+        assert!(!strategy.detailed_summary);
 
-        let strategy = CompactStrategy::default().keep_coding_instructions(true);
-        assert!(strategy.keep_coding_instructions);
+        let strategy = CompactConfig::default().detailed_summary(true);
+        assert!(strategy.detailed_summary);
     }
 
     #[test]
     fn test_compact_strategy_with_custom_instructions() {
-        let strategy = CompactStrategy::default()
+        let strategy = CompactConfig::default()
             .custom_instructions("Focus on test output and code changes.");
 
         assert_eq!(
@@ -512,7 +507,7 @@ mod tests {
 
     #[test]
     fn test_needs_compact() {
-        let executor = CompactService::new(CompactStrategy::default().threshold(0.8));
+        let executor = CompactService::new(CompactConfig::default().threshold(0.8));
 
         assert!(!executor.needs_compact(70_000, 100_000));
         assert!(executor.needs_compact(80_000, 100_000));
@@ -522,7 +517,7 @@ mod tests {
     #[test]
     fn test_prepare_compact_empty() {
         let session = Session::new(SessionConfig::default());
-        let executor = CompactService::new(CompactStrategy::default());
+        let executor = CompactService::new(CompactConfig::default());
 
         let result = executor.prepare_compact(&session).unwrap();
         assert!(matches!(result, PreparedCompact::NotNeeded));
@@ -532,7 +527,7 @@ mod tests {
     fn test_prepare_compact_ready_full_prompt() {
         let session = create_test_session(10);
         let executor =
-            CompactService::new(CompactStrategy::default().keep_coding_instructions(true));
+            CompactService::new(CompactConfig::default().detailed_summary(true));
 
         let result = executor.prepare_compact(&session).unwrap();
 
@@ -558,7 +553,7 @@ mod tests {
     fn test_prepare_compact_ready_minimal_prompt() {
         let session = create_test_session(10);
         let executor =
-            CompactService::new(CompactStrategy::default().keep_coding_instructions(false));
+            CompactService::new(CompactConfig::default().detailed_summary(false));
 
         let result = executor.prepare_compact(&session).unwrap();
 
@@ -585,7 +580,7 @@ mod tests {
     fn test_prepare_compact_with_custom_instructions() {
         let session = create_test_session(5);
         let executor = CompactService::new(
-            CompactStrategy::default()
+            CompactConfig::default()
                 .custom_instructions("Focus on Rust code changes and test results."),
         );
 
@@ -603,7 +598,7 @@ mod tests {
     #[test]
     fn test_apply_compact() {
         let mut session = create_test_session(10);
-        let executor = CompactService::new(CompactStrategy::default());
+        let executor = CompactService::new(CompactConfig::default());
 
         let result = executor
             .apply_compact(&mut session, "Test summary".to_string())

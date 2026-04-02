@@ -396,6 +396,12 @@ pub enum CompactResult {
     Skipped {
         reason: String,
     },
+    /// Content blocks were truncated in the projection (micro-compaction).
+    /// The graph remains unchanged; truncations are session-local.
+    Truncated {
+        truncation_count: usize,
+        estimated_token_savings: u64,
+    },
 }
 
 /// Per-model usage statistics tracking.

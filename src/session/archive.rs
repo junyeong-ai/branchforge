@@ -440,6 +440,7 @@ impl SessionArchiveService {
             current_plan: bundle.current_plan.clone(),
             compact_history: bundle.compact_history.iter().cloned().collect(),
             event_bus: None,
+            content_overrides: crate::session::state::ContentOverrides::default(),
         };
         session.refresh_summary_cache();
         session.refresh_message_projection();

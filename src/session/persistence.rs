@@ -7,7 +7,9 @@ use tokio::sync::RwLock;
 use uuid::Uuid;
 
 use super::archive::verify_restored_session_roundtrip;
-use super::state::{Session, SessionId, SessionMessage, SessionState};
+use chrono::{DateTime, Utc};
+
+use super::state::{Session, SessionId, SessionMessage, SessionState, SessionType};
 use super::types::QueueItem;
 use super::{SessionError, SessionResult};
 use crate::graph::{GraphEvent, GraphMaterializer, GraphValidator, SessionGraph};
@@ -30,6 +32,91 @@ pub(crate) fn validate_session_graph(session: &Session, backend: &str) -> Sessio
             session.id
         ),
     })
+}
+
+/// Filter criteria for searching sessions.
+///
+/// All fields are optional; only set fields are applied as AND conditions.
+/// Applications build richer search on top of this (e.g., full-text search
+/// in summaries, tag-based filtering).
+#[derive(Debug, Clone, Default)]
+pub struct SessionFilter {
+    /// Only sessions created after this time.
+    pub created_after: Option<DateTime<Utc>>,
+    /// Only sessions created before this time.
+    pub created_before: Option<DateTime<Utc>>,
+    /// Only sessions of this type (Main or Subagent).
+    pub session_type: Option<SessionType>,
+    /// Only sessions owned by this tenant.
+    pub tenant_id: Option<String>,
+    /// Only sessions owned by this principal.
+    pub principal_id: Option<String>,
+    /// Only sessions in this state.
+    pub state: Option<SessionState>,
+    /// Maximum number of results.
+    pub limit: Option<usize>,
+}
+
+impl SessionFilter {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn created_after(mut self, time: DateTime<Utc>) -> Self {
+        self.created_after = Some(time);
+        self
+    }
+
+    pub fn created_before(mut self, time: DateTime<Utc>) -> Self {
+        self.created_before = Some(time);
+        self
+    }
+
+    pub fn tenant(mut self, tenant_id: impl Into<String>) -> Self {
+        self.tenant_id = Some(tenant_id.into());
+        self
+    }
+
+    pub fn principal(mut self, principal_id: impl Into<String>) -> Self {
+        self.principal_id = Some(principal_id.into());
+        self
+    }
+
+    pub fn limit(mut self, limit: usize) -> Self {
+        self.limit = Some(limit);
+        self
+    }
+
+    /// Check if a session matches this filter.
+    pub fn matches(&self, session: &Session) -> bool {
+        if self.created_after.is_some_and(|after| session.created_at < after) {
+            return false;
+        }
+        if self.created_before.is_some_and(|before| session.created_at > before) {
+            return false;
+        }
+        if let Some(ref st) = self.session_type
+            && std::mem::discriminant(&session.session_type) != std::mem::discriminant(st)
+        {
+            return false;
+        }
+        if let Some(ref tid) = self.tenant_id
+            && session.tenant_id.as_ref() != Some(tid)
+        {
+            return false;
+        }
+        if let Some(ref pid) = self.principal_id
+            && session.principal_id.as_ref() != Some(pid)
+        {
+            return false;
+        }
+        if let Some(ref state) = self.state
+            && session.state != *state
+        {
+            return false;
+        }
+        true
+    }
 }
 
 /// A boxed synchronous mutation applied to a session inside [`Persistence::with_session_lock`].
@@ -166,6 +253,31 @@ pub trait Persistence: Send + Sync {
             }),
         )
         .await
+    }
+
+    /// Search sessions matching a filter.
+    ///
+    /// The default implementation loads all sessions and filters in memory.
+    /// Backends with native query support (e.g., PostgreSQL) should override
+    /// this with a more efficient implementation.
+    async fn search(&self, filter: &SessionFilter) -> SessionResult<Vec<SessionId>> {
+        let all_ids = self.list(filter.tenant_id.as_deref()).await?;
+        let mut results = Vec::new();
+
+        for id in all_ids {
+            if let Some(limit) = filter.limit
+                && results.len() >= limit
+            {
+                break;
+            }
+            if let Some(session) = self.load(&id).await?
+                && filter.matches(&session)
+            {
+                results.push(id);
+            }
+        }
+
+        Ok(results)
     }
 }
 

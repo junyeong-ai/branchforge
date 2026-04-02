@@ -314,7 +314,7 @@ mod static_context_tests {
 
 mod session_tests {
     use branchforge::session::{
-        CompactService, CompactStrategy, Session, SessionAccessScope, SessionConfig,
+        CompactService, CompactConfig, Session, SessionAccessScope, SessionConfig,
         SessionManager, SessionMessage,
     };
     use branchforge::types::ContentBlock;
@@ -336,7 +336,7 @@ mod session_tests {
 
     #[test]
     fn test_context_compaction_threshold() {
-        let strategy = CompactStrategy::default().threshold(0.8);
+        let strategy = CompactConfig::default().threshold(0.8);
         let executor = CompactService::new(strategy);
 
         assert!(!executor.needs_compact(70_000, 100_000));
@@ -360,20 +360,20 @@ mod session_tests {
 
     #[test]
     fn test_compact_strategy_default() {
-        let strategy = CompactStrategy::default();
+        let strategy = CompactConfig::default();
         assert!(strategy.enabled);
         assert_eq!(strategy.threshold_percent, 0.8);
     }
 
     #[test]
     fn test_compact_strategy_disabled() {
-        let strategy = CompactStrategy::disabled();
+        let strategy = CompactConfig::disabled();
         assert!(!strategy.enabled);
     }
 
     #[test]
     fn test_compact_strategy_custom() {
-        let strategy = CompactStrategy::default()
+        let strategy = CompactConfig::default()
             .threshold(0.9)
             .model("claude-haiku-4-5-20251001");
 
