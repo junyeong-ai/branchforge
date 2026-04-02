@@ -1,3 +1,4 @@
+pub mod circuit;
 mod content_source;
 mod directory;
 #[cfg(feature = "file-resources")]

@@ -3,10 +3,9 @@
 //! Provides retry with exponential backoff and circuit breaker pattern.
 
 mod backoff;
-mod circuit;
 
 pub use backoff::ExponentialBackoff;
-pub use circuit::{CircuitBreaker, CircuitConfig, CircuitState};
+pub use crate::common::circuit::{CircuitBreaker, CircuitConfig, CircuitState};
 
 use std::sync::Arc;
 use std::time::Duration;
