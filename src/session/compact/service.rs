@@ -5,10 +5,10 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::client::DEFAULT_FAST_MODEL;
 use crate::session::state::{Session, SessionMessage};
 use crate::session::types::CompactRecord;
 use crate::session::{SessionError, SessionResult};
-use crate::client::DEFAULT_FAST_MODEL;
 use crate::types::{CompactResult, ContentBlock, Message, Role};
 
 /// Context usage threshold for triggering compaction (80%).
@@ -496,8 +496,8 @@ mod tests {
 
     #[test]
     fn test_compact_strategy_with_custom_instructions() {
-        let strategy = CompactConfig::default()
-            .custom_instructions("Focus on test output and code changes.");
+        let strategy =
+            CompactConfig::default().custom_instructions("Focus on test output and code changes.");
 
         assert_eq!(
             strategy.custom_instructions,
@@ -526,8 +526,7 @@ mod tests {
     #[test]
     fn test_prepare_compact_ready_full_prompt() {
         let session = create_test_session(10);
-        let executor =
-            CompactService::new(CompactConfig::default().detailed_summary(true));
+        let executor = CompactService::new(CompactConfig::default().detailed_summary(true));
 
         let result = executor.prepare_compact(&session).unwrap();
 
@@ -552,8 +551,7 @@ mod tests {
     #[test]
     fn test_prepare_compact_ready_minimal_prompt() {
         let session = create_test_session(10);
-        let executor =
-            CompactService::new(CompactConfig::default().detailed_summary(false));
+        let executor = CompactService::new(CompactConfig::default().detailed_summary(false));
 
         let result = executor.prepare_compact(&session).unwrap();
 

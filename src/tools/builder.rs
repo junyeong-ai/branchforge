@@ -233,8 +233,7 @@ impl ToolRegistryBuilder {
         all_tools.extend(self.custom_tools);
 
         #[allow(unused_mut)]
-        let mut env = ToolExecutionEnv::new(context)
-            .with_tool_state(tool_state);
+        let mut env = ToolExecutionEnv::new(context).with_tool_state(tool_state);
 
         #[cfg(feature = "coding-tools")]
         {

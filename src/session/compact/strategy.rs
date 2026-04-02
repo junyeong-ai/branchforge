@@ -13,8 +13,8 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 
 use crate::graph::NodeId;
-use crate::session::state::Session;
 use crate::session::SessionResult;
+use crate::session::state::Session;
 use crate::types::{CompactResult, ContentBlock};
 
 /// Context available when deciding whether compaction is needed.

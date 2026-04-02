@@ -28,6 +28,7 @@ impl SchemaTool for GlobTool {
     type Input = GlobInput;
 
     const NAME: &'static str = "Glob";
+    const READ_ONLY: bool = true;
     const DESCRIPTION: &'static str = r#"- Fast file pattern matching tool that works with any codebase size
 - Supports glob patterns like "**/*.js" or "src/**/*.ts"
 - Returns matching file paths sorted by modification time

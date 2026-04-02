@@ -70,11 +70,7 @@ mod tests {
     #[tokio::test]
     async fn message_roundtrip() {
         let ch = MessageChannel::new(8);
-        let msg = AgentMessage::new(
-            AgentId::new(),
-            AgentId::new(),
-            "hello",
-        );
+        let msg = AgentMessage::new(AgentId::new(), AgentId::new(), "hello");
         let to = msg.to;
         ch.send(msg).await.unwrap();
         let received = ch.recv().await.unwrap();

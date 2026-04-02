@@ -89,10 +89,16 @@ impl SessionFilter {
 
     /// Check if a session matches this filter.
     pub fn matches(&self, session: &Session) -> bool {
-        if self.created_after.is_some_and(|after| session.created_at < after) {
+        if self
+            .created_after
+            .is_some_and(|after| session.created_at < after)
+        {
             return false;
         }
-        if self.created_before.is_some_and(|before| session.created_at > before) {
+        if self
+            .created_before
+            .is_some_and(|before| session.created_at > before)
+        {
             return false;
         }
         if let Some(ref st) = self.session_type

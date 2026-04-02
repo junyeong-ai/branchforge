@@ -7,7 +7,7 @@
 #![cfg(feature = "cli-auth")]
 
 use branchforge::session::{
-    ArchivePolicy, CompactService, CompactConfig, ExportPolicy, MemoryPersistence, Persistence,
+    ArchivePolicy, CompactConfig, CompactService, ExportPolicy, MemoryPersistence, Persistence,
     SessionAccessScope, SessionArchiveService, SessionId, SessionManager,
 };
 use branchforge::types::CompactResult;

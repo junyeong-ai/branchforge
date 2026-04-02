@@ -54,6 +54,7 @@ impl SchemaTool for GraphHistoryTool {
     type Input = GraphHistoryInput;
 
     const NAME: &'static str = "GraphHistory";
+    const READ_ONLY: bool = true;
     const DESCRIPTION: &'static str = r#"Explore and navigate session graph history.
 
 Actions:

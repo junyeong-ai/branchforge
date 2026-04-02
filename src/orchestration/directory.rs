@@ -110,9 +110,10 @@ impl AgentHandle {
     /// Send a message to this agent.
     pub async fn send(&self, from: AgentId, content: impl Into<String>) -> crate::Result<()> {
         let msg = AgentMessage::new(from, self.id, content);
-        self.channel.send(msg).await.map_err(|_| {
-            crate::Error::Session(format!("Agent '{}' channel closed", self.name))
-        })
+        self.channel
+            .send(msg)
+            .await
+            .map_err(|_| crate::Error::Session(format!("Agent '{}' channel closed", self.name)))
     }
 }
 
@@ -267,9 +268,7 @@ mod tests {
 
         dir.register(handle);
 
-        let result = dir
-            .send(AgentId::new(), "worker-1", "more work")
-            .await;
+        let result = dir.send(AgentId::new(), "worker-1", "more work").await;
         assert!(result.is_err());
     }
 

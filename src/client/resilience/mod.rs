@@ -4,8 +4,8 @@
 
 mod backoff;
 
-pub use backoff::ExponentialBackoff;
 pub use crate::common::circuit::{CircuitBreaker, CircuitConfig, CircuitState};
+pub use backoff::ExponentialBackoff;
 
 use std::sync::Arc;
 use std::time::Duration;

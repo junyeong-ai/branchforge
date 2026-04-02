@@ -175,9 +175,7 @@ mod tests {
     async fn register_and_list() {
         let scheduler = CronScheduler::new();
         let id = scheduler
-            .register("test", Duration::from_secs(60), || {
-                Box::pin(async {})
-            })
+            .register("test", Duration::from_secs(60), || Box::pin(async {}))
             .await;
 
         let entries = scheduler.list().await;
@@ -192,9 +190,7 @@ mod tests {
     async fn unregister() {
         let scheduler = CronScheduler::new();
         let id = scheduler
-            .register("test", Duration::from_secs(60), || {
-                Box::pin(async {})
-            })
+            .register("test", Duration::from_secs(60), || Box::pin(async {}))
             .await;
 
         assert!(scheduler.unregister(&id).await);

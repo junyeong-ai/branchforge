@@ -47,6 +47,7 @@ impl SchemaTool for GrepTool {
     type Input = GrepInput;
 
     const NAME: &'static str = "Grep";
+    const READ_ONLY: bool = true;
     const DESCRIPTION: &'static str = r#"A powerful search tool built on ripgrep
 
   Usage:

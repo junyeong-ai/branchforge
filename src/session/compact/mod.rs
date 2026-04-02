@@ -35,9 +35,7 @@ pub mod strategy;
 pub mod time_based;
 
 // Core strategy types
-pub use strategy::{
-    CompactionContext, CompactionPlan, CompactionStrategy, ContentOverrideEntry,
-};
+pub use strategy::{CompactionContext, CompactionPlan, CompactionStrategy, ContentOverrideEntry};
 
 // Chain
 pub use chain::{CompactionChain, CompactionChainBuilder};
@@ -47,6 +45,4 @@ pub use full::FullCompaction;
 pub use micro::MicroCompaction;
 pub use time_based::TimeBasedCompaction;
 
-pub use service::{
-    CompactConfig, CompactService, DEFAULT_COMPACT_THRESHOLD, PreparedCompact,
-};
+pub use service::{CompactConfig, CompactService, DEFAULT_COMPACT_THRESHOLD, PreparedCompact};

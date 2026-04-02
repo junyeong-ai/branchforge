@@ -158,12 +158,18 @@ impl ToolRegistry {
         result
     }
 
+    /// Returns tool definitions sorted by name for prompt cache stability.
     pub fn definitions(&self) -> Vec<ToolDefinition> {
-        self.tools.iter().map(|r| r.value().definition()).collect()
+        let mut defs: Vec<_> = self.tools.iter().map(|r| r.value().definition()).collect();
+        defs.sort_by(|a, b| a.name.cmp(&b.name));
+        defs
     }
 
+    /// Returns tool names sorted alphabetically for prompt cache stability.
     pub fn names(&self) -> Vec<String> {
-        self.tools.iter().map(|r| r.key().clone()).collect()
+        let mut names: Vec<_> = self.tools.iter().map(|r| r.key().clone()).collect();
+        names.sort();
+        names
     }
 
     pub fn contains(&self, name: &str) -> bool {

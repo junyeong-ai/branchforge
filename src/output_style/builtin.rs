@@ -23,8 +23,7 @@ fn maybe_with_coding_instructions(style: OutputStyle) -> OutputStyle {
 /// Default output style.
 pub fn default_style() -> OutputStyle {
     maybe_with_coding_instructions(
-        OutputStyle::new("default", "Standard mode", "")
-            .source_type(SourceType::Builtin),
+        OutputStyle::new("default", "Standard mode", "").source_type(SourceType::Builtin),
     )
 }
 

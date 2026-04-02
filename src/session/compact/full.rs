@@ -8,8 +8,8 @@ use async_trait::async_trait;
 
 use super::service::{CompactConfig, CompactService};
 use super::strategy::{CompactionContext, CompactionPlan, CompactionStrategy};
-use crate::session::state::Session;
 use crate::session::SessionResult;
+use crate::session::state::Session;
 use crate::types::CompactResult;
 
 /// LLM-based full summarization strategy.
@@ -80,26 +80,19 @@ impl CompactionStrategy for FullCompaction {
         session: &mut Session,
         client: Option<&crate::Client>,
     ) -> crate::Result<CompactResult> {
-        let CompactionPlan::Summarize {
-            prompt,
-            ..
-        } = plan
-        else {
+        let CompactionPlan::Summarize { prompt, .. } = plan else {
             return Ok(CompactResult::NotNeeded);
         };
 
-        let client = client.ok_or_else(|| {
-            crate::Error::Config("FullCompaction requires an LLM client".into())
-        })?;
+        let client = client
+            .ok_or_else(|| crate::Error::Config("FullCompaction requires an LLM client".into()))?;
 
         use crate::client::messages::CreateMessageRequest;
         use crate::types::Message;
 
-        let request = CreateMessageRequest::new(
-            &self.config.summary_model,
-            vec![Message::user(&prompt)],
-        )
-        .max_tokens(self.config.max_summary_tokens);
+        let request =
+            CreateMessageRequest::new(&self.config.summary_model, vec![Message::user(&prompt)])
+                .max_tokens(self.config.max_summary_tokens);
 
         let response = client.send(request).await?;
         let summary = response.text();

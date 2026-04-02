@@ -28,9 +28,9 @@ pub use compact::recovery::{
     ContextRecovery, RecoveryAction, RecoveryContext, RecoveryErrorKind, RecoveryStrategy,
 };
 pub use compact::{
-    CompactConfig, CompactService, CompactionChain, CompactionChainBuilder,
-    CompactionContext, CompactionPlan, CompactionStrategy, ContentOverrideEntry, FullCompaction,
-    MicroCompaction, TimeBasedCompaction, DEFAULT_COMPACT_THRESHOLD,
+    CompactConfig, CompactService, CompactionChain, CompactionChainBuilder, CompactionContext,
+    CompactionPlan, CompactionStrategy, ContentOverrideEntry, DEFAULT_COMPACT_THRESHOLD,
+    FullCompaction, MicroCompaction, TimeBasedCompaction,
 };
 pub use export::{AuditBundle, ExportPolicy, SessionExporter};
 #[cfg(feature = "postgres")]
@@ -58,9 +58,9 @@ pub use queue::{InputQueue, MergedInput, QueueError, QueuedInput, SharedInputQue
 pub use replay::ReplayService;
 pub use session_state::{ExecutionGuard, ExecutionState, SessionSnapshot, ToolState};
 pub use state::{
-    ContentOverrides, ExecutionMetadata, MessageId, MessageMetadata, Session,
-    SessionAuthorization, SessionConfig, SessionId, SessionMessage, SessionState,
-    SessionToolLimits, SessionType, ThinkingMetadata, ToolResultMeta,
+    ContentOverrides, ExecutionMetadata, MessageId, MessageMetadata, Session, SessionAuthorization,
+    SessionConfig, SessionId, SessionMessage, SessionState, SessionToolLimits, SessionType,
+    ThinkingMetadata, ToolResultMeta,
 };
 pub use types::{
     CompactRecord, CompactTrigger, EnvironmentContext, Plan, PlanStatus, QueueItem, QueueOperation,

@@ -22,7 +22,7 @@ use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 
 use crate::events::EventBus;
-use crate::graph::{NodeId, GraphNode, NodeKind, NodeProvenance, SessionGraph};
+use crate::graph::{GraphNode, NodeId, NodeKind, NodeProvenance, SessionGraph};
 use crate::session::types::{CompactRecord, Plan, TodoItem, TodoStatus};
 use crate::session::{SessionError, SessionResult};
 use crate::types::{CacheControl, CacheTtl, ContentBlock, Message, Role, TokenUsage, Usage};
@@ -38,14 +38,24 @@ pub struct ContentOverrides {
 }
 
 impl ContentOverrides {
-    pub fn new() -> Self { Self::default() }
-    pub fn is_empty(&self) -> bool { self.replacements.is_empty() }
-    pub fn len(&self) -> usize { self.replacements.len() }
+    pub fn new() -> Self {
+        Self::default()
+    }
+    pub fn is_empty(&self) -> bool {
+        self.replacements.is_empty()
+    }
+    pub fn len(&self) -> usize {
+        self.replacements.len()
+    }
     pub fn set(&mut self, node_id: NodeId, content: Vec<ContentBlock>) {
         self.replacements.insert(node_id, content);
     }
-    pub fn remove(&mut self, node_id: &NodeId) { self.replacements.remove(node_id); }
-    pub fn clear(&mut self) { self.replacements.clear(); }
+    pub fn remove(&mut self, node_id: &NodeId) {
+        self.replacements.remove(node_id);
+    }
+    pub fn clear(&mut self) {
+        self.replacements.clear();
+    }
     pub fn get(&self, node_id: &NodeId) -> Option<&Vec<ContentBlock>> {
         self.replacements.get(node_id)
     }
@@ -655,13 +665,13 @@ impl Session {
         forked.created_at = Utc::now();
         forked.updated_at = Utc::now();
 
-        let name = branch_name
-            .unwrap_or_else(|| format!("fork-{}", &forked.id.to_string()[..8]));
-        forked.graph.fork_branch(node_id, name).map_err(|e| {
-            SessionError::Storage {
+        let name = branch_name.unwrap_or_else(|| format!("fork-{}", &forked.id.to_string()[..8]));
+        forked
+            .graph
+            .fork_branch(node_id, name)
+            .map_err(|e| SessionError::Storage {
                 message: format!("Failed to fork graph branch: {e}"),
-            }
-        })?;
+            })?;
 
         forked.refresh_message_projection();
 

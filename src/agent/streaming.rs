@@ -1057,25 +1057,33 @@ impl StreamState {
             }
         }
 
-        // Phase 2: Parallel tool execution
-        let tools = Arc::clone(&self.cfg.runtime.tools);
+        // Phase 2: Partitioned tool execution
+        // Consecutive read-only tools run in parallel; mutating tools run alone.
+        let tools_ref = Arc::clone(&self.cfg.runtime.tools);
         let context_scope = self.cfg.runtime.context_scope.clone();
-        let tool_futures = prepared.into_iter().map(|(id, name, input)| {
-            let tools = Arc::clone(&tools);
-            let context_scope = context_scope.clone();
-            async move {
-                let start = Instant::now();
-                let result = if let Some(ref scope) = context_scope {
-                    let fut = tools.execute(&name, input.clone());
-                    scope.wrap_tool_future(Box::pin(fut)).await
-                } else {
-                    tools.execute(&name, input.clone()).await
-                };
-                let duration_ms = start.elapsed().as_millis() as u64;
-                (id, name, input, result, duration_ms)
-            }
-        });
-        let parallel_results: Vec<_> = join_all(tool_futures).await;
+
+        let batches = partition_tools_by_safety(&tools_ref, &prepared);
+        let mut parallel_results = Vec::with_capacity(prepared.len());
+
+        for batch in batches {
+            let batch_futures = batch.into_iter().map(|(id, name, input)| {
+                let tools = Arc::clone(&tools_ref);
+                let scope = context_scope.clone();
+                async move {
+                    let start = Instant::now();
+                    let result = if let Some(ref s) = scope {
+                        let fut = tools.execute(&name, input.clone());
+                        s.wrap_tool_future(Box::pin(fut)).await
+                    } else {
+                        tools.execute(&name, input.clone()).await
+                    };
+                    let duration_ms = start.elapsed().as_millis() as u64;
+                    (id, name, input, result, duration_ms)
+                }
+            });
+            let batch_results: Vec<_> = join_all(batch_futures).await;
+            parallel_results.extend(batch_results);
+        }
 
         self.all_non_retryable = !parallel_results.is_empty()
             && parallel_results
@@ -1186,6 +1194,51 @@ impl StreamState {
         .await?;
         Ok(())
     }
+}
+
+/// Partition tools into batches for safe concurrent execution.
+///
+/// Consecutive read-only tools are grouped into a single parallel batch.
+/// Mutating tools get their own sequential batch (size 1).
+fn partition_tools_by_safety(
+    registry: &crate::tools::ToolRegistry,
+    prepared: &[(String, String, serde_json::Value)],
+) -> Vec<Vec<(String, String, serde_json::Value)>> {
+    let mut batches: Vec<Vec<(String, String, serde_json::Value)>> = Vec::new();
+    let mut current_batch: Vec<(String, String, serde_json::Value)> = Vec::new();
+    let mut current_is_read_only = true;
+
+    for (id, name, input) in prepared {
+        let tool_read_only = registry
+            .get(name)
+            .map(|t| t.is_read_only())
+            .unwrap_or(false);
+
+        if tool_read_only && current_is_read_only {
+            // Accumulate consecutive read-only tools
+            current_batch.push((id.clone(), name.clone(), input.clone()));
+        } else {
+            // Flush current batch if non-empty
+            if !current_batch.is_empty() {
+                batches.push(std::mem::take(&mut current_batch));
+            }
+            // Start new batch with this tool
+            current_batch.push((id.clone(), name.clone(), input.clone()));
+            current_is_read_only = tool_read_only;
+
+            // If mutating tool, flush immediately (run alone)
+            if !tool_read_only {
+                batches.push(std::mem::take(&mut current_batch));
+                current_is_read_only = true; // reset for next
+            }
+        }
+    }
+
+    if !current_batch.is_empty() {
+        batches.push(current_batch);
+    }
+
+    batches
 }
 
 async fn persist_stream_session_state(

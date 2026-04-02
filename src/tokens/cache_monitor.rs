@@ -162,7 +162,8 @@ impl Default for CacheBreakDetector {
 ///
 /// Returns a value between 0.0 (no cache hits) and 1.0 (all from cache).
 fn cache_hit_rate(usage: &TokenUsage) -> f64 {
-    let total = usage.input_tokens + usage.cache_read_input_tokens + usage.cache_creation_input_tokens;
+    let total =
+        usage.input_tokens + usage.cache_read_input_tokens + usage.cache_creation_input_tokens;
     if total == 0 {
         return 0.0;
     }
@@ -206,9 +207,7 @@ mod tests {
 
     #[test]
     fn detects_break_on_sudden_drop() {
-        let mut detector = CacheBreakDetector::new()
-            .window_size(3)
-            .drop_threshold(0.3);
+        let mut detector = CacheBreakDetector::new().window_size(3).drop_threshold(0.3);
 
         // Build high cache history
         detector.record(&usage(10, 90, 0));

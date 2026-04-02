@@ -18,6 +18,15 @@ pub trait Tool: Send + Sync {
     fn input_schema(&self) -> serde_json::Value;
     async fn execute(&self, input: serde_json::Value, context: &ExecutionContext) -> ToolResult;
 
+    /// Whether this tool only reads state without modifying it.
+    ///
+    /// Read-only tools can safely run in parallel with other read-only tools.
+    /// Mutating tools (Edit, Write, Bash) run sequentially to prevent races.
+    /// Default: `false` (conservative — assume mutation).
+    fn is_read_only(&self) -> bool {
+        false
+    }
+
     fn definition(&self) -> ToolDefinition {
         ToolDefinition::new(self.name(), self.description(), self.input_schema())
     }
@@ -33,6 +42,7 @@ pub trait SchemaTool: Send + Sync {
     const NAME: &'static str;
     const DESCRIPTION: &'static str;
     const STRICT: bool = false;
+    const READ_ONLY: bool = false;
 
     async fn handle(&self, input: Self::Input, context: &ExecutionContext) -> ToolResult;
 
@@ -84,6 +94,10 @@ impl<T: SchemaTool + 'static> Tool for T {
 
     fn input_schema(&self) -> serde_json::Value {
         T::input_schema()
+    }
+
+    fn is_read_only(&self) -> bool {
+        T::READ_ONLY
     }
 
     fn definition(&self) -> ToolDefinition {

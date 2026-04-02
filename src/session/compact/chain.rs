@@ -181,9 +181,7 @@ mod tests {
 
     #[test]
     fn builder_sets_failure_threshold() {
-        let chain = CompactionChain::builder()
-            .failure_threshold(5)
-            .build();
+        let chain = CompactionChain::builder().failure_threshold(5).build();
         assert_eq!(chain.circuit_state(), CircuitState::Closed);
     }
 }

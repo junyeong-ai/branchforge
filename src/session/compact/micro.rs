@@ -9,9 +9,11 @@
 
 use async_trait::async_trait;
 
-use super::strategy::{CompactionContext, CompactionPlan, CompactionStrategy, ContentOverrideEntry};
-use crate::session::state::Session;
+use super::strategy::{
+    CompactionContext, CompactionPlan, CompactionStrategy, ContentOverrideEntry,
+};
 use crate::session::SessionResult;
+use crate::session::state::Session;
 use crate::types::content::{ToolResultBlock, ToolResultContent, ToolResultContentBlock};
 use crate::types::{CompactResult, ContentBlock};
 
@@ -188,9 +190,7 @@ fn estimate_block_chars(block: &ContentBlock) -> usize {
     match block {
         ContentBlock::Text { text, .. } => text.len(),
         ContentBlock::ToolResult(result) => estimate_tool_result_chars(result),
-        ContentBlock::ToolUse(tool_use) => {
-            tool_use.input.to_string().len() + tool_use.name.len()
-        }
+        ContentBlock::ToolUse(tool_use) => tool_use.input.to_string().len() + tool_use.name.len(),
         _ => 0,
     }
 }

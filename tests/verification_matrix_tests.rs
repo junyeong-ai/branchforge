@@ -9,7 +9,7 @@ use std::path::Path;
 
 use branchforge::common::ToolRestricted;
 use branchforge::session::{
-    ArchivePolicy, CompactService, CompactConfig, ExportPolicy, MemoryPersistence, Persistence,
+    ArchivePolicy, CompactConfig, CompactService, ExportPolicy, MemoryPersistence, Persistence,
     QueueItem, SessionArchiveService,
 };
 use branchforge::types::TokenUsage;

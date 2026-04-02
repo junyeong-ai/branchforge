@@ -191,6 +191,11 @@ name = "live_integration_test"
 path = "examples/live_integration_test.rs"
 required-features = ["cli-auth", "coding-tools", "scheduling"]
 
+[[example]]
+name = "deep_integration_test"
+path = "examples/deep_integration_test.rs"
+required-features = ["cli-auth", "coding-tools"]
+
 [package.metadata.docs.rs]
 all-features = true
 rustdoc-args = ["--cfg", "docsrs"]

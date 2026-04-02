@@ -57,7 +57,7 @@ mod phase1_error_propagation {
 // =============================================================================
 
 mod phase2_naming {
-    use branchforge::session::compact::{CompactService, CompactConfig};
+    use branchforge::session::compact::{CompactConfig, CompactService};
 
     #[test]
     fn compact_service_name_exists() {

@@ -55,10 +55,7 @@ impl SchemaTool for SendMessageTool {
             .send(self.coordinator_id, &input.to, &input.content)
             .await
         {
-            Ok(()) => ToolResult::success(format!(
-                "Message sent to agent '{}'.",
-                input.to
-            )),
+            Ok(()) => ToolResult::success(format!("Message sent to agent '{}'.", input.to)),
             Err(e) => ToolResult::error(e.to_string()),
         }
     }

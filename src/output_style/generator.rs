@@ -360,8 +360,7 @@ mod tests {
 
     #[test]
     fn test_has_domain_instructions() {
-        let style_with = OutputStyle::new("with", "", "")
-            .domain_instructions("some guidelines");
+        let style_with = OutputStyle::new("with", "", "").domain_instructions("some guidelines");
         let gen_with = SystemPromptGenerator::new().output_style(style_with);
         assert!(gen_with.has_domain_instructions());
 

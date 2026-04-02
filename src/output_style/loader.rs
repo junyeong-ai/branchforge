@@ -33,8 +33,7 @@ impl OutputStyleLoader {
     ) -> OutputStyle {
         let source_type = SourceType::from_str_opt(fm.source_type.as_deref());
 
-        let mut style = OutputStyle::new(fm.name, fm.description, body)
-            .source_type(source_type);
+        let mut style = OutputStyle::new(fm.name, fm.description, body).source_type(source_type);
 
         if let Some(instructions) = fm.domain_instructions {
             style = style.domain_instructions(instructions);

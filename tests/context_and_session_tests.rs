@@ -314,8 +314,8 @@ mod static_context_tests {
 
 mod session_tests {
     use branchforge::session::{
-        CompactService, CompactConfig, Session, SessionAccessScope, SessionConfig,
-        SessionManager, SessionMessage,
+        CompactConfig, CompactService, Session, SessionAccessScope, SessionConfig, SessionManager,
+        SessionMessage,
     };
     use branchforge::types::ContentBlock;
 
