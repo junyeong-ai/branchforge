@@ -489,9 +489,8 @@ fn restricted_tool_surface(
         _ => match base {
             ToolSurface::None => ToolSurface::None,
             ToolSurface::Core => {
-                let filtered: HashSet<String> = ToolSurface::CORE_TOOLS
-                    .iter()
-                    .copied()
+                let filtered: HashSet<String> = ToolSurface::core_tools()
+                    .into_iter()
                     .filter(|tool| !matches_denied_pattern(&denied, tool))
                     .map(str::to_string)
                     .collect();

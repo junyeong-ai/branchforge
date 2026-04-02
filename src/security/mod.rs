@@ -8,6 +8,7 @@
 //! - Process resource limits via `setrlimit`
 //! - OS-level sandboxing (Landlock on Linux, Seatbelt on macOS)
 
+#[cfg(feature = "coding-tools")]
 pub mod bash;
 pub mod fs;
 pub mod guard;
@@ -32,6 +33,7 @@ use std::sync::Arc;
 #[derive(Clone)]
 pub struct SecurityContext {
     pub fs: SecureFs,
+    #[cfg(feature = "coding-tools")]
     pub bash: bash::BashAnalyzer,
     pub limits: ResourceLimits,
     pub policy: SecurityPolicy,
@@ -55,6 +57,7 @@ impl SecurityContext {
     pub fn permissive() -> Self {
         Self {
             fs: SecureFs::permissive(),
+            #[cfg(feature = "coding-tools")]
             bash: bash::BashAnalyzer::new(bash::BashPolicy::default()),
             limits: ResourceLimits::none(),
             policy: SecurityPolicy::permissive(),
@@ -82,6 +85,7 @@ pub struct SecurityContextBuilder {
     allowed_paths: Vec<PathBuf>,
     denied_patterns: Vec<String>,
     limits: Option<ResourceLimits>,
+    #[cfg(feature = "coding-tools")]
     bash_policy: Option<bash::BashPolicy>,
     max_symlink_depth: Option<u8>,
     network: Option<NetworkSandbox>,
@@ -109,6 +113,7 @@ impl SecurityContextBuilder {
         self
     }
 
+    #[cfg(feature = "coding-tools")]
     pub fn bash_policy(mut self, policy: bash::BashPolicy) -> Self {
         self.bash_policy = Some(policy);
         self
@@ -181,6 +186,7 @@ impl SecurityContextBuilder {
 
         Ok(SecurityContext {
             fs,
+            #[cfg(feature = "coding-tools")]
             bash: bash::BashAnalyzer::new(self.bash_policy.unwrap_or_default()),
             limits: self.limits.unwrap_or_default(),
             policy: SecurityPolicy::default(),

@@ -22,16 +22,15 @@ pub enum ToolSurface {
 }
 
 impl ToolSurface {
-    pub const CORE_TOOLS: &[&str] = &[
-        "Read",
-        "Write",
-        "Edit",
-        "Glob",
-        "Grep",
-        "Bash",
-        "KillShell",
-        "Skill",
-    ];
+    #[allow(unused_mut)]
+    pub fn core_tools() -> Vec<&'static str> {
+        let mut tools = vec!["Skill"];
+
+        #[cfg(feature = "coding-tools")]
+        tools.extend(["Read", "Write", "Edit", "Glob", "Grep", "Bash", "KillShell"]);
+
+        tools
+    }
 
     pub fn all() -> Self {
         Self::All
@@ -57,7 +56,7 @@ impl ToolSurface {
     pub fn is_allowed(&self, tool_name: &str) -> bool {
         match self {
             Self::None => false,
-            Self::Core => Self::CORE_TOOLS.contains(&tool_name),
+            Self::Core => Self::core_tools().contains(&tool_name),
             Self::All => true,
             Self::Only(allowed) => allowed
                 .iter()
@@ -73,8 +72,8 @@ impl ToolSurface {
         match self {
             Self::None => builder.build(),
             Self::Core => {
-                for tool in Self::CORE_TOOLS {
-                    builder = builder.allow(*tool);
+                for tool in Self::core_tools() {
+                    builder = builder.allow(tool);
                 }
                 builder.build()
             }
@@ -113,10 +112,11 @@ mod tests {
     #[test]
     fn test_core_exposes_minimal_runtime_surface() {
         let access = ToolSurface::core();
-        assert!(access.is_allowed("Read"));
         assert!(access.is_allowed("Skill"));
         assert!(!access.is_allowed("Task"));
         assert!(!access.is_allowed("TodoWrite"));
+        #[cfg(feature = "coding-tools")]
+        assert!(access.is_allowed("Read"));
     }
 
     #[test]

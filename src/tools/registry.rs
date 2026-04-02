@@ -8,6 +8,7 @@ use dashmap::DashMap;
 /// Default timeout for tool execution in milliseconds (2 minutes).
 const DEFAULT_TOOL_TIMEOUT_MS: u64 = 120_000;
 
+#[cfg(feature = "coding-tools")]
 use super::ProcessManager;
 use super::builder::ToolRegistryBuilder;
 use super::context::ExecutionContext;
@@ -81,6 +82,7 @@ impl ToolRegistry {
         self.env.tool_state()
     }
 
+    #[cfg(feature = "coding-tools")]
     #[inline]
     pub fn process_manager(&self) -> Option<&Arc<ProcessManager>> {
         self.env.process_manager()
@@ -208,6 +210,7 @@ mod tests {
         assert!(!ToolOutput::empty().is_error());
     }
 
+    #[cfg(feature = "coding-tools")]
     #[test]
     fn test_default_tools_count() {
         let registry = ToolRegistry::default_tools(ToolSurface::All, None, None);
@@ -226,6 +229,7 @@ mod tests {
         assert!(!registry.contains("GraphHistory"));
     }
 
+    #[cfg(feature = "coding-tools")]
     #[test]
     fn test_tool_surface_filtering() {
         let registry =
@@ -235,6 +239,7 @@ mod tests {
         assert!(!registry.contains("Bash"));
     }
 
+    #[cfg(feature = "coding-tools")]
     #[test]
     fn test_register_dynamic() {
         let registry = ToolRegistry::new();
@@ -247,6 +252,7 @@ mod tests {
         assert!(result.is_err());
     }
 
+    #[cfg(feature = "coding-tools")]
     #[test]
     fn test_register_or_replace() {
         let registry = ToolRegistry::new();
@@ -285,6 +291,7 @@ mod tests {
         assert!(auto.allows_tool("Bash"));
     }
 
+    #[cfg(feature = "coding-tools")]
     #[test]
     fn test_unregister() {
         let registry = ToolRegistry::new();

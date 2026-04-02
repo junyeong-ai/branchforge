@@ -6,6 +6,7 @@ use std::sync::Arc;
 
 use crate::authorization::{ToolDecision, ToolLimits};
 use crate::hooks::{HookContext, HookEvent, HookInput, HookManager};
+#[cfg(feature = "coding-tools")]
 use crate::security::bash::{BashAnalysis, SanitizedEnv};
 use crate::security::fs::SecureFileHandle;
 use crate::security::guard::SecurityGuard;
@@ -175,14 +176,17 @@ impl ExecutionContext {
         self.security.fs.is_within(path)
     }
 
+    #[cfg(feature = "coding-tools")]
     pub fn analyze_bash(&self, command: &str) -> BashAnalysis {
         self.security.bash.analyze(command)
     }
 
+    #[cfg(feature = "coding-tools")]
     pub fn validate_bash(&self, command: &str) -> Result<BashAnalysis, String> {
         self.security.bash.validate(command)
     }
 
+    #[cfg(feature = "coding-tools")]
     fn sanitized_env(&self) -> SanitizedEnv {
         SanitizedEnv::from_current().working_dir(self.root())
     }
@@ -215,6 +219,7 @@ impl ExecutionContext {
         self.security.sandbox.environment_vars()
     }
 
+    #[cfg(feature = "coding-tools")]
     pub fn sanitized_env_with_sandbox(&self) -> SanitizedEnv {
         let sandbox_env = self.sandbox_env();
         self.sanitized_env().with_vars(sandbox_env)
@@ -283,6 +288,7 @@ mod tests {
         assert!(result.is_err());
     }
 
+    #[cfg(feature = "coding-tools")]
     #[test]
     fn test_analyze_bash() {
         let context = ExecutionContext::default();

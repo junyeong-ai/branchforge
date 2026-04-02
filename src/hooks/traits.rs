@@ -26,6 +26,7 @@ pub enum HookEvent {
     ModelSelection,
     PreMessage,
     PostMessage,
+    SessionFork,
 }
 
 impl HookEvent {
@@ -71,6 +72,7 @@ impl HookEvent {
             "ModelSelection" => Some(Self::ModelSelection),
             "PreMessage" => Some(Self::PreMessage),
             "PostMessage" => Some(Self::PostMessage),
+            "SessionFork" => Some(Self::SessionFork),
             _ => None,
         }
     }
@@ -91,6 +93,7 @@ impl HookEvent {
             Self::ModelSelection,
             Self::PreMessage,
             Self::PostMessage,
+            Self::SessionFork,
         ]
     }
 }
@@ -112,6 +115,7 @@ impl std::fmt::Display for HookEvent {
             Self::ModelSelection => "model_selection",
             Self::PreMessage => "pre_message",
             Self::PostMessage => "post_message",
+            Self::SessionFork => "session_fork",
         };
         write!(f, "{}", s)
     }
@@ -169,6 +173,11 @@ pub enum HookEventData {
         input_tokens: u32,
         output_tokens: u32,
     },
+    SessionFork {
+        parent_session_id: String,
+        forked_session_id: String,
+        branch_name: String,
+    },
 }
 
 impl HookEventData {
@@ -188,6 +197,7 @@ impl HookEventData {
             Self::ModelSelection { .. } => HookEvent::ModelSelection,
             Self::PreMessage { .. } => HookEvent::PreMessage,
             Self::PostMessage { .. } => HookEvent::PostMessage,
+            Self::SessionFork { .. } => HookEvent::SessionFork,
         }
     }
 

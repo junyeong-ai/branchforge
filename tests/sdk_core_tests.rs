@@ -602,7 +602,16 @@ mod tool_registry_tests {
     fn test_registry_tool_definitions_count() {
         let registry = ToolRegistry::default_tools(ToolSurface::All, None, None);
         let definitions = registry.definitions();
-        assert_eq!(definitions.len(), 12);
+        let mut expected_count = 12;
+        #[cfg(feature = "worktree")]
+        {
+            expected_count += 2; // EnterWorktree, ExitWorktree
+        }
+        #[cfg(feature = "repl")]
+        {
+            expected_count += 1; // Repl
+        }
+        assert_eq!(definitions.len(), expected_count);
         for def in &definitions {
             assert!(!def.name.is_empty());
             assert!(!def.description.is_empty());

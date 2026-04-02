@@ -1,7 +1,9 @@
 //! Tool execution environment.
 
+#[cfg(feature = "coding-tools")]
 use std::sync::Arc;
 
+#[cfg(feature = "coding-tools")]
 use super::ProcessManager;
 use super::context::ExecutionContext;
 use crate::session::session_state::ToolState;
@@ -10,6 +12,7 @@ use crate::session::session_state::ToolState;
 pub struct ToolExecutionEnv {
     context: ExecutionContext,
     tool_state: Option<ToolState>,
+    #[cfg(feature = "coding-tools")]
     process_manager: Option<Arc<ProcessManager>>,
 }
 
@@ -18,6 +21,7 @@ impl ToolExecutionEnv {
         Self {
             context,
             tool_state: None,
+            #[cfg(feature = "coding-tools")]
             process_manager: None,
         }
     }
@@ -27,6 +31,7 @@ impl ToolExecutionEnv {
         self
     }
 
+    #[cfg(feature = "coding-tools")]
     pub fn with_process_manager(mut self, pm: Arc<ProcessManager>) -> Self {
         self.process_manager = Some(pm);
         self
@@ -40,6 +45,7 @@ impl ToolExecutionEnv {
         self.tool_state.as_ref()
     }
 
+    #[cfg(feature = "coding-tools")]
     pub fn process_manager(&self) -> Option<&Arc<ProcessManager>> {
         self.process_manager.as_ref()
     }

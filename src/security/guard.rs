@@ -1,12 +1,16 @@
 //! SecurityGuard: Pre-execution input validation for tools.
 
+#[cfg(feature = "coding-tools")]
 use std::path::Path;
 
+#[cfg(feature = "coding-tools")]
 use glob::Pattern;
 use serde_json::Value;
 
+#[cfg(feature = "coding-tools")]
 use super::bash::SecurityConcern;
 use super::{SecurityContext, SecurityError};
+#[cfg(feature = "coding-tools")]
 use crate::authorization::ToolLimits;
 
 pub struct SecurityGuard;
@@ -32,12 +36,14 @@ impl SecurityGuard {
         }
 
         if schema.is_shell {
+            #[cfg(feature = "coding-tools")]
             Self::validate_bash_command(security, input, &limits)?;
         }
 
         Ok(())
     }
 
+    #[cfg(feature = "coding-tools")]
     fn validate_bash_command(
         security: &SecurityContext,
         input: &Value,
@@ -97,7 +103,8 @@ impl SecurityGuard {
     }
 }
 
-fn matches_patterns(path: &Path, patterns: &[String]) -> bool {
+#[cfg(feature = "coding-tools")]
+fn matches_patterns(path: &std::path::Path, patterns: &[String]) -> bool {
     let path_str = path.to_string_lossy();
     patterns.iter().any(|pattern| {
         match Pattern::new(pattern) {
@@ -143,7 +150,7 @@ mod tests {
     use super::*;
     use tempfile::tempdir;
 
-    fn create_test_context(root: &Path) -> SecurityContext {
+    fn create_test_context(root: &std::path::Path) -> SecurityContext {
         SecurityContext::new(root).unwrap()
     }
 
@@ -189,6 +196,7 @@ mod tests {
         assert!(result.is_ok());
     }
 
+    #[cfg(feature = "coding-tools")]
     #[test]
     fn test_bash_path_escape_blocked() {
         let dir = tempdir().unwrap();
@@ -202,6 +210,7 @@ mod tests {
         assert!(matches!(result, Err(SecurityError::PathEscape(_))));
     }
 
+    #[cfg(feature = "coding-tools")]
     #[test]
     fn test_dangerous_command_blocked() {
         let dir = tempdir().unwrap();

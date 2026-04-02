@@ -68,6 +68,7 @@ pub async fn collect_compaction_state(tools: &ToolRegistry) -> Vec<String> {
         sections.push(format!("## Running Background Agents\n{}", tasks_summary));
     }
 
+    #[cfg(feature = "coding-tools")]
     if let Some(pm) = tools.process_manager() {
         let processes = pm.list().await;
         if !processes.is_empty() {

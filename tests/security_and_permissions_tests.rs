@@ -46,6 +46,7 @@ mod security_tests {
         assert!(result.is_err());
     }
 
+    #[cfg(feature = "coding-tools")]
     #[tokio::test]
     async fn test_security_bash_dangerous_blocked() {
         use branchforge::tools::{BashTool, ExecutionContext, Tool};

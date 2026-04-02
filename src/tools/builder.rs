@@ -3,6 +3,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
+#[cfg(feature = "coding-tools")]
 use super::ProcessManager;
 use super::context::ExecutionContext;
 use super::env::ToolExecutionEnv;
@@ -182,7 +183,6 @@ impl ToolRegistryBuilder {
                 TaskRegistry::new(Arc::new(MemoryPersistence::new()))
             }
         });
-        let process_manager = Arc::new(ProcessManager::new());
         let tool_state = self
             .tool_state
             .unwrap_or_else(|| ToolState::new(session_id));
@@ -204,28 +204,42 @@ impl ToolRegistryBuilder {
             None => Arc::new(crate::skills::SkillTool::defaults()),
         };
 
+        // Always available tools
         let mut all_tools: Vec<Arc<dyn Tool>> = vec![
-            Arc::new(super::ReadTool),
-            Arc::new(super::WriteTool),
-            Arc::new(super::EditTool),
-            Arc::new(super::GlobTool),
-            Arc::new(super::GrepTool),
-            Arc::new(super::BashTool::new(process_manager.clone())),
-            Arc::new(super::KillShellTool::new(process_manager.clone())),
             task_tool,
             Arc::new(TaskOutputTool::new(task_registry.clone())),
             Arc::new(super::TodoWriteTool::new(tool_state.clone(), session_id)),
             Arc::new(super::PlanTool::new(tool_state.clone())),
             skill_tool,
         ];
+
+        #[cfg(feature = "coding-tools")]
+        let process_manager = {
+            let pm = Arc::new(ProcessManager::new());
+            all_tools.push(Arc::new(super::ReadTool));
+            all_tools.push(Arc::new(super::WriteTool));
+            all_tools.push(Arc::new(super::EditTool));
+            all_tools.push(Arc::new(super::GlobTool));
+            all_tools.push(Arc::new(super::GrepTool));
+            all_tools.push(Arc::new(super::BashTool::new(pm.clone())));
+            all_tools.push(Arc::new(super::KillShellTool::new(pm.clone())));
+            pm
+        };
+
         if self.session_manager.is_some() {
             all_tools.push(Arc::new(super::GraphHistoryTool));
         }
+
         all_tools.extend(self.custom_tools);
 
-        let env = ToolExecutionEnv::new(context)
-            .with_tool_state(tool_state)
-            .with_process_manager(process_manager);
+        #[allow(unused_mut)]
+        let mut env = ToolExecutionEnv::new(context)
+            .with_tool_state(tool_state);
+
+        #[cfg(feature = "coding-tools")]
+        {
+            env = env.with_process_manager(process_manager);
+        }
 
         let registry = ToolRegistry::from_env(task_registry, env);
 
