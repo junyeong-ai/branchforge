@@ -10,8 +10,9 @@ pub struct OutputStyleFrontmatter {
     pub name: String,
     #[serde(default)]
     pub description: String,
-    #[serde(default, rename = "keep-coding-instructions")]
-    pub keep_coding_instructions: bool,
+    /// Optional domain-specific instructions to inject into the system prompt.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub domain_instructions: Option<String>,
     #[serde(default)]
     pub source_type: Option<String>,
 }
@@ -32,9 +33,14 @@ impl OutputStyleLoader {
     ) -> OutputStyle {
         let source_type = SourceType::from_str_opt(fm.source_type.as_deref());
 
-        OutputStyle::new(fm.name, fm.description, body)
-            .source_type(source_type)
-            .keep_coding_instructions(fm.keep_coding_instructions)
+        let mut style = OutputStyle::new(fm.name, fm.description, body)
+            .source_type(source_type);
+
+        if let Some(instructions) = fm.domain_instructions {
+            style = style.domain_instructions(instructions);
+        }
+
+        style
     }
 }
 
@@ -59,11 +65,11 @@ mod tests {
     use crate::common::SourceType;
 
     #[test]
-    fn test_parse_output_style_with_frontmatter() {
+    fn test_parse_output_style_with_domain_instructions() {
         let content = r#"---
 name: test-style
 description: A test output style
-keep-coding-instructions: true
+domain_instructions: "Custom domain guidelines here"
 ---
 
 # Custom Instructions
@@ -76,12 +82,12 @@ This is the custom prompt content.
 
         assert_eq!(style.name, "test-style");
         assert_eq!(style.description, "A test output style");
-        assert!(style.keep_coding_instructions);
+        assert!(style.has_domain_instructions());
         assert!(style.prompt.contains("Custom Instructions"));
     }
 
     #[test]
-    fn test_parse_output_style_without_keep_coding() {
+    fn test_parse_output_style_without_domain_instructions() {
         let content = r#"---
 name: concise
 description: Be concise
@@ -94,7 +100,7 @@ Be brief and to the point.
         let style = loader.parse_content(content, None).unwrap();
 
         assert_eq!(style.name, "concise");
-        assert!(!style.keep_coding_instructions);
+        assert!(!style.has_domain_instructions());
     }
 
     #[test]

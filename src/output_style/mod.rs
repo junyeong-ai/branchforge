@@ -23,9 +23,11 @@ use crate::common::{ContentSource, Index, Named, SourceType};
 
 /// Definition of an output style.
 ///
-/// Output styles customize Claude's behavior by modifying the system prompt.
-/// The `keep_coding_instructions` flag determines whether standard coding
-/// instructions are retained (true) or replaced by the custom prompt (false).
+/// Output styles customize agent behavior by modifying the system prompt.
+///
+/// `domain_instructions` contains optional domain-specific instructions
+/// (e.g., coding guidelines) that are injected into the system prompt.
+/// When `None`, only the base prompt and custom style prompt are used.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OutputStyle {
     pub name: String,
@@ -37,15 +39,18 @@ pub struct OutputStyle {
     pub source: ContentSource,
     #[serde(default)]
     pub source_type: SourceType,
-    #[serde(default, rename = "keep-coding-instructions")]
-    pub keep_coding_instructions: bool,
+    /// Optional domain-specific instructions injected into the system prompt.
+    /// For coding agents, this contains software engineering guidelines.
+    /// For other agents, set to domain-appropriate instructions or leave None.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub domain_instructions: Option<String>,
 }
 
 impl OutputStyle {
     /// Create a new output style with the given name, description, and prompt.
     ///
-    /// By default, `keep_coding_instructions` is `true` to match the behavior
-    /// of the default style and `CompactStrategy::default()`.
+    /// By default, `domain_instructions` is `None`. Use `.domain_instructions()`
+    /// to inject domain-specific guidelines.
     pub fn new(
         name: impl Into<String>,
         description: impl Into<String>,
@@ -58,7 +63,7 @@ impl OutputStyle {
             source: ContentSource::in_memory(&prompt_str),
             prompt: prompt_str,
             source_type: SourceType::default(),
-            keep_coding_instructions: true,
+            domain_instructions: None,
         }
     }
 
@@ -67,9 +72,14 @@ impl OutputStyle {
         self
     }
 
-    pub fn keep_coding_instructions(mut self, keep: bool) -> Self {
-        self.keep_coding_instructions = keep;
+    /// Set domain-specific instructions to include in the system prompt.
+    pub fn domain_instructions(mut self, instructions: impl Into<String>) -> Self {
+        self.domain_instructions = Some(instructions.into());
         self
+    }
+
+    pub fn has_domain_instructions(&self) -> bool {
+        self.domain_instructions.is_some()
     }
 
     pub fn is_default(&self) -> bool {
@@ -163,18 +173,17 @@ mod tests {
         assert_eq!(style.description, "A test style");
         assert_eq!(style.prompt, "Test prompt");
         assert_eq!(style.source_type, SourceType::User);
-        // Default is now true for consistency with CompactStrategy
-        assert!(style.keep_coding_instructions);
+        assert!(style.domain_instructions.is_none());
     }
 
     #[test]
     fn test_output_style_builder() {
         let style = OutputStyle::new("custom", "Custom style", "Custom prompt")
             .source_type(SourceType::Project)
-            .keep_coding_instructions(true);
+            .domain_instructions("Custom domain guidelines");
 
         assert_eq!(style.source_type, SourceType::Project);
-        assert!(style.keep_coding_instructions);
+        assert!(style.has_domain_instructions());
     }
 
     #[test]
@@ -183,7 +192,8 @@ mod tests {
 
         assert!(style.is_default());
         assert_eq!(style.name, "default");
-        assert!(style.keep_coding_instructions);
+        // Default style has domain_instructions set by builtin_styles()
+        // which injects CODING_INSTRUCTIONS when coding-tools feature is enabled
     }
 
     #[test]

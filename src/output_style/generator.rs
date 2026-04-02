@@ -1,7 +1,7 @@
 //! System prompt generator.
 //!
 //! Generates customized system prompts based on output style configuration.
-//! This is the core logic that implements the keep-coding-instructions behavior.
+//! Assembles system prompts from base prompts, domain instructions, tool policies, and environment context.
 
 use std::path::PathBuf;
 
@@ -13,7 +13,6 @@ use crate::common::Provider;
 use crate::common::SourceType;
 use crate::prompts::{
     base::{BASE_SYSTEM_PROMPT, TOOL_USAGE_POLICY},
-    coding,
     environment::{current_platform, environment_block, is_git_repository, os_version},
     identity::CLI_IDENTITY,
 };
@@ -34,7 +33,7 @@ use crate::prompts::{
 /// 3. **Tool Usage Policy** (always included)
 ///    - Tool-specific guidelines
 ///
-/// 4. **Coding Instructions** (if `keep_coding_instructions: true`)
+/// 4. **Domain Instructions** (if `domain_instructions` is set)
 ///    - Software engineering instructions
 ///    - Git commit/PR protocols
 ///
@@ -181,7 +180,7 @@ impl SystemPromptGenerator {
     /// - **CLI Identity**: Only if `require_cli_identity: true` (CLI OAuth)
     /// - **Base System Prompt**: Always included
     /// - **Tool Usage Policy**: Always included
-    /// - **Coding Instructions**: Only if `keep_coding_instructions: true`
+    /// - **Domain Instructions**: Only if `domain_instructions` is set
     /// - **Custom Prompt**: Only if style has non-empty prompt
     /// - **Environment Block**: Always included
     pub fn generate(&self) -> String {
@@ -198,9 +197,9 @@ impl SystemPromptGenerator {
         // 3. Tool Usage Policy (always)
         parts.push(TOOL_USAGE_POLICY.to_string());
 
-        // 4. Coding Instructions (conditional)
-        if self.style.keep_coding_instructions {
-            parts.push(coding::coding_instructions(&self.model_name));
+        // 4. Domain Instructions (conditional — injected by application)
+        if let Some(ref instructions) = self.style.domain_instructions {
+            parts.push(instructions.clone());
         }
 
         // 5. Custom Prompt (if present)
@@ -242,9 +241,9 @@ impl SystemPromptGenerator {
         &self.style
     }
 
-    /// Check if coding instructions are included.
-    pub fn has_coding_instructions(&self) -> bool {
-        self.style.keep_coding_instructions
+    /// Check if domain instructions are included in the generated prompt.
+    pub fn has_domain_instructions(&self) -> bool {
+        self.style.has_domain_instructions()
     }
 }
 
@@ -287,17 +286,17 @@ mod tests {
     }
 
     #[test]
-    fn test_generator_with_custom_style_keep_coding() {
+    fn test_generator_with_custom_style_with_domain() {
         let style = OutputStyle::new("test", "Test style", "Custom instructions here")
             .source_type(SourceType::User)
-            .keep_coding_instructions(true);
+            .domain_instructions("Domain-specific guidelines");
 
         let prompt = SystemPromptGenerator::cli_identity()
             .output_style(style)
             .generate();
 
         assert!(prompt.starts_with(CLI_IDENTITY));
-        assert!(prompt.contains("Doing tasks")); // coding instructions kept
+        assert!(prompt.contains("Domain-specific guidelines")); // domain instructions
         assert!(prompt.contains("Custom instructions here")); // custom prompt
         assert!(prompt.contains("<env>")); // environment block
     }
@@ -305,15 +304,14 @@ mod tests {
     #[test]
     fn test_generator_with_custom_style_no_coding() {
         let style = OutputStyle::new("concise", "Be concise", "Keep responses short.")
-            .source_type(SourceType::User)
-            .keep_coding_instructions(false);
+            .source_type(SourceType::User);
 
         let prompt = SystemPromptGenerator::cli_identity()
             .output_style(style)
             .generate();
 
         assert!(prompt.starts_with(CLI_IDENTITY)); // CLI Identity preserved
-        assert!(!prompt.contains("Doing tasks")); // coding instructions NOT included
+        assert!(!prompt.contains("Domain-specific")); // no domain instructions
         assert!(prompt.contains("Keep responses short.")); // custom prompt
         assert!(prompt.contains("<env>")); // environment block
     }
@@ -361,13 +359,15 @@ mod tests {
     }
 
     #[test]
-    fn test_has_coding_instructions() {
-        let generator = SystemPromptGenerator::new();
-        assert!(generator.has_coding_instructions());
+    fn test_has_domain_instructions() {
+        let style_with = OutputStyle::new("with", "", "")
+            .domain_instructions("some guidelines");
+        let gen_with = SystemPromptGenerator::new().output_style(style_with);
+        assert!(gen_with.has_domain_instructions());
 
-        let style = OutputStyle::new("no-coding", "", "").keep_coding_instructions(false);
-        let generator = SystemPromptGenerator::new().output_style(style);
-        assert!(!generator.has_coding_instructions());
+        let style_without = OutputStyle::new("without", "", "");
+        let gen_without = SystemPromptGenerator::new().output_style(style_without);
+        assert!(!gen_without.has_domain_instructions());
     }
 
     #[test]
@@ -378,8 +378,8 @@ mod tests {
             "custom",
             "Custom identity",
             "I am a different assistant.", // Trying to replace identity
-        )
-        .keep_coding_instructions(false);
+        );
+        // No domain_instructions set — only base prompt + custom prompt
 
         let prompt = SystemPromptGenerator::cli_identity()
             .output_style(style)

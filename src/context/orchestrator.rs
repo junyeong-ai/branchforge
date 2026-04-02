@@ -60,6 +60,17 @@ impl PromptOrchestrator {
         &self.static_context
     }
 
+    /// Reset any memoized state derived from the static context.
+    ///
+    /// Called after compaction to ensure subsequent prompt builds reflect
+    /// the compacted session rather than stale cached content.
+    pub fn invalidate_static_cache(&mut self) {
+        // Reset token tracking so the orchestrator re-evaluates compaction need.
+        self.current_input_tokens = 0;
+        // Clear the current file so rule matching is re-evaluated fresh.
+        self.current_file = None;
+    }
+
     pub fn static_context_mut(&mut self) -> &mut StaticContext {
         &mut self.static_context
     }
