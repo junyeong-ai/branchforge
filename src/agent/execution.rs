@@ -7,10 +7,10 @@ use tracing::{debug, info, instrument, warn};
 
 use super::AgentMetrics;
 use super::common::{
-    self, BudgetContext, accumulate_inner_usage, accumulate_response_usage, emit_tokens_consumed,
-    emit_tool_executed, handle_compaction, maybe_emit_budget_alert,
-    maybe_invoke_explicit_skill_command, run_post_tool_hooks, run_stop_hooks,
-    try_activate_dynamic_rules,
+    self, BudgetContext, accumulate_inner_usage, accumulate_response_usage, emit_cost_report,
+    emit_tokens_consumed, emit_tool_executed, handle_compaction, is_context_overflow_error,
+    maybe_emit_budget_alert, maybe_invoke_explicit_skill_command, run_post_tool_hooks,
+    run_stop_hooks, try_activate_dynamic_rules, try_recover,
 };
 use super::events::AgentResult;
 use super::executor::Agent;
@@ -269,6 +269,7 @@ impl Agent {
             .unwrap_or(self.runtime.config.execution.max_iterations);
 
         let max_tokens = context_window::for_model(&self.runtime.config.model.primary);
+        let mut recovery_attempts = 0u32;
 
         info!(prompt_len = final_prompt.len(), "Starting agent execution");
 
@@ -358,7 +359,29 @@ impl Agent {
 
             let api_start = Instant::now();
             let request = request_builder.build(messages, &dynamic_rules_context);
-            let response = self.runtime.client.send_with_auth_retry(request).await?;
+            let response = match self.runtime.client.send_with_auth_retry(request).await {
+                Ok(resp) => resp,
+                Err(e) if is_context_overflow_error(&e) => {
+                    if let Some(action) = try_recover(
+                        &e,
+                        &self.state,
+                        &self.runtime,
+                        max_tokens,
+                        &mut recovery_attempts,
+                    )
+                    .await
+                    {
+                        use crate::session::compact::recovery::RecoveryAction;
+                        match action {
+                            RecoveryAction::Retry | RecoveryAction::CompactAndRetry => continue,
+                            RecoveryAction::Abort => return Err(e),
+                        }
+                    }
+                    return Err(e);
+                }
+                Err(e) => return Err(e),
+            };
+            recovery_attempts = 0;
             let api_duration_ms = api_start.elapsed().as_millis() as u64;
             metrics.record_api_call_with_timing(api_duration_ms);
             debug!(api_time_ms = api_duration_ms, "API call completed");
@@ -562,21 +585,23 @@ impl Agent {
 
             handle_compaction(
                 &self.state,
-                &self.runtime.client,
-                &self.runtime.tools,
-                &self.runtime.hooks,
+                &self.runtime,
                 &hook_ctx,
                 &self.session_id,
-                &self.runtime.config.execution,
                 max_tokens,
                 &mut metrics,
-                self.runtime.event_bus.as_deref(),
             )
             .await;
             self.persist_session_state().await?;
         }
 
         metrics.execution_time_ms = execution_start.elapsed().as_millis() as u64;
+
+        emit_cost_report(
+            self.runtime.event_bus.as_deref(),
+            &metrics,
+            &self.session_id,
+        );
 
         run_stop_hooks(&self.runtime.hooks, &hook_ctx, &self.session_id).await;
 

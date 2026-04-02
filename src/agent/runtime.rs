@@ -12,6 +12,9 @@ use crate::context::PromptOrchestrator;
 use crate::context_scope::SharedContextScope;
 use crate::events::EventBus;
 use crate::hooks::HookManager;
+use crate::orchestration::{AgentDirectory, Coordination};
+use crate::session::compact::CompactionChain;
+use crate::session::compact::recovery::RecoveryStrategy;
 use crate::tools::{ToolRegistry, ToolSearchManager};
 
 use super::config::AgentConfig;
@@ -34,6 +37,10 @@ pub struct AgentRuntime {
     pub(crate) execution_mode: ExecutionMode,
     pub(crate) context_scope: Option<SharedContextScope>,
     pub(crate) orchestrator: Option<Arc<RwLock<PromptOrchestrator>>>,
+    pub(crate) compaction_chain: Option<Arc<CompactionChain>>,
+    pub(crate) coordination: Option<Arc<dyn Coordination>>,
+    pub(crate) agent_directory: Option<Arc<AgentDirectory>>,
+    pub(crate) recovery_strategy: Option<Arc<dyn RecoveryStrategy>>,
     pub(crate) shutdown: CancellationToken,
 }
 
@@ -78,6 +85,15 @@ impl AgentRuntime {
     #[must_use]
     pub fn context_scope(&self) -> Option<&SharedContextScope> {
         self.context_scope.as_ref()
+    }
+
+    /// Invalidate cached context after compaction so subsequent iterations
+    /// rebuild prompts from the compacted session state.
+    pub(crate) async fn invalidate_caches_after_compact(&self) {
+        if let Some(ref orchestrator) = self.orchestrator {
+            let mut orch = orchestrator.write().await;
+            orch.invalidate_static_cache();
+        }
     }
 
     /// Signal graceful shutdown.

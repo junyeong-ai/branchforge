@@ -69,11 +69,14 @@ pub mod hooks;
 pub mod mcp;
 pub mod models;
 pub mod observability;
+pub mod orchestration;
 pub mod output_style;
 #[cfg(feature = "plugins")]
 pub mod plugins;
 pub mod prelude;
 pub mod prompts;
+#[cfg(feature = "scheduling")]
+pub mod scheduling;
 pub mod security;
 pub mod session;
 pub mod skills;
@@ -114,10 +117,12 @@ pub use agent::{
     ExecutionConfig, PromptConfig, SecurityConfig, SystemPromptMode, ToolStats,
 };
 pub use auth::{CredentialProvider, OAuthConfig};
+pub use budget::report::{CostSummary, ModelCostEntry};
 pub use client::{
     BetaConfig, BetaFeature, CloudProvider, EffortLevel, FallbackConfig, ModelConfig, ModelType,
     OutputConfig, ProviderConfig,
 };
+pub use common::circuit::{CircuitBreaker, CircuitConfig, CircuitState};
 pub use common::{ContentSource, Index, IndexRegistry, Named, SourceType, ToolRestricted};
 pub use context::{
     ContextBuilder, MemoryLoader, MemoryProvider, PromptOrchestrator, RuleIndex, StaticContext,

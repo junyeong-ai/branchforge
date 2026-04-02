@@ -100,6 +100,20 @@ impl AgentBuilder {
             agent.runtime_mut().context_scope = Some(scope);
         }
 
+        if let Some(chain) = self.compaction_chain {
+            agent.runtime_mut().compaction_chain = Some(chain);
+        }
+
+        if let Some(coordination) = self.coordination {
+            let directory = std::sync::Arc::new(crate::orchestration::AgentDirectory::new());
+            agent.runtime_mut().agent_directory = Some(directory);
+            agent.runtime_mut().coordination = Some(coordination);
+        }
+
+        if let Some(strategy) = self.recovery_strategy {
+            agent.runtime_mut().recovery_strategy = Some(strategy);
+        }
+
         agent.persist_session_state().await?;
         if let Some(tsm) = self.tool_search_manager {
             agent = agent.tool_search_manager(tsm);

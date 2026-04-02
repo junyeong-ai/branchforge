@@ -16,7 +16,7 @@ use crate::hooks::{HookContext, HookEvent, HookInput, HookManager};
 use crate::session::{ToolExecution, ToolState};
 use crate::types::{CompactResult, ContentBlock, ToolResult, ToolResultBlock, ToolUseBlock, Usage};
 
-use super::config::{BudgetConfig, ExecutionConfig};
+use super::config::BudgetConfig;
 use super::state::AgentMetrics;
 use super::state_formatter::collect_compaction_state;
 
@@ -368,6 +368,32 @@ pub(crate) async fn try_activate_dynamic_rules(
     }
 }
 
+/// Emit a cost report event at the end of execution.
+pub(crate) fn emit_cost_report(
+    event_bus: Option<&crate::events::EventBus>,
+    metrics: &AgentMetrics,
+    session_id: &str,
+) {
+    if let Some(bus) = event_bus {
+        let summary = metrics.cost_summary();
+        bus.emit_simple(
+            crate::events::EventKind::Custom("cost_report"),
+            serde_json::json!({
+                "session_id": session_id,
+                "total_cost_usd": summary.total_cost_usd.to_string(),
+                "per_model": summary.per_model.iter().map(|e| {
+                    serde_json::json!({
+                        "model": e.model,
+                        "cost_usd": e.cost_usd.to_string(),
+                        "input_tokens": e.input_tokens,
+                        "output_tokens": e.output_tokens,
+                    })
+                }).collect::<Vec<_>>(),
+            }),
+        );
+    }
+}
+
 /// Run Stop and SessionEnd hooks in sequence.
 pub(crate) async fn run_stop_hooks(hooks: &HookManager, hook_ctx: &HookContext, session_id: &str) {
     let stop_input = HookInput::stop(session_id);
@@ -387,16 +413,13 @@ pub(crate) async fn run_stop_hooks(hooks: &HookManager, hook_ctx: &HookContext, 
 /// Check whether compaction is needed and perform it if so.
 pub(crate) async fn handle_compaction(
     tool_state: &ToolState,
-    client: &crate::Client,
-    tools: &ToolRegistry,
-    hooks: &HookManager,
+    runtime: &super::runtime::AgentRuntime,
     hook_ctx: &HookContext,
     session_id: &str,
-    config: &ExecutionConfig,
     max_tokens: u64,
     metrics: &mut AgentMetrics,
-    event_bus: Option<&crate::events::EventBus>,
 ) {
+    let config = &runtime.config.execution;
     let should_compact = tool_state
         .with_session(|session| {
             config.auto_compact && session.should_compact(max_tokens, config.compact_threshold)
@@ -408,7 +431,8 @@ pub(crate) async fn handle_compaction(
     }
 
     let pre_compact_input = HookInput::pre_compact(session_id);
-    if let Err(e) = hooks
+    if let Err(e) = runtime
+        .hooks
         .execute(HookEvent::PreCompact, pre_compact_input, hook_ctx)
         .await
     {
@@ -416,7 +440,7 @@ pub(crate) async fn handle_compaction(
     }
 
     debug!("Compacting session context");
-    let compact_result = tool_state.compact(client).await;
+    let compact_result = tool_state.compact(&runtime.client).await;
 
     match compact_result {
         Ok(CompactResult::Compacted {
@@ -426,7 +450,7 @@ pub(crate) async fn handle_compaction(
         }) => {
             info!(saved_tokens, "Session context compacted");
             metrics.record_compaction();
-            if let Some(bus) = event_bus {
+            if let Some(bus) = runtime.event_bus.as_deref() {
                 bus.emit_simple(
                     crate::events::EventKind::SessionCompacted,
                     serde_json::json!({
@@ -437,7 +461,7 @@ pub(crate) async fn handle_compaction(
                 );
             }
 
-            let state_sections = collect_compaction_state(tools).await;
+            let state_sections = collect_compaction_state(&runtime.tools).await;
             if !state_sections.is_empty() {
                 let _ = tool_state
                     .with_session_mut(|session| {
@@ -448,12 +472,113 @@ pub(crate) async fn handle_compaction(
                     })
                     .await;
             }
+
+            runtime.invalidate_caches_after_compact().await;
+        }
+        Ok(CompactResult::Truncated {
+            truncation_count,
+            estimated_token_savings,
+        }) => {
+            debug!(
+                truncation_count,
+                estimated_token_savings, "Micro-compaction truncated content blocks"
+            );
+            runtime.invalidate_caches_after_compact().await;
         }
         Ok(CompactResult::NotNeeded | CompactResult::Skipped { .. }) => {
             debug!("Compaction skipped or not needed");
         }
         Err(e) => {
             warn!(error = %e, "Session compaction failed");
+        }
+    }
+}
+
+/// Check whether an error is a context overflow that can be recovered from.
+pub(crate) fn is_context_overflow_error(err: &crate::Error) -> bool {
+    matches!(
+        err,
+        crate::Error::ContextWindowExceeded { .. }
+            | crate::Error::ContextOverflow { .. }
+            | crate::Error::Api {
+                status: Some(413),
+                ..
+            }
+    )
+}
+
+/// Attempt context recovery using the configured strategy.
+///
+/// Returns `Some(RecoveryAction)` if recovery was attempted, `None` if no
+/// strategy is configured or the error is not a context overflow.
+pub(crate) async fn try_recover(
+    error: &crate::Error,
+    tool_state: &ToolState,
+    runtime: &super::runtime::AgentRuntime,
+    max_tokens: u64,
+    attempt: &mut u32,
+) -> Option<crate::session::compact::recovery::RecoveryAction> {
+    use crate::session::compact::recovery::{RecoveryContext, RecoveryErrorKind};
+
+    let strategy = runtime.recovery_strategy.as_ref()?;
+
+    let error_kind = match error {
+        crate::Error::ContextWindowExceeded {
+            estimated, limit, ..
+        } => RecoveryErrorKind::ContextOverflow {
+            estimated: *estimated,
+            limit: *limit,
+        },
+        crate::Error::ContextOverflow { current, max } => RecoveryErrorKind::ContextOverflow {
+            estimated: *current as u64,
+            limit: *max as u64,
+        },
+        crate::Error::Api {
+            message,
+            status: Some(413),
+            ..
+        } => RecoveryErrorKind::ApiPayloadTooLarge {
+            message: message.clone(),
+        },
+        _ => return None,
+    };
+
+    let ctx = RecoveryContext {
+        error_kind,
+        attempt: *attempt,
+        max_attempts: 3,
+        current_tokens: tool_state.with_session(|s| s.current_input_tokens).await,
+        max_tokens,
+    };
+
+    let result = strategy
+        .attempt_recovery(&ctx, tool_state, Some(&runtime.client), None)
+        .await;
+
+    *attempt += 1;
+
+    match result {
+        Ok(action) => {
+            info!(
+                strategy = strategy.name(),
+                attempt = *attempt,
+                action = ?action,
+                "Context recovery attempted"
+            );
+            if let Some(bus) = runtime.event_bus.as_ref() {
+                bus.emit_simple(
+                    crate::events::EventKind::Custom("context_recovery"),
+                    serde_json::json!({
+                        "attempt": *attempt,
+                        "action": format!("{:?}", action),
+                    }),
+                );
+            }
+            Some(action)
+        }
+        Err(e) => {
+            warn!(error = %e, "Context recovery failed");
+            None
         }
     }
 }

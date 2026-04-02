@@ -10,8 +10,8 @@ use tracing::{debug, warn};
 
 use super::AgentMetrics;
 use super::common::{
-    BudgetContext, accumulate_inner_usage, accumulate_response_usage, emit_tokens_consumed,
-    emit_tool_executed, handle_compaction, maybe_emit_budget_alert,
+    BudgetContext, accumulate_inner_usage, accumulate_response_usage, emit_cost_report,
+    emit_tokens_consumed, emit_tool_executed, handle_compaction, maybe_emit_budget_alert,
     maybe_invoke_explicit_skill_command, run_post_tool_hooks, run_stop_hooks,
     try_activate_dynamic_rules,
 };
@@ -170,6 +170,7 @@ struct StreamState {
     last_chunk_time: Instant,
     pending_tool_results: Vec<ToolResultBlock>,
     pending_tool_uses: Vec<ToolUseBlock>,
+    recovery_attempts: u32,
     /// Accumulator for tool_use content blocks being streamed.
     /// Bedrock (and direct API with BoxedItemStream) sends ContentBlockStart,
     /// then ContentBlockDelta(InputJsonDelta), then ContentBlockStop.
@@ -204,6 +205,7 @@ impl StreamState {
             last_chunk_time: now,
             pending_tool_results: Vec::new(),
             pending_tool_uses: Vec::new(),
+            recovery_attempts: 0,
             accumulating_tool_use: None,
             final_text: String::new(),
             total_usage: Usage::default(),
@@ -229,6 +231,11 @@ impl StreamState {
         stop_reason: StopReason,
         messages: Vec<crate::types::Message>,
     ) -> AgentResult {
+        emit_cost_report(
+            self.cfg.runtime.event_bus.as_deref(),
+            &self.metrics,
+            &self.cfg.session_id,
+        );
         let structured_output = self.extract_structured_output(&self.final_text);
         AgentResult::new(
             self.final_text.clone(),
@@ -600,11 +607,37 @@ impl StreamState {
             .await
         {
             Ok(r) => r,
+            Err(e) if super::common::is_context_overflow_error(&e) => {
+                if let Some(action) = super::common::try_recover(
+                    &e,
+                    &self.cfg.tool_state,
+                    &self.cfg.runtime,
+                    context_window::for_model(&self.cfg.runtime.config.model.primary),
+                    &mut self.recovery_attempts,
+                )
+                .await
+                {
+                    use crate::session::compact::recovery::RecoveryAction;
+                    match action {
+                        RecoveryAction::Retry | RecoveryAction::CompactAndRetry => {
+                            self.phase = Phase::StartRequest;
+                            return None;
+                        }
+                        RecoveryAction::Abort => {
+                            self.phase = Phase::Done;
+                            return Some(Err(e));
+                        }
+                    }
+                }
+                self.phase = Phase::Done;
+                return Some(Err(e));
+            }
             Err(e) => {
                 self.phase = Phase::Done;
                 return Some(Err(e));
             }
         };
+        self.recovery_attempts = 0;
 
         self.metrics.record_api_call();
 
@@ -1138,15 +1171,11 @@ impl StreamState {
 
         handle_compaction(
             &self.cfg.tool_state,
-            &self.cfg.runtime.client,
-            &self.cfg.runtime.tools,
-            &self.cfg.runtime.hooks,
+            &self.cfg.runtime,
             &self.cfg.hook_context,
             &self.cfg.session_id,
-            &self.cfg.runtime.config.execution,
             max_tokens,
             &mut self.metrics,
-            self.cfg.runtime.event_bus.as_deref(),
         )
         .await;
         persist_stream_session_state(

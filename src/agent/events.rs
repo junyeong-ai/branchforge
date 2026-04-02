@@ -156,6 +156,12 @@ impl AgentResult {
         &self.session_id
     }
 
+    /// Build a [`CostSummary`](crate::budget::report::CostSummary) from the result metrics.
+    #[must_use]
+    pub fn cost_summary(&self) -> crate::budget::report::CostSummary {
+        self.metrics.cost_summary()
+    }
+
     pub fn extract<T: serde::de::DeserializeOwned>(&self) -> crate::Result<T> {
         let value = self
             .structured_output

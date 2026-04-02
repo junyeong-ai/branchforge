@@ -79,6 +79,10 @@ pub struct AgentBuilder {
     pub(super) tool_search_manager: Option<std::sync::Arc<crate::tools::ToolSearchManager>>,
     pub(super) session_manager: Option<crate::session::SessionManager>,
     pub(super) context_scope: Option<crate::context_scope::SharedContextScope>,
+    pub(super) compaction_chain: Option<std::sync::Arc<crate::session::compact::CompactionChain>>,
+    pub(super) coordination: Option<std::sync::Arc<dyn crate::orchestration::Coordination>>,
+    pub(super) recovery_strategy:
+        Option<std::sync::Arc<dyn crate::session::compact::recovery::RecoveryStrategy>>,
     pub(super) authorization_policy_explicit: bool,
 
     // Resource level flags - loaded in fixed order during build()
@@ -900,6 +904,56 @@ impl AgentBuilder {
     pub fn context_scope(mut self, scope: crate::context_scope::SharedContextScope) -> Self {
         self.context_scope = Some(scope);
         self
+    }
+
+    // =========================================================================
+    // Compaction
+    // =========================================================================
+
+    /// Set a custom compaction chain.
+    pub fn compaction_chain(mut self, chain: crate::session::compact::CompactionChain) -> Self {
+        self.compaction_chain = Some(std::sync::Arc::new(chain));
+        self
+    }
+
+    /// Configure a default advanced compaction chain (MicroCompaction → FullCompaction).
+    pub fn advanced_compaction(self) -> Self {
+        let chain = crate::session::compact::CompactionChain::builder()
+            .strategy(crate::session::compact::MicroCompaction::default())
+            .strategy(crate::session::compact::FullCompaction::default())
+            .build();
+        self.compaction_chain(chain)
+    }
+
+    // =========================================================================
+    // Coordination
+    // =========================================================================
+
+    /// Set a multi-agent coordination mode.
+    pub fn coordination(
+        mut self,
+        coord: impl crate::orchestration::Coordination + 'static,
+    ) -> Self {
+        self.coordination = Some(std::sync::Arc::new(coord));
+        self
+    }
+
+    // =========================================================================
+    // Recovery
+    // =========================================================================
+
+    /// Sets a custom context recovery strategy for handling context overflow errors.
+    pub fn recovery_strategy(
+        mut self,
+        strategy: impl crate::session::compact::recovery::RecoveryStrategy + 'static,
+    ) -> Self {
+        self.recovery_strategy = Some(std::sync::Arc::new(strategy));
+        self
+    }
+
+    /// Enables the default context recovery strategy ([`ContextRecovery`](crate::session::ContextRecovery)).
+    pub fn default_recovery(self) -> Self {
+        self.recovery_strategy(crate::session::compact::recovery::ContextRecovery::default())
     }
 
     // =========================================================================

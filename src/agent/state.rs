@@ -221,6 +221,28 @@ impl AgentMetrics {
     pub fn total_model_cost(&self) -> Decimal {
         self.model_usage.values().map(|m| m.cost_usd).sum()
     }
+
+    /// Build a [`CostSummary`](crate::budget::report::CostSummary) snapshot from current metrics.
+    pub fn cost_summary(&self) -> crate::budget::report::CostSummary {
+        crate::budget::report::CostSummary {
+            total_cost_usd: self.total_cost_usd,
+            per_model: self
+                .model_usage
+                .iter()
+                .map(|(model, usage)| crate::budget::report::ModelCostEntry {
+                    model: model.clone(),
+                    cost_usd: usage.cost_usd,
+                    input_tokens: usage.input_tokens as u64,
+                    output_tokens: usage.output_tokens as u64,
+                })
+                .collect(),
+            total_input_tokens: self.input_tokens as u64,
+            total_output_tokens: self.output_tokens as u64,
+            cache_read_tokens: self.cache_read_tokens as u64,
+            cache_creation_tokens: self.cache_creation_tokens as u64,
+            duration_ms: self.execution_time_ms,
+        }
+    }
 }
 
 #[cfg(test)]
