@@ -18,6 +18,10 @@ cargo fmt --all -- --check
 ## Feature Flags
 
 ```bash
+cargo build                                     # default: coding-tools enabled
+cargo build --no-default-features               # pure SDK core (no file/bash tools)
+cargo build --features "coding-tools"           # file I/O, bash, bash AST analysis
+cargo build --features "scheduling"             # cron scheduler, remote triggers
 cargo build --features "cli-auth"               # Claude Code CLI OAuth credentials
 cargo build --features "mcp"                    # MCP server integration
 cargo build --features "cloud-all"              # aws, gcp, azure, openai, gemini
@@ -48,6 +52,9 @@ cargo build --all-features                      # full + multimedia
 - `src/authorization/`: execution modes, tool policy rules, tool limits
 - `src/events/`: non-blocking event bus for observability
 - `src/mcp/`: MCP server transport and tool discovery
+- `src/orchestration/`: multi-agent coordination, agent directory, inter-agent messaging
 - `src/security/`: SecureFs, bash command analysis, sandboxing
 - `src/skills/`: skill registry, progressive disclosure, on-demand loading
 - `src/subagents/`: delegation, tool restrictions, model resolution
+- `src/tokens/`: token counting, budget, cache break detection
+- `src/scheduling/`: cron scheduler, remote triggers
