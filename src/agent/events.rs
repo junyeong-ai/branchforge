@@ -52,6 +52,25 @@ pub enum AgentEvent {
         is_error: bool,
         duration_ms: u64,
     },
+    /// Sub-step progress during a tool execution.
+    ///
+    /// Emitted between `ToolStart` and `ToolComplete` to provide real-time
+    /// visibility into long-running tool operations. Optional — tools that
+    /// don't call `ctx.emit_progress()` produce no progress events.
+    ToolProgress {
+        id: String,
+        name: String,
+        /// Machine-readable step identifier (e.g., "schema_discovery", "compiling").
+        step: String,
+        /// Step lifecycle status: "started", "completed", "failed".
+        status: String,
+        /// Step duration in milliseconds (set on completed/failed).
+        #[serde(skip_serializing_if = "Option::is_none")]
+        duration_ms: Option<u64>,
+        /// Step-specific metadata.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        metadata: Option<serde_json::Value>,
+    },
     /// A tool was blocked by a security hook.
     ToolBlocked {
         id: String,
@@ -85,6 +104,7 @@ impl AgentEvent {
             Self::ToolStart { .. } => "tool_start",
             Self::ToolReview { .. } => "tool_review",
             Self::ToolComplete { .. } => "tool_complete",
+            Self::ToolProgress { .. } => "tool_progress",
             Self::ToolBlocked { .. } => "tool_blocked",
             Self::TurnUsage { .. } => "turn_usage",
             Self::Complete(_) => "complete",

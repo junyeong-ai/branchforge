@@ -108,6 +108,21 @@ impl ToolRegistry {
     }
 
     pub async fn execute(&self, name: &str, input: serde_json::Value) -> ToolResult {
+        self.execute_with_progress(name, input, None).await
+    }
+
+    /// Execute a tool with optional progress channel.
+    ///
+    /// If `progress_tx` is provided, the tool can call `ctx.emit_progress()`
+    /// and progress events will be collected in the channel. The caller
+    /// (typically the streaming pipeline) drains these and converts them
+    /// to `AgentEvent::ToolProgress` events.
+    pub async fn execute_with_progress(
+        &self,
+        name: &str,
+        input: serde_json::Value,
+        progress_tx: Option<super::context::ProgressSender>,
+    ) -> ToolResult {
         let tool = match self.tools.get(name) {
             Some(t) => Arc::clone(t.value()),
             None => return ToolResult::unknown_tool(name),
@@ -127,9 +142,16 @@ impl ToolRegistry {
         let limits = self.env.context().limits_for(name);
         let timeout_ms = limits.timeout_ms.unwrap_or(DEFAULT_TOOL_TIMEOUT_MS);
 
+        // Create a context with progress channel if provided
+        let ctx = if let Some(ptx) = progress_tx {
+            self.env.context().clone().with_progress(ptx)
+        } else {
+            self.env.context().clone()
+        };
+
         let result = tokio::time::timeout(
             Duration::from_millis(timeout_ms),
-            tool.execute(input, self.env.context()),
+            tool.execute(input, &ctx),
         )
         .await;
 

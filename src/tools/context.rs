@@ -15,6 +15,18 @@ use crate::security::sandbox::{DomainCheck, SandboxResult};
 use crate::security::{ResourceLimits, SecurityContext, SecurityError};
 use crate::session::{SessionAccessScope, SessionManager, ToolState};
 
+/// Progress event from a tool sub-step, emitted via `ExecutionContext::emit_progress()`.
+#[derive(Debug, Clone)]
+pub struct ProgressEvent {
+    pub step: String,
+    pub status: String,
+    pub duration_ms: Option<u64>,
+    pub metadata: Option<serde_json::Value>,
+}
+
+/// Sender for tool progress events.
+pub type ProgressSender = tokio::sync::mpsc::UnboundedSender<ProgressEvent>;
+
 #[derive(Clone)]
 pub struct ExecutionContext {
     security: Arc<SecurityContext>,
@@ -22,6 +34,7 @@ pub struct ExecutionContext {
     session_id: Option<String>,
     session_manager: Option<SessionManager>,
     session_scope: Option<SessionAccessScope>,
+    progress_tx: Option<ProgressSender>,
 }
 
 impl ExecutionContext {
@@ -32,6 +45,7 @@ impl ExecutionContext {
             session_id: None,
             session_manager: None,
             session_scope: None,
+            progress_tx: None,
         }
     }
 
@@ -51,6 +65,7 @@ impl ExecutionContext {
             session_id: None,
             session_manager: None,
             session_scope: None,
+            progress_tx: None,
         }
     }
 
@@ -62,6 +77,34 @@ impl ExecutionContext {
 
     pub fn session_id(&self) -> Option<&str> {
         self.session_id.as_deref()
+    }
+
+    /// Attach a progress channel for tool sub-step events.
+    pub fn with_progress(mut self, tx: ProgressSender) -> Self {
+        self.progress_tx = Some(tx);
+        self
+    }
+
+    /// Emit a sub-step progress event during tool execution.
+    ///
+    /// Progress events appear in the agent event stream as [`AgentEvent::ToolProgress`]
+    /// between `ToolStart` and `ToolComplete`. Optional — tools that don't call
+    /// this method produce no progress events.
+    pub fn emit_progress(
+        &self,
+        step: &str,
+        status: &str,
+        duration_ms: Option<u64>,
+        metadata: Option<serde_json::Value>,
+    ) {
+        if let Some(tx) = &self.progress_tx {
+            let _ = tx.send(ProgressEvent {
+                step: step.into(),
+                status: status.into(),
+                duration_ms,
+                metadata,
+            });
+        }
     }
 
     pub fn with_session_manager(mut self, manager: SessionManager) -> Self {

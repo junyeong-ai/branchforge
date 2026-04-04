@@ -1070,15 +1070,22 @@ impl StreamState {
                 let tools = Arc::clone(&tools_ref);
                 let scope = context_scope.clone();
                 async move {
+                    // Create per-tool progress channel for sub-step visibility
+                    let (ptx, mut prx) = tokio::sync::mpsc::unbounded_channel::<crate::ProgressEvent>();
                     let start = Instant::now();
                     let result = if let Some(ref s) = scope {
-                        let fut = tools.execute(&name, input.clone());
+                        let fut = tools.execute_with_progress(&name, input.clone(), Some(ptx));
                         s.wrap_tool_future(Box::pin(fut)).await
                     } else {
-                        tools.execute(&name, input.clone()).await
+                        tools.execute_with_progress(&name, input.clone(), Some(ptx)).await
                     };
                     let duration_ms = start.elapsed().as_millis() as u64;
-                    (id, name, input, result, duration_ms)
+                    // Collect progress events
+                    let mut progress = Vec::new();
+                    while let Ok(p) = prx.try_recv() {
+                        progress.push(p);
+                    }
+                    (id, name, input, result, duration_ms, progress)
                 }
             });
             let batch_results: Vec<_> = join_all(batch_futures).await;
@@ -1088,10 +1095,21 @@ impl StreamState {
         self.all_non_retryable = !parallel_results.is_empty()
             && parallel_results
                 .iter()
-                .all(|(_, _, _, result, _)| result.is_non_retryable());
+                .all(|(_, _, _, result, _, _)| result.is_non_retryable());
 
         // Phase 3: Post-processing (serial — metrics, hooks, graph recording)
-        for (id, name, input, result, duration_ms) in parallel_results {
+        for (id, name, input, result, duration_ms, progress) in parallel_results {
+            // Emit ToolProgress events before ToolComplete
+            for p in progress {
+                events.push(AgentEvent::ToolProgress {
+                    id: id.clone(),
+                    name: name.clone(),
+                    step: p.step,
+                    status: p.status,
+                    duration_ms: p.duration_ms,
+                    metadata: p.metadata,
+                });
+            }
             let output = result.text();
             let is_error = result.is_error();
 

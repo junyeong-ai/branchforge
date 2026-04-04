@@ -105,7 +105,7 @@ pub use graph::{
     GraphEvent, GraphEventBody, GraphMaterializer, GraphNode, NodeId, NodeKind, ReplayInput,
     SessionGraph,
 };
-pub use tools::{ExecutionContext, SchemaTool, Tool, ToolRegistry, ToolSurface};
+pub use tools::{ExecutionContext, ProgressEvent, ProgressSender, SchemaTool, Tool, ToolRegistry, ToolSurface};
 pub use types::{ContentBlock, Message, Role, ToolDefinition, ToolError, ToolOutput, ToolResult};
 
 // =========================================================================
