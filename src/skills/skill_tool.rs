@@ -62,10 +62,10 @@ impl SkillTool {
         Some(SkillInput { skill, args })
     }
 
-    pub async fn execute_explicit_input(&self, input: SkillInput) -> ToolResult {
+    pub async fn execute_by_name_input(&self, input: SkillInput) -> ToolResult {
         let runtime = self.runtime.read().await;
         let result = runtime
-            .execute_explicit(&input.skill, input.args.as_deref())
+            .execute_by_name(&input.skill, input.args.as_deref())
             .await;
         Self::tool_result_from_skill_result(result)
     }

@@ -4,14 +4,14 @@ use serde::{Deserialize, Serialize};
 pub struct TokenBudget {
     pub input_tokens: u64,
     pub cache_read_tokens: u64,
-    pub cache_write_tokens: u64,
+    pub cache_creation_tokens: u64,
     pub output_tokens: u64,
 }
 
 impl TokenBudget {
     #[inline]
     pub fn context_usage(&self) -> u64 {
-        self.input_tokens + self.cache_read_tokens + self.cache_write_tokens
+        self.input_tokens + self.cache_read_tokens + self.cache_creation_tokens
     }
 
     #[inline]
@@ -24,9 +24,9 @@ impl TokenBudget {
         self.cache_read_tokens = self
             .cache_read_tokens
             .saturating_add(other.cache_read_tokens);
-        self.cache_write_tokens = self
-            .cache_write_tokens
-            .saturating_add(other.cache_write_tokens);
+        self.cache_creation_tokens = self
+            .cache_creation_tokens
+            .saturating_add(other.cache_creation_tokens);
         self.output_tokens = self.output_tokens.saturating_add(other.output_tokens);
     }
 
@@ -40,7 +40,7 @@ impl From<&crate::types::Usage> for TokenBudget {
         Self {
             input_tokens: usage.input_tokens as u64,
             cache_read_tokens: usage.cache_read_input_tokens.unwrap_or(0) as u64,
-            cache_write_tokens: usage.cache_creation_input_tokens.unwrap_or(0) as u64,
+            cache_creation_tokens: usage.cache_creation_input_tokens.unwrap_or(0) as u64,
             output_tokens: usage.output_tokens as u64,
         }
     }
@@ -55,7 +55,7 @@ mod tests {
         let budget = TokenBudget {
             input_tokens: 100,
             cache_read_tokens: 200_000,
-            cache_write_tokens: 0,
+            cache_creation_tokens: 0,
             output_tokens: 500,
         };
 
@@ -68,13 +68,13 @@ mod tests {
         let mut a = TokenBudget {
             input_tokens: 100,
             cache_read_tokens: 50,
-            cache_write_tokens: 25,
+            cache_creation_tokens: 25,
             output_tokens: 200,
         };
         let b = TokenBudget {
             input_tokens: 100,
             cache_read_tokens: 50,
-            cache_write_tokens: 25,
+            cache_creation_tokens: 25,
             output_tokens: 200,
         };
 

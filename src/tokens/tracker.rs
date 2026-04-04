@@ -138,7 +138,7 @@ impl TokenTracker {
             self.cumulative.input_tokens,
             self.cumulative.output_tokens,
             self.cumulative.cache_read_tokens,
-            self.cumulative.cache_write_tokens,
+            self.cumulative.cache_creation_tokens,
         )
     }
 

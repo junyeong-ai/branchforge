@@ -83,6 +83,7 @@ impl SkillRuntime {
             allowed_tools: skill.allowed_tools.clone(),
             model: skill.model.clone(),
             base_dir: skill.base_dir(),
+
             agent: skill.agent.clone(),
             index: skill,
             execution_kind,
@@ -101,11 +102,11 @@ impl SkillRuntime {
             ));
         }
 
-        self.execute_explicit(name, args).await
+        self.execute_by_name(name, args).await
     }
 
     #[instrument(skip(self, args), fields(skill = %name))]
-    pub async fn execute_explicit(&self, name: &str, args: Option<&str>) -> SkillResult {
+    pub async fn execute_by_name(&self, name: &str, args: Option<&str>) -> SkillResult {
         let spec = match self.load_spec(name, args).await {
             Ok(spec) => spec,
             Err(error) => return SkillResult::error(error),
@@ -231,7 +232,7 @@ mod tests {
         let result = runtime.execute("internal", None).await;
         assert!(!result.success);
 
-        let result = runtime.execute_explicit("internal", None).await;
+        let result = runtime.execute_by_name("internal", None).await;
         assert!(result.success);
     }
 

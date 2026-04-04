@@ -305,7 +305,7 @@ pub(crate) async fn maybe_invoke_explicit_skill_command(
         .map_err(|e| crate::Error::Config(format!("Invalid explicit skill input: {e}")))?;
 
     let start = Instant::now();
-    let result = Box::pin(skill_tool.execute_explicit_input(typed_input)).await;
+    let result = Box::pin(skill_tool.execute_by_name_input(typed_input)).await;
     let duration_ms = start.elapsed().as_millis() as u64;
     let is_error = result.is_error();
     let tool_use_id = format!("skill_{}", uuid::Uuid::new_v4().simple());
