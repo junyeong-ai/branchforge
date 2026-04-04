@@ -38,7 +38,6 @@ The runtime keeps skill metadata cheap and always available, then loads full ski
 - `model`
 - `context`
 - `agent`
-- `hooks`
 
 ## Execution Semantics
 
@@ -78,7 +77,7 @@ In the core agent runtime this means:
 For SDK consumers using the low-level runtime directly:
 
 - `SkillRuntime::execute()` and `SkillTool` enforce manual-only blocking
-- `SkillRuntime::execute_explicit()` is the intentional escape hatch for trusted explicit routing
+- `SkillRuntime::execute_by_name()` is invoked for trusted explicit routing (policy is checked by the caller)
 
 ## Example
 

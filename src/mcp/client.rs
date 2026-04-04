@@ -13,7 +13,7 @@ use tokio::sync::RwLock;
 
 use super::{
     McpConnectionStatus, McpError, McpResourceDefinition, McpResult, McpServerConfig,
-    McpServerState, McpToolDefinition, McpToolResult,
+    McpServerState, McpTimeouts, McpToolDefinition, McpToolResult,
 };
 #[cfg(feature = "mcp")]
 use super::{McpContent, McpServerInfo};
@@ -48,6 +48,7 @@ fn map_service_error(e: ServiceError, context: &str) -> McpError {
 pub struct McpClient {
     name: String,
     state: McpServerState,
+    timeouts: McpTimeouts,
     #[cfg(feature = "mcp")]
     service: Option<Arc<RwLock<McpRunningService>>>,
     #[cfg(not(feature = "mcp"))]
@@ -60,11 +61,23 @@ impl McpClient {
         Self {
             name: name.clone(),
             state: McpServerState::new(name, config),
+            timeouts: McpTimeouts::default(),
             #[cfg(feature = "mcp")]
             service: None,
             #[cfg(not(feature = "mcp"))]
             _phantom: std::marker::PhantomData,
         }
+    }
+
+    /// Create a client with custom timeouts.
+    pub fn with_timeouts(mut self, timeouts: McpTimeouts) -> Self {
+        self.timeouts = timeouts;
+        self
+    }
+
+    /// Returns the current timeout configuration.
+    pub fn timeouts(&self) -> &McpTimeouts {
+        &self.timeouts
     }
 
     #[cfg(feature = "mcp")]
@@ -108,13 +121,11 @@ impl McpClient {
             message: format!("Failed to create transport: {}", e),
         })?;
 
-        let service: McpRunningService = timeout(super::MCP_CONNECT_TIMEOUT, ().serve(transport))
+        let connect_timeout = self.timeouts.connection;
+        let service: McpRunningService = timeout(connect_timeout, ().serve(transport))
             .await
             .map_err(|_| McpError::ConnectionFailed {
-                message: format!(
-                    "Connection timed out after {:?}",
-                    super::MCP_CONNECT_TIMEOUT
-                ),
+                message: format!("Connection timed out after {:?}", connect_timeout),
             })?
             .map_err(|e| McpError::ConnectionFailed {
                 message: format!("Failed to connect: {}", e),
@@ -173,25 +184,106 @@ impl McpClient {
         Ok(())
     }
 
-    /// Connect via SSE transport.
+    /// Connect via SSE (Streamable HTTP) transport.
     ///
-    /// SSE transport is not yet supported by the rmcp crate.
-    /// The MCP specification has moved to Streamable HTTP as the preferred
-    /// remote transport. Use stdio transport for local servers.
+    /// Uses rmcp's `StreamableHttpClientTransport` with reqwest to establish
+    /// a streaming HTTP connection to a remote MCP server. Custom headers
+    /// from the configuration are forwarded as HTTP headers on every request.
     #[cfg(feature = "mcp")]
     async fn connect_sse(
         &mut self,
         url: String,
-        _headers: HashMap<String, String>,
+        headers: HashMap<String, String>,
     ) -> McpResult<()> {
-        Err(McpError::Protocol {
-            message: format!(
-                "SSE transport is not supported (url: {}). \
-                 Use stdio transport for local MCP servers, or wait for \
-                 Streamable HTTP transport support.",
-                url
-            ),
-        })
+        use http::{HeaderName, HeaderValue};
+        use rmcp::transport::streamable_http_client::{
+            StreamableHttpClientTransport, StreamableHttpClientTransportConfig,
+        };
+        use tokio::time::timeout;
+
+        // Build custom headers map for rmcp
+        let mut custom_headers: HashMap<HeaderName, HeaderValue> = HashMap::new();
+        for (key, value) in &headers {
+            let header_name =
+                HeaderName::from_bytes(key.as_bytes()).map_err(|e| McpError::ConnectionFailed {
+                    message: format!("Invalid header name '{}': {}", key, e),
+                })?;
+            let header_value =
+                HeaderValue::from_str(value).map_err(|e| McpError::ConnectionFailed {
+                    message: format!("Invalid header value for '{}': {}", key, e),
+                })?;
+            custom_headers.insert(header_name, header_value);
+        }
+
+        let config = StreamableHttpClientTransportConfig::with_uri(url.clone())
+            .custom_headers(custom_headers);
+
+        let transport = StreamableHttpClientTransport::from_config(config);
+
+        let connect_timeout = self.timeouts.connection;
+        let service: McpRunningService = timeout(connect_timeout, ().serve(transport))
+            .await
+            .map_err(|_| McpError::ConnectionFailed {
+                message: format!(
+                    "SSE connection to '{}' timed out after {:?}",
+                    url, connect_timeout
+                ),
+            })?
+            .map_err(|e| McpError::ConnectionFailed {
+                message: format!("SSE connection to '{}' failed: {}", url, e),
+            })?;
+
+        if let Some(info) = service.peer_info() {
+            let protocol_version = info.protocol_version.to_string();
+
+            if !super::SUPPORTED_PROTOCOL_VERSIONS.contains(&protocol_version.as_str()) {
+                tracing::warn!(
+                    server = %self.name,
+                    server_version = %protocol_version,
+                    supported = ?super::SUPPORTED_PROTOCOL_VERSIONS,
+                    "MCP protocol version mismatch (SSE)"
+                );
+            }
+
+            self.state.server_info = Some(McpServerInfo {
+                name: info.server_info.name.to_string(),
+                version: info.server_info.version.to_string(),
+                protocol_version,
+            });
+        }
+        self.state.status = McpConnectionStatus::Connected;
+
+        let tools_result = service
+            .list_tools(Default::default())
+            .await
+            .map_err(|e| map_service_error(e, "Failed to list tools (SSE)"))?;
+
+        self.state.tools = tools_result
+            .tools
+            .into_iter()
+            .map(|t| McpToolDefinition {
+                name: t.name.to_string(),
+                description: t.description.map(|d| d.to_string()).unwrap_or_default(),
+                input_schema: serde_json::Value::Object((*t.input_schema).clone()),
+            })
+            .collect();
+
+        if let Ok(resources_result) = service.list_resources(Default::default()).await {
+            self.state.resources = resources_result
+                .resources
+                .into_iter()
+                .map(|r| McpResourceDefinition {
+                    uri: r.raw.uri,
+                    name: r.raw.name,
+                    description: r.raw.description,
+                    mime_type: r.raw.mime_type,
+                })
+                .collect();
+        }
+
+        self.service = Some(Arc::new(RwLock::new(service)));
+
+        Ok(())
     }
 
     pub fn name(&self) -> &str {
@@ -225,9 +317,10 @@ impl McpClient {
                 message: "Not connected".to_string(),
             })?;
 
+        let tool_call_timeout = self.timeouts.tool_call;
         let service = service.read().await;
         let result = timeout(
-            super::MCP_CALL_TIMEOUT,
+            tool_call_timeout,
             service.call_tool({
                 let mut params = CallToolRequestParams::new(name.to_string());
                 if let Some(args) = arguments.as_object().cloned() {
@@ -238,7 +331,7 @@ impl McpClient {
         )
         .await
         .map_err(|_| McpError::ToolError {
-            message: format!("Tool call timed out after {:?}", super::MCP_CALL_TIMEOUT),
+            message: format!("Tool call timed out after {:?}", tool_call_timeout),
         })?
         .map_err(|e| map_service_error(e, "Tool call failed"))?;
 
@@ -327,14 +420,15 @@ impl McpClient {
                 message: "Not connected".to_string(),
             })?;
 
+        let resource_timeout = self.timeouts.resource_read;
         let service = service.read().await;
         let result = timeout(
-            super::MCP_RESOURCE_TIMEOUT,
+            resource_timeout,
             service.read_resource(ReadResourceRequestParams::new(uri)),
         )
         .await
         .map_err(|_| McpError::ResourceNotFound {
-            uri: format!("{}: timed out after {:?}", uri, super::MCP_RESOURCE_TIMEOUT),
+            uri: format!("{}: timed out after {:?}", uri, resource_timeout),
         })?
         .map_err(|e| map_service_error(e, &format!("Resource read failed for {}", uri)))?;
 
@@ -429,5 +523,81 @@ mod tests {
 
         assert_eq!(client.name(), "test");
         assert!(!client.is_connected());
+    }
+
+    #[test]
+    fn test_mcp_client_default_timeouts() {
+        let client = McpClient::new(
+            "test",
+            McpServerConfig::Stdio {
+                command: "echo".to_string(),
+                args: vec![],
+                env: std::collections::HashMap::new(),
+                cwd: None,
+            },
+        );
+
+        let timeouts = client.timeouts();
+        assert_eq!(timeouts.connection, std::time::Duration::from_secs(30));
+        assert_eq!(timeouts.tool_call, std::time::Duration::from_secs(60));
+        assert_eq!(timeouts.resource_read, std::time::Duration::from_secs(30));
+    }
+
+    #[test]
+    fn test_mcp_client_custom_timeouts() {
+        let custom = McpTimeouts {
+            connection: std::time::Duration::from_secs(10),
+            tool_call: std::time::Duration::from_secs(120),
+            resource_read: std::time::Duration::from_secs(5),
+        };
+        let client = McpClient::new(
+            "test",
+            McpServerConfig::Stdio {
+                command: "echo".to_string(),
+                args: vec![],
+                env: std::collections::HashMap::new(),
+                cwd: None,
+            },
+        )
+        .with_timeouts(custom);
+
+        assert_eq!(
+            client.timeouts().connection,
+            std::time::Duration::from_secs(10)
+        );
+        assert_eq!(
+            client.timeouts().tool_call,
+            std::time::Duration::from_secs(120)
+        );
+        assert_eq!(
+            client.timeouts().resource_read,
+            std::time::Duration::from_secs(5)
+        );
+    }
+
+    #[test]
+    fn test_mcp_client_sse_config() {
+        let mut headers = std::collections::HashMap::new();
+        headers.insert("Authorization".to_string(), "Bearer test".to_string());
+        let client = McpClient::new(
+            "sse-test",
+            McpServerConfig::Sse {
+                url: "http://localhost:8080/mcp".to_string(),
+                headers,
+            },
+        );
+
+        assert_eq!(client.name(), "sse-test");
+        assert!(!client.is_connected());
+        match client.state().config {
+            McpServerConfig::Sse {
+                ref url,
+                ref headers,
+            } => {
+                assert_eq!(url, "http://localhost:8080/mcp");
+                assert_eq!(headers.get("Authorization").unwrap(), "Bearer test");
+            }
+            _ => panic!("Expected Sse config"),
+        }
     }
 }

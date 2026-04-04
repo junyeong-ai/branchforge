@@ -12,18 +12,48 @@ pub use toolset::{McpToolset, McpToolsetRegistry, ToolLoadConfig};
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::time::Duration;
 
 const MCP_TOOL_PREFIX: &str = "mcp__";
 
 #[cfg(feature = "mcp")]
 pub(crate) const SUPPORTED_PROTOCOL_VERSIONS: &[&str] = &["2024-11-05", "2025-03-26"];
 
+/// Configurable timeouts for MCP operations.
+#[derive(Clone, Debug)]
+pub struct McpTimeouts {
+    /// Timeout for establishing a connection (default: 30s).
+    pub connection: Duration,
+    /// Timeout for a tool call (default: 60s).
+    pub tool_call: Duration,
+    /// Timeout for reading a resource (default: 30s).
+    pub resource_read: Duration,
+}
+
+impl Default for McpTimeouts {
+    fn default() -> Self {
+        Self {
+            connection: Duration::from_secs(30),
+            tool_call: Duration::from_secs(60),
+            resource_read: Duration::from_secs(30),
+        }
+    }
+}
+
+/// TTL-based cache entry for tool listings from a single MCP server.
 #[cfg(feature = "mcp")]
-pub(crate) const MCP_CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+pub(crate) struct ToolCache {
+    pub tools: Vec<McpToolDefinition>,
+    pub cached_at: std::time::Instant,
+    pub ttl: Duration,
+}
+
 #[cfg(feature = "mcp")]
-pub(crate) const MCP_CALL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
-#[cfg(feature = "mcp")]
-pub(crate) const MCP_RESOURCE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+impl ToolCache {
+    pub fn is_valid(&self) -> bool {
+        self.cached_at.elapsed() < self.ttl
+    }
+}
 
 /// MCP server configuration
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -295,6 +325,44 @@ mod tests {
     }
 
     #[test]
+    fn test_mcp_server_config_sse_serde() {
+        let mut headers = HashMap::new();
+        headers.insert("Authorization".to_string(), "Bearer token123".to_string());
+        let config = McpServerConfig::Sse {
+            url: "http://localhost:8080/mcp".to_string(),
+            headers,
+        };
+
+        let json = serde_json::to_string(&config).unwrap();
+        assert!(json.contains("sse"));
+        assert!(json.contains("http://localhost:8080/mcp"));
+        assert!(json.contains("Bearer token123"));
+
+        // Round-trip
+        let deserialized: McpServerConfig = serde_json::from_str(&json).unwrap();
+        match deserialized {
+            McpServerConfig::Sse { url, headers } => {
+                assert_eq!(url, "http://localhost:8080/mcp");
+                assert_eq!(headers.get("Authorization").unwrap(), "Bearer token123");
+            }
+            _ => panic!("Expected Sse variant"),
+        }
+    }
+
+    #[test]
+    fn test_mcp_server_config_sse_empty_headers() {
+        let json = r#"{"type":"sse","url":"http://example.com/mcp"}"#;
+        let config: McpServerConfig = serde_json::from_str(json).unwrap();
+        match config {
+            McpServerConfig::Sse { url, headers } => {
+                assert_eq!(url, "http://example.com/mcp");
+                assert!(headers.is_empty());
+            }
+            _ => panic!("Expected Sse variant"),
+        }
+    }
+
+    #[test]
     fn test_mcp_server_state_new() {
         let state = McpServerState::new(
             "test",
@@ -309,6 +377,26 @@ mod tests {
         assert_eq!(state.name, "test");
         assert_eq!(state.status, McpConnectionStatus::Connecting);
         assert!(!state.is_connected());
+    }
+
+    #[test]
+    fn test_mcp_timeouts_default() {
+        let timeouts = McpTimeouts::default();
+        assert_eq!(timeouts.connection, Duration::from_secs(30));
+        assert_eq!(timeouts.tool_call, Duration::from_secs(60));
+        assert_eq!(timeouts.resource_read, Duration::from_secs(30));
+    }
+
+    #[test]
+    fn test_mcp_timeouts_custom() {
+        let timeouts = McpTimeouts {
+            connection: Duration::from_secs(10),
+            tool_call: Duration::from_secs(120),
+            resource_read: Duration::from_secs(5),
+        };
+        assert_eq!(timeouts.connection, Duration::from_secs(10));
+        assert_eq!(timeouts.tool_call, Duration::from_secs(120));
+        assert_eq!(timeouts.resource_read, Duration::from_secs(5));
     }
 
     #[test]

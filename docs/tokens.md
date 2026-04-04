@@ -6,7 +6,7 @@ Token tracking separates context-window management from billing-oriented account
 
 - input tokens
 - cache read tokens
-- cache write tokens
+- cache creation tokens
 - output tokens
 
 Context-window usage is based on prompt-side usage, not only fresh input tokens.

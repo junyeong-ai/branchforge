@@ -186,10 +186,16 @@ pub trait Persistence: Send + Sync {
 
     /// Apply a synchronous mutation to a session under an advisory lock.
     ///
-    /// The default implementation performs an unlocked load-modify-save cycle.
-    /// Backends **should** override this with a single-lock approach to avoid
-    /// race conditions when concurrent callers mutate the same session.
+    /// The default implementation performs an **unlocked** load-modify-save cycle,
+    /// which is NOT safe under concurrent access. Backends that support concurrent
+    /// sessions **must** override this with a proper locking mechanism.
     async fn with_session_lock(&self, id: &SessionId, f: SessionMutationFn) -> SessionResult<()> {
+        tracing::warn!(
+            session_id = %id,
+            backend = std::any::type_name::<Self>(),
+            "with_session_lock: using default unlocked load-modify-save — \
+             override this method for concurrent safety"
+        );
         let mut session = self
             .load(id)
             .await?

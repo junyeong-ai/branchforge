@@ -56,5 +56,5 @@ cargo build --all-features                      # full + multimedia
 - `src/security/`: SecureFs, bash command analysis, sandboxing
 - `src/skills/`: skill registry, progressive disclosure, on-demand loading
 - `src/subagents/`: delegation, tool restrictions, model resolution
-- `src/tokens/`: token counting, budget, cache break detection
+- `src/tokens/`: token counting, budget, context window tracking
 - `src/scheduling/`: cron scheduler, remote triggers

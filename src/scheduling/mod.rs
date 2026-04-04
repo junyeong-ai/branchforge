@@ -6,5 +6,5 @@
 mod cron;
 mod trigger;
 
-pub use cron::{CronEntry, CronScheduler};
-pub use trigger::{RemoteTrigger, TriggerConfig, TriggerPayload};
+pub use self::cron::{CronEntry, CronSchedule, CronScheduler};
+pub use trigger::{RemoteTrigger, TriggerConfig, TriggerPayload, TriggerResult};

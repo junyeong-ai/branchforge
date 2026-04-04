@@ -71,7 +71,8 @@ rand = "0.10"
 directories = "6"
 
 # MCP support - optional
-rmcp = { version = "1.3", optional = true, features = ["client", "transport-child-process", "client-side-sse", "reqwest"] }
+rmcp = { version = "1.3", optional = true, features = ["client", "transport-child-process", "client-side-sse", "reqwest", "transport-streamable-http-client-reqwest"] }
+http = { version = "1", optional = true }
 
 # AWS Bedrock - optional
 aws-config = { version = "^1.8", optional = true }
@@ -89,6 +90,9 @@ azure_core = { version = "0.33", optional = true }
 
 # Credential protection - zeroize-on-drop, redacted Debug
 secrecy = { version = "0.10", features = ["serde"] }
+
+# Cron expression parsing - optional
+cron = { version = "0.15", optional = true }
 
 # Decimal precision for financial calculations
 rust_decimal = { version = "1", features = ["serde", "serde-with-str"] }
@@ -126,7 +130,7 @@ default = ["coding-tools"]
 coding-tools = ["tree-sitter", "tree-sitter-bash"]
 
 # Agent scheduling and remote triggers
-scheduling = []
+scheduling = ["cron"]
 
 # CLI OAuth authentication source (ClaudeCliProvider, CliCredentials)
 cli-auth = []
@@ -134,7 +138,7 @@ cli-auth = []
 # File-based resource loaders (DocumentLoader, FileProvider, ChainProvider)
 file-resources = []
 
-mcp = ["rmcp"]
+mcp = ["rmcp", "http"]
 
 # Plugin system with namespace-based resource management
 plugins = ["file-resources"]

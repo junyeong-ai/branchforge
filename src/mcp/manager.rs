@@ -5,6 +5,8 @@ use std::collections::HashMap;
 #[cfg(feature = "mcp")]
 use std::sync::Arc;
 #[cfg(feature = "mcp")]
+use std::time::Duration;
+#[cfg(feature = "mcp")]
 use tokio::sync::RwLock;
 
 use super::{
@@ -12,16 +14,26 @@ use super::{
     McpToolDefinition, McpToolResult,
 };
 #[cfg(feature = "mcp")]
-use super::{ReconnectPolicy, make_mcp_name, parse_mcp_name};
+use super::{McpTimeouts, ReconnectPolicy, ToolCache, make_mcp_name, parse_mcp_name};
 
 #[cfg(feature = "mcp")]
 use super::client::McpClient;
+
+/// Default tool cache TTL: 5 minutes.
+#[cfg(feature = "mcp")]
+const DEFAULT_CACHE_TTL: Duration = Duration::from_secs(300);
 
 pub struct McpManager {
     #[cfg(feature = "mcp")]
     servers: Arc<RwLock<HashMap<String, McpClient>>>,
     #[cfg(feature = "mcp")]
     reconnect_policy: ReconnectPolicy,
+    #[cfg(feature = "mcp")]
+    tool_cache: Arc<RwLock<HashMap<String, ToolCache>>>,
+    #[cfg(feature = "mcp")]
+    cache_ttl: Duration,
+    #[cfg(feature = "mcp")]
+    timeouts: McpTimeouts,
     #[cfg(not(feature = "mcp"))]
     _phantom: std::marker::PhantomData<()>,
 }
@@ -38,6 +50,9 @@ impl McpManager {
         Self {
             servers: Arc::new(RwLock::new(HashMap::new())),
             reconnect_policy: ReconnectPolicy::default(),
+            tool_cache: Arc::new(RwLock::new(HashMap::new())),
+            cache_ttl: DEFAULT_CACHE_TTL,
+            timeouts: McpTimeouts::default(),
         }
     }
 
@@ -51,6 +66,20 @@ impl McpManager {
     #[cfg(feature = "mcp")]
     pub fn reconnect_policy(mut self, policy: ReconnectPolicy) -> Self {
         self.reconnect_policy = policy;
+        self
+    }
+
+    /// Set the TTL for the tool listing cache.
+    #[cfg(feature = "mcp")]
+    pub fn cache_ttl(mut self, ttl: Duration) -> Self {
+        self.cache_ttl = ttl;
+        self
+    }
+
+    /// Set custom timeouts for all clients created by this manager.
+    #[cfg(feature = "mcp")]
+    pub fn timeouts(mut self, timeouts: McpTimeouts) -> Self {
+        self.timeouts = timeouts;
         self
     }
 
@@ -71,8 +100,21 @@ impl McpManager {
             }
         }
 
-        let mut client = McpClient::new(name.clone(), config);
+        let mut client = McpClient::new(name.clone(), config).with_timeouts(self.timeouts.clone());
         client.connect().await?;
+
+        // Populate tool cache from the freshly-connected client
+        {
+            let mut cache = self.tool_cache.write().await;
+            cache.insert(
+                name.clone(),
+                ToolCache {
+                    tools: client.tools().to_vec(),
+                    cached_at: std::time::Instant::now(),
+                    ttl: self.cache_ttl,
+                },
+            );
+        }
 
         // Re-check after acquiring write lock to prevent race
         let mut servers = self.servers.write().await;
@@ -101,6 +143,8 @@ impl McpManager {
     pub async fn remove_server(&self, name: &str) -> McpResult<()> {
         let mut servers = self.servers.write().await;
         if let Some(mut client) = servers.remove(name) {
+            // Remove cache entry for this server
+            self.tool_cache.write().await.remove(name);
             client.close().await?;
             Ok(())
         } else {
@@ -142,9 +186,20 @@ impl McpManager {
     #[cfg(feature = "mcp")]
     pub async fn list_tools(&self) -> Vec<(String, McpToolDefinition)> {
         let servers = self.servers.read().await;
+        let cache = self.tool_cache.read().await;
         let mut tools = Vec::new();
 
         for (server_name, client) in servers.iter() {
+            // Use cached tools if cache is valid
+            if let Some(entry) = cache.get(server_name)
+                && entry.is_valid()
+            {
+                for tool in &entry.tools {
+                    tools.push((make_mcp_name(server_name, &tool.name), tool.clone()));
+                }
+                continue;
+            }
+            // Cache miss or expired: use live data from client
             for tool in client.tools() {
                 tools.push((make_mcp_name(server_name, &tool.name), tool.clone()));
             }
@@ -157,6 +212,48 @@ impl McpManager {
     pub async fn list_tools(&self) -> Vec<(String, McpToolDefinition)> {
         Vec::new()
     }
+
+    /// Force-refresh the tool cache for a specific server by re-reading from the client.
+    #[cfg(feature = "mcp")]
+    pub async fn refresh_tools(&self, server_name: &str) -> McpResult<()> {
+        let servers = self.servers.read().await;
+        let client = servers
+            .get(server_name)
+            .ok_or_else(|| McpError::ServerNotFound {
+                name: server_name.to_string(),
+            })?;
+
+        let tools = client.tools().to_vec();
+        let mut cache = self.tool_cache.write().await;
+        cache.insert(
+            server_name.to_string(),
+            ToolCache {
+                tools,
+                cached_at: std::time::Instant::now(),
+                ttl: self.cache_ttl,
+            },
+        );
+
+        Ok(())
+    }
+
+    /// Force-refresh the tool cache for a specific server (stub when feature disabled).
+    #[cfg(not(feature = "mcp"))]
+    pub async fn refresh_tools(&self, _server_name: &str) -> McpResult<()> {
+        Err(McpError::Protocol {
+            message: "MCP feature not enabled".to_string(),
+        })
+    }
+
+    /// Clear all cached tool listings.
+    #[cfg(feature = "mcp")]
+    pub async fn invalidate_cache(&self) {
+        self.tool_cache.write().await.clear();
+    }
+
+    /// Clear all cached tool listings (stub when feature disabled).
+    #[cfg(not(feature = "mcp"))]
+    pub async fn invalidate_cache(&self) {}
 
     /// Reconnects if the server is disconnected, with exponential backoff.
     #[cfg(feature = "mcp")]
@@ -291,6 +388,7 @@ impl McpManager {
         for (_, mut client) in servers.drain() {
             let _ = client.close().await;
         }
+        self.tool_cache.write().await.clear();
         Ok(())
     }
 
@@ -407,5 +505,100 @@ mod tests {
         };
         let manager = McpManager::new().reconnect_policy(policy);
         assert!(manager.list_servers().await.is_empty());
+    }
+
+    #[cfg(feature = "mcp")]
+    #[tokio::test]
+    async fn test_cache_ttl_builder() {
+        let manager = McpManager::new().cache_ttl(std::time::Duration::from_secs(120));
+        assert_eq!(manager.cache_ttl, std::time::Duration::from_secs(120));
+    }
+
+    #[cfg(feature = "mcp")]
+    #[tokio::test]
+    async fn test_timeouts_builder() {
+        use super::McpTimeouts;
+        let custom = McpTimeouts {
+            connection: std::time::Duration::from_secs(5),
+            tool_call: std::time::Duration::from_secs(15),
+            resource_read: std::time::Duration::from_secs(10),
+        };
+        let manager = McpManager::new().timeouts(custom);
+        assert_eq!(
+            manager.timeouts.connection,
+            std::time::Duration::from_secs(5)
+        );
+        assert_eq!(
+            manager.timeouts.tool_call,
+            std::time::Duration::from_secs(15)
+        );
+    }
+
+    #[cfg(feature = "mcp")]
+    #[tokio::test]
+    async fn test_tool_cache_validity() {
+        use super::{McpToolDefinition, ToolCache};
+        use std::time::{Duration, Instant};
+
+        // Fresh cache entry should be valid
+        let cache = ToolCache {
+            tools: vec![McpToolDefinition {
+                name: "test_tool".to_string(),
+                description: "A test tool".to_string(),
+                input_schema: serde_json::json!({}),
+            }],
+            cached_at: Instant::now(),
+            ttl: Duration::from_secs(300),
+        };
+        assert!(cache.is_valid());
+
+        // Expired cache entry should not be valid
+        let expired_cache = ToolCache {
+            tools: vec![],
+            cached_at: Instant::now() - Duration::from_secs(600),
+            ttl: Duration::from_secs(300),
+        };
+        assert!(!expired_cache.is_valid());
+    }
+
+    #[cfg(feature = "mcp")]
+    #[tokio::test]
+    async fn test_invalidate_cache() {
+        let manager = McpManager::new();
+
+        // Insert a cache entry directly
+        {
+            let mut cache = manager.tool_cache.write().await;
+            cache.insert(
+                "test_server".to_string(),
+                super::ToolCache {
+                    tools: vec![],
+                    cached_at: std::time::Instant::now(),
+                    ttl: std::time::Duration::from_secs(300),
+                },
+            );
+        }
+
+        // Verify it exists
+        assert!(!manager.tool_cache.read().await.is_empty());
+
+        // Invalidate
+        manager.invalidate_cache().await;
+        assert!(manager.tool_cache.read().await.is_empty());
+    }
+
+    #[cfg(feature = "mcp")]
+    #[tokio::test]
+    async fn test_refresh_tools_server_not_found() {
+        let manager = McpManager::new();
+        let result = manager.refresh_tools("nonexistent").await;
+        assert!(matches!(result, Err(McpError::ServerNotFound { .. })));
+    }
+
+    #[tokio::test]
+    async fn test_invalidate_cache_empty() {
+        let manager = McpManager::new();
+        // Should not panic on empty cache
+        manager.invalidate_cache().await;
     }
 }

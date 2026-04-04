@@ -23,10 +23,10 @@ impl Default for ResourceLimits {
             cpu_time: Some(300),       // 5 minutes
             file_size: Some(100 * MB), // 100 MB
             open_files: Some(256),
-            processes: Some(32),
+            processes: None, // NPROC limits the entire UID, not just child processes
             virtual_memory: Some(2 * GB), // 2 GB
-            data_size: Some(GB),          // 1 GB
-            stack_size: Some(8 * MB),     // 8 MB
+            data_size: Some(GB), // 1 GB (applied on Linux only)
+            stack_size: Some(8 * MB), // 8 MB
         }
     }
 }
@@ -49,10 +49,10 @@ impl ResourceLimits {
             cpu_time: Some(60),       // 1 minute
             file_size: Some(10 * MB), // 10 MB
             open_files: Some(64),
-            processes: Some(10),
+            processes: None, // NPROC limits the entire UID — use sandbox instead
             virtual_memory: Some(512 * MB), // 512 MB
-            data_size: Some(256 * MB),      // 256 MB
-            stack_size: Some(MB),           // 1 MB
+            data_size: Some(256 * MB), // 256 MB
+            stack_size: Some(MB), // 1 MB
         }
     }
 
@@ -131,6 +131,9 @@ impl ResourceLimits {
                 .map_err(|e| SecurityError::ResourceLimit(format!("AS: {}", e)))?;
         }
 
+        // RLIMIT_DATA is only supported on Linux.
+        // macOS rejects it with EINVAL — the kernel manages virtual memory directly.
+        #[cfg(target_os = "linux")]
         if let Some(data) = self.data_size {
             let rlim = Rlimit {
                 current: Some(data),
@@ -173,7 +176,7 @@ mod tests {
     fn test_strict_limits() {
         let limits = ResourceLimits::strict();
         assert_eq!(limits.cpu_time, Some(60));
-        assert_eq!(limits.processes, Some(10));
+        assert!(limits.processes.is_none());
     }
 
     #[test]
