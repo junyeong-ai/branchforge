@@ -92,7 +92,6 @@ pub mod types;
 pub use agent::{
     Agent, AgentBuilder, AgentConfig, AgentEvent, AgentResult, AgentRuntime, RunConfig,
 };
-pub use agent::{RunDescriptor, RuntimeEventRecorder};
 pub use auth::{Auth, Credential};
 pub use auth::{CredentialKind, CredentialRecord};
 pub use authorization::{ExecutionMode, ToolPolicy};
