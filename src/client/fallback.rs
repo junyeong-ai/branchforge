@@ -51,6 +51,7 @@ pub enum FallbackTrigger {
     RateLimited,
     HttpStatus(u16),
     Timeout,
+    CircuitOpen,
 }
 
 impl FallbackTrigger {
@@ -60,6 +61,7 @@ impl FallbackTrigger {
             Self::RateLimited => matches!(error, crate::Error::RateLimit { .. }),
             Self::HttpStatus(code) => error.status_code() == Some(*code),
             Self::Timeout => matches!(error, crate::Error::Timeout(_)),
+            Self::CircuitOpen => matches!(error, crate::Error::CircuitOpen),
         }
     }
 }
@@ -95,6 +97,19 @@ mod tests {
             retry_after: Some(std::time::Duration::from_secs(60)),
         };
         assert!(config.should_fallback(&rate_limit_error));
+    }
+
+    #[test]
+    fn test_fallback_trigger_circuit_open() {
+        let config =
+            FallbackConfig::new("claude-haiku-4-5-20251001").trigger(FallbackTrigger::CircuitOpen);
+
+        let circuit_error = crate::Error::CircuitOpen;
+        assert!(config.should_fallback(&circuit_error));
+
+        // Default triggers should not match CircuitOpen
+        let default_config = FallbackConfig::new("claude-haiku-4-5-20251001");
+        assert!(!default_config.should_fallback(&circuit_error));
     }
 
     #[test]

@@ -32,10 +32,7 @@ pub use messages::{
 pub use network::{ClientCertConfig, HttpNetworkConfig, PoolConfig, ProxyConfig};
 pub use provider_profile::{CapabilitySupport, ProviderProfile};
 pub use recovery::StreamRecoveryState;
-pub use resilience::{
-    CircuitBreaker, CircuitConfig, CircuitState, ExponentialBackoff, Resilience, ResilienceConfig,
-    RetryConfig,
-};
+pub use resilience::{CircuitBreaker, CircuitConfig, CircuitState, Resilience, ResilienceConfig};
 pub use schema::{strict_schema, transform_for_strict};
 #[cfg(feature = "aws")]
 pub use streaming::AwsEventStreamParser;
@@ -155,7 +152,23 @@ impl Client {
     }
 
     pub async fn send(&self, request: CreateMessageRequest) -> Result<crate::types::ApiResponse> {
-        let cb = self.check_circuit_breaker()?;
+        let cb_result = self.check_circuit_breaker();
+        let cb = match cb_result {
+            Ok(cb) => cb,
+            Err(e) => {
+                if let Some(ref fallback) = self.fallback_config
+                    && fallback.should_fallback(&e)
+                {
+                    tracing::warn!(
+                        fallback_model = %fallback.fallback_model,
+                        "Circuit open, falling back to alternate model"
+                    );
+                    let fallback_request = request.model(&fallback.fallback_model);
+                    return self.adapter.send(&self.http, fallback_request).await;
+                }
+                return Err(e);
+            }
+        };
 
         if let Some(ref bus) = self.event_bus {
             bus.emit_simple(
@@ -288,7 +301,23 @@ impl Client {
         &self,
         request: CreateMessageRequest,
     ) -> Result<impl futures::Stream<Item = Result<StreamItem>> + Send + 'static + use<>> {
-        let cb = self.check_circuit_breaker()?;
+        let cb_result = self.check_circuit_breaker();
+        let cb = match cb_result {
+            Ok(cb) => cb,
+            Err(e) => {
+                if let Some(ref fallback) = self.fallback_config
+                    && fallback.should_fallback(&e)
+                {
+                    tracing::warn!(
+                        fallback_model = %fallback.fallback_model,
+                        "Circuit open, falling back to alternate model for streaming"
+                    );
+                    let fallback_request = request.model(&fallback.fallback_model);
+                    return self.stream_request_inner(fallback_request).await;
+                }
+                return Err(e);
+            }
+        };
 
         if let Some(ref bus) = self.event_bus {
             bus.emit_simple(
