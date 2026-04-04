@@ -17,7 +17,6 @@ Later levels override earlier levels.
 - `CLAUDE.local.md`
 - `.claude/rules/`
 - `.claude/skills/`
-- `.claude/commands/`
 
 ## Imports
 
