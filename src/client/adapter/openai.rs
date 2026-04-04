@@ -581,6 +581,14 @@ impl ProviderAdapter for OpenAiAdapter {
         "openai"
     }
 
+    fn profile(&self) -> crate::client::ProviderProfile {
+        use crate::client::provider_profile::CapabilitySupport;
+        let mut p = crate::client::ProviderProfile::full(self.name());
+        p.prompt_caching = CapabilitySupport::Unsupported;
+        p.extended_thinking = CapabilitySupport::Unsupported;
+        p
+    }
+
     fn base_url(&self) -> &str {
         &self.base_url
     }

@@ -123,6 +123,15 @@ pub trait ProviderAdapter: Send + Sync + Debug {
         Ok(())
     }
 
+    /// Returns the capability profile for this provider.
+    ///
+    /// The default implementation returns [`crate::client::ProviderProfile::full`] using the
+    /// adapter's [`name()`](ProviderAdapter::name).  Adapters with limited
+    /// capabilities should override this.
+    fn profile(&self) -> crate::client::ProviderProfile {
+        crate::client::ProviderProfile::full(self.name())
+    }
+
     async fn count_tokens(
         &self,
         _http: &reqwest::Client,

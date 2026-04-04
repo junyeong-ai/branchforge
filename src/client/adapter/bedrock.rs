@@ -655,6 +655,14 @@ impl ProviderAdapter for BedrockAdapter {
         "bedrock"
     }
 
+    fn profile(&self) -> crate::client::ProviderProfile {
+        use crate::client::provider_profile::CapabilitySupport;
+        let mut p = crate::client::ProviderProfile::full(self.name());
+        p.prompt_caching = CapabilitySupport::Degradable;
+        p.extended_thinking = CapabilitySupport::Unsupported;
+        p
+    }
+
     fn stream_format(&self) -> super::traits::StreamFormat {
         super::traits::StreamFormat::AwsEventStream
     }

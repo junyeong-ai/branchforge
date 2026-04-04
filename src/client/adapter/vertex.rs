@@ -178,6 +178,14 @@ impl ProviderAdapter for VertexAdapter {
         "vertex"
     }
 
+    fn profile(&self) -> crate::client::ProviderProfile {
+        use crate::client::provider_profile::CapabilitySupport;
+        let mut p = crate::client::ProviderProfile::full(self.name());
+        p.prompt_caching = CapabilitySupport::Unsupported;
+        p.extended_thinking = CapabilitySupport::Unsupported;
+        p
+    }
+
     async fn build_url(&self, model: &str, stream: bool) -> String {
         self.build_url_for_model(model, stream)
     }

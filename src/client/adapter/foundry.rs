@@ -147,6 +147,14 @@ impl ProviderAdapter for FoundryAdapter {
         "foundry"
     }
 
+    fn profile(&self) -> crate::client::ProviderProfile {
+        use crate::client::provider_profile::CapabilitySupport;
+        let mut p = crate::client::ProviderProfile::full(self.name());
+        p.prompt_caching = CapabilitySupport::Unsupported;
+        p.extended_thinking = CapabilitySupport::Unsupported;
+        p
+    }
+
     async fn build_url(&self, _model: &str, _stream: bool) -> String {
         self.build_messages_url()
     }
