@@ -4,14 +4,11 @@
 //! always loaded in the Task tool description. The full prompt content is loaded
 //! on-demand only when the subagent is spawned.
 
-use std::collections::HashMap;
-
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
 use crate::client::{ModelConfig, ModelType};
 use crate::common::{ContentSource, Index, Named, SourceType, ToolRestricted};
-use crate::hooks::HookRule;
 
 /// Subagent index entry - minimal metadata always available in context.
 ///
@@ -71,10 +68,6 @@ pub struct SubagentIndex {
     /// Maximum delegated turns before stopping this subagent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_turns: Option<usize>,
-
-    /// Lifecycle hooks (event name → rules)
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub hooks: Option<HashMap<String, Vec<HookRule>>>,
 }
 
 impl SubagentIndex {
@@ -93,7 +86,6 @@ impl SubagentIndex {
             disallowed_tools: Vec::new(),
             authorization_mode: None,
             max_turns: None,
-            hooks: None,
         }
     }
 

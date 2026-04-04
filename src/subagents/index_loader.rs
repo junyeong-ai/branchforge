@@ -1,6 +1,5 @@
 //! Subagent index loader.
 
-use std::collections::HashMap;
 use std::path::Path;
 
 use serde::{Deserialize, Serialize};
@@ -8,7 +7,6 @@ use serde::{Deserialize, Serialize};
 use super::SubagentIndex;
 use crate::client::ModelType;
 use crate::common::{ContentSource, SourceType, is_markdown, parse_frontmatter};
-use crate::hooks::HookRule;
 
 /// Frontmatter for subagent files.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -33,8 +31,6 @@ pub struct SubagentFrontmatter {
     pub authorization_mode: Option<String>,
     #[serde(default, alias = "maxTurns")]
     pub max_turns: Option<usize>,
-    #[serde(default)]
-    pub hooks: Option<HashMap<String, Vec<HookRule>>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -128,8 +124,6 @@ impl SubagentIndexLoader {
         index.disallowed_tools = disallowed_tools;
         index.authorization_mode = fm.authorization_mode;
         index.max_turns = fm.max_turns;
-        index.hooks = fm.hooks;
-
         if let Some(m) = fm.model {
             index = index.model(m);
         }

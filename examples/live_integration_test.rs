@@ -6,8 +6,7 @@
 //! 1. Basic query via CLI auth
 //! 2. Agent with advanced compaction (CompactionChain)
 //! 3. Agent with coordination mode (Coordinator)
-//! 4. CacheBreakDetector
-//! 5. SessionFilter search
+//! 4. SessionFilter search
 //! 6. CronScheduler lifecycle
 //! 7. ContentOverrides mechanism
 //! 8. domain_instructions injection
@@ -27,8 +26,7 @@ use branchforge::session::compact::{
 };
 use branchforge::session::persistence::SessionFilter;
 use branchforge::session::{MemoryPersistence, Persistence, Session, SessionConfig};
-use branchforge::tokens::CacheBreakDetector;
-use branchforge::types::{ContentBlock, TokenUsage};
+use branchforge::types::ContentBlock;
 use branchforge::{CircuitBreaker, CircuitConfig, CircuitState};
 use branchforge::{OutputStyle, SystemPromptGenerator};
 
@@ -268,42 +266,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // =====================================================================
-    // Test 7: CacheBreakDetector
-    // =====================================================================
-    println!("\n[Test 7] CacheBreakDetector");
-    {
-        let mut detector = CacheBreakDetector::new().window_size(3).drop_threshold(0.3);
-
-        let high_cache = TokenUsage {
-            input_tokens: 10,
-            output_tokens: 100,
-            cache_read_input_tokens: 90,
-            cache_creation_input_tokens: 0,
-            ..Default::default()
-        };
-        let no_cache = TokenUsage {
-            input_tokens: 100,
-            output_tokens: 100,
-            cache_read_input_tokens: 0,
-            cache_creation_input_tokens: 0,
-            ..Default::default()
-        };
-
-        detector.record(&high_cache);
-        detector.record(&high_cache);
-        detector.record(&high_cache);
-        check("no break with stable cache", !detector.is_break_detected());
-
-        let broke = detector.record(&no_cache);
-        check("break detected on sudden drop", broke);
-        check("total breaks = 1", detector.total_breaks() == 1);
-
-        detector.reset();
-        check("reset clears state", detector.rolling_average() == 0.0);
-    }
-
-    // =====================================================================
-    // Test 8: SessionFilter + Persistence::search
+    // Test 7: SessionFilter + Persistence::search
     // =====================================================================
     println!("\n[Test 8] SessionFilter + Persistence::search");
     {

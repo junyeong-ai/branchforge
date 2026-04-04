@@ -243,11 +243,7 @@ impl DelegationRuntime {
     ) -> AgentBuilder {
         let skills_enabled = !subagent.skills.is_empty();
         let skill_registry = self.filtered_skills(&subagent.skills);
-        let hooks = merged_hooks(
-            &self.hooks,
-            subagent.hooks.as_ref(),
-            &format!("subagent:{}", subagent.name),
-        );
+        let hooks = merged_hooks(&self.hooks, None, &format!("subagent:{}", subagent.name));
         let access = self
             .restricted_tool_surface(
                 &self.config.security.tool_surface,
@@ -303,22 +299,11 @@ impl DelegationRuntime {
         };
         let hooks = match subagent {
             Some(agent) => {
-                let inherited = merged_hooks(
-                    &self.hooks,
-                    agent.hooks.as_ref(),
-                    &format!("subagent:{}", agent.name),
-                );
-                merged_hooks(
-                    &inherited,
-                    spec.index.hooks.as_ref(),
-                    &format!("skill:{}", spec.index.name),
-                )
+                let inherited =
+                    merged_hooks(&self.hooks, None, &format!("subagent:{}", agent.name));
+                merged_hooks(&inherited, None, &format!("skill:{}", spec.index.name))
             }
-            None => merged_hooks(
-                &self.hooks,
-                spec.index.hooks.as_ref(),
-                &format!("skill:{}", spec.index.name),
-            ),
+            None => merged_hooks(&self.hooks, None, &format!("skill:{}", spec.index.name)),
         };
         let mcp_servers = subagent
             .map(|agent| agent.mcp_servers.as_slice())

@@ -121,16 +121,9 @@ impl PluginLoader {
                     message: format!("Skills: {e}"),
                 })?;
 
-        let plugin_root = plugin.root_dir();
         for mut skill in skills {
             skill.name = namespace::namespaced(plugin_name, &skill.name);
             skill.source_type = SourceType::Plugin;
-            Self::collect_resource_hooks(
-                &skill.hooks,
-                plugin_name,
-                plugin_root,
-                &mut resources.hooks,
-            );
             resources.skills.push(skill);
         }
 
@@ -213,7 +206,6 @@ impl PluginLoader {
                     message: format!("Agents: {e}"),
                 })?;
 
-        let plugin_root = plugin.root_dir();
         for mut subagent in subagents {
             subagent.name = namespace::namespaced(plugin_name, &subagent.name);
             subagent.mcp_servers = subagent
@@ -228,12 +220,6 @@ impl PluginLoader {
                 })
                 .collect();
             subagent.source_type = SourceType::Plugin;
-            Self::collect_resource_hooks(
-                &subagent.hooks,
-                plugin_name,
-                plugin_root,
-                &mut resources.hooks,
-            );
             resources.subagents.push(subagent);
         }
 

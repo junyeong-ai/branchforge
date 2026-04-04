@@ -1,14 +1,11 @@
 //! Skill index loader.
 
-use std::collections::HashMap;
 use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
 use super::SkillIndex;
 use crate::common::{ContentSource, SourceType, is_skill_file, parse_frontmatter};
-use crate::hooks::HookRule;
-
 /// Frontmatter schema for skill files.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SkillFrontmatter {
@@ -30,8 +27,6 @@ pub struct SkillFrontmatter {
     pub context: Option<String>,
     #[serde(default)]
     pub agent: Option<String>,
-    #[serde(default)]
-    pub hooks: Option<HashMap<String, Vec<HookRule>>>,
 }
 
 /// Loader for creating SkillIndex entries from files.
@@ -78,8 +73,6 @@ impl SkillIndexLoader {
         index.disable_model_invocation = fm.disable_model_invocation;
         index.context = fm.context;
         index.agent = fm.agent;
-        index.hooks = fm.hooks;
-
         index
     }
 
