@@ -104,7 +104,7 @@ impl ExecutionContext {
 
     /// Create a progress builder for the given step name.
     ///
-    /// Progress events appear in the agent event stream as [`AgentEvent::ToolProgress`]
+    /// Progress events appear in the agent event stream as `AgentEvent::ToolProgress`
     /// between `ToolStart` and `ToolComplete`. Optional — tools that don't call
     /// this method produce no progress events.
     ///
