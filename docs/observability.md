@@ -13,6 +13,7 @@ The runtime provides three complementary observability layers.
 | `ToolStart { id, name, input }` | Tool about to execute | Progress indicator |
 | `ToolReview { id, name, input }` | Tool needs user approval | Human-in-the-loop (Supervised mode) |
 | `ToolComplete { id, name, output, is_error, duration_ms }` | Tool finished | Duration tracking |
+| `ToolProgress { id, name, step, status, timestamp, duration_ms, metadata }` | Sub-step progress | Long-running tool visibility |
 | `ToolBlocked { id, name, reason }` | Tool denied by policy/hook | Security audit |
 | `TurnUsage { input/output/cache tokens, totals }` | Per-turn token consumption | Cost tracking |
 | `Complete(AgentResult)` | Final result with `AgentMetrics` | Summary |
@@ -37,6 +38,7 @@ Use `event.event_type()` for the type string (`"text"`, `"tool_start"`, etc.) an
 | EventKind | Emitted By Runtime | Payload |
 |-----------|-------------------|---------|
 | `ToolExecuted` | Yes — tool completes | tool_name, duration_ms, is_error |
+| `ToolProgress` | Yes — during tool execution | tool_id, tool_name, step, status |
 | `TokensConsumed` | Yes — API response | input/output tokens, model |
 | `SessionCompacted` | Yes — compaction | summary text, saved_tokens |
 | `BranchForked` | Available | branch_name, ancestor |

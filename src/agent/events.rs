@@ -54,16 +54,19 @@ pub enum AgentEvent {
     },
     /// Sub-step progress during a tool execution.
     ///
-    /// Emitted between `ToolStart` and `ToolComplete` to provide real-time
-    /// visibility into long-running tool operations. Optional — tools that
-    /// don't call `ctx.emit_progress()` produce no progress events.
+    /// Emitted between `ToolStart` and `ToolComplete` to provide visibility
+    /// into long-running tool operations. Optional — tools that don't call
+    /// `ctx.progress()` produce no progress events.
     ToolProgress {
         id: String,
         name: String,
         /// Machine-readable step identifier (e.g., "schema_discovery", "compiling").
         step: String,
-        /// Step lifecycle status: "started", "completed", "failed".
-        status: String,
+        /// Step lifecycle status.
+        status: crate::tools::ProgressStatus,
+        /// Timestamp when the progress event was emitted.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        timestamp: Option<chrono::DateTime<chrono::Utc>>,
         /// Step duration in milliseconds (set on completed/failed).
         #[serde(skip_serializing_if = "Option::is_none")]
         duration_ms: Option<u64>,

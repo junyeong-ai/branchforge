@@ -4,6 +4,8 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
 
+use serde::{Deserialize, Serialize};
+
 use crate::authorization::{ToolDecision, ToolLimits};
 use crate::hooks::{HookContext, HookEvent, HookInput, HookManager};
 #[cfg(feature = "coding-tools")]
@@ -15,17 +17,32 @@ use crate::security::sandbox::{DomainCheck, SandboxResult};
 use crate::security::{ResourceLimits, SecurityContext, SecurityError};
 use crate::session::{SessionAccessScope, SessionManager, ToolState};
 
-/// Progress event from a tool sub-step, emitted via `ExecutionContext::emit_progress()`.
-#[derive(Debug, Clone)]
+/// Step lifecycle status for tool progress events.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProgressStatus {
+    Started,
+    Completed,
+    Failed,
+}
+
+/// Progress event from a tool sub-step, emitted via [`ExecutionContext::progress()`].
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProgressEvent {
     pub step: String,
-    pub status: String,
+    pub status: ProgressStatus,
+    pub timestamp: chrono::DateTime<chrono::Utc>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub duration_ms: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub metadata: Option<serde_json::Value>,
 }
 
-/// Sender for tool progress events.
-pub type ProgressSender = tokio::sync::mpsc::UnboundedSender<ProgressEvent>;
+/// Sender for tool progress events (bounded to prevent runaway memory).
+pub(crate) type ProgressSender = tokio::sync::mpsc::Sender<ProgressEvent>;
+
+/// Channel buffer size for tool progress events.
+pub(crate) const PROGRESS_CHANNEL_CAPACITY: usize = 256;
 
 #[derive(Clone)]
 pub struct ExecutionContext {
@@ -69,7 +86,7 @@ impl ExecutionContext {
         }
     }
 
-    pub fn hooks(mut self, hooks: HookManager, session_id: impl Into<String>) -> Self {
+    pub fn with_hooks(mut self, hooks: HookManager, session_id: impl Into<String>) -> Self {
         self.hooks = Some(hooks);
         self.session_id = Some(session_id.into());
         self
@@ -80,30 +97,31 @@ impl ExecutionContext {
     }
 
     /// Attach a progress channel for tool sub-step events.
-    pub fn with_progress(mut self, tx: ProgressSender) -> Self {
+    pub(crate) fn with_progress(mut self, tx: ProgressSender) -> Self {
         self.progress_tx = Some(tx);
         self
     }
 
-    /// Emit a sub-step progress event during tool execution.
+    /// Create a progress builder for the given step name.
     ///
     /// Progress events appear in the agent event stream as [`AgentEvent::ToolProgress`]
     /// between `ToolStart` and `ToolComplete`. Optional — tools that don't call
     /// this method produce no progress events.
-    pub fn emit_progress(
-        &self,
-        step: &str,
-        status: &str,
-        duration_ms: Option<u64>,
-        metadata: Option<serde_json::Value>,
-    ) {
-        if let Some(tx) = &self.progress_tx {
-            let _ = tx.send(ProgressEvent {
-                step: step.into(),
-                status: status.into(),
-                duration_ms,
-                metadata,
-            });
+    ///
+    /// Progress events **must** be emitted within the `execute()` call lifetime.
+    /// Events from spawned background tasks after `execute()` returns may be lost.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// ctx.progress("parsing").started();
+    /// // ... do work ...
+    /// ctx.progress("parsing").completed(elapsed_ms);
+    /// ```
+    pub fn progress(&self, step: &str) -> ProgressBuilder<'_> {
+        ProgressBuilder {
+            ctx: self,
+            step: step.to_string(),
         }
     }
 
@@ -112,7 +130,7 @@ impl ExecutionContext {
         self
     }
 
-    pub fn session_scope(mut self, scope: SessionAccessScope) -> Self {
+    pub fn with_session_scope(mut self, scope: SessionAccessScope) -> Self {
         self.session_scope = Some(scope);
         self
     }
@@ -291,6 +309,62 @@ impl Default for ExecutionContext {
             .build()
             .unwrap_or_else(|_| SecurityContext::permissive());
         Self::new(security)
+    }
+}
+
+/// Builder for emitting a progress event for a specific step.
+///
+/// Obtained via [`ExecutionContext::progress()`]. Each method consumes the
+/// builder and sends the event through the progress channel (if attached).
+#[must_use = "progress builder does nothing if not consumed; call .started(), .completed(), or .failed()"]
+pub struct ProgressBuilder<'a> {
+    ctx: &'a ExecutionContext,
+    step: String,
+}
+
+impl<'a> ProgressBuilder<'a> {
+    /// Emit a "started" progress event.
+    pub fn started(self) {
+        self.emit(ProgressStatus::Started, None, None);
+    }
+
+    /// Emit a "completed" progress event with duration.
+    pub fn completed(self, duration_ms: u64) {
+        self.emit(ProgressStatus::Completed, Some(duration_ms), None);
+    }
+
+    /// Emit a "failed" progress event with duration.
+    pub fn failed(self, duration_ms: u64) {
+        self.emit(ProgressStatus::Failed, Some(duration_ms), None);
+    }
+
+    /// Emit a "completed" progress event with duration and metadata.
+    pub fn completed_with(self, duration_ms: u64, metadata: serde_json::Value) {
+        self.emit(ProgressStatus::Completed, Some(duration_ms), Some(metadata));
+    }
+
+    /// Emit a "failed" progress event with duration and metadata.
+    pub fn failed_with(self, duration_ms: u64, metadata: serde_json::Value) {
+        self.emit(ProgressStatus::Failed, Some(duration_ms), Some(metadata));
+    }
+
+    fn emit(
+        self,
+        status: ProgressStatus,
+        duration_ms: Option<u64>,
+        metadata: Option<serde_json::Value>,
+    ) {
+        if let Some(tx) = &self.ctx.progress_tx
+            && let Err(e) = tx.try_send(ProgressEvent {
+                step: self.step,
+                status,
+                timestamp: chrono::Utc::now(),
+                duration_ms,
+                metadata,
+            })
+        {
+            tracing::debug!(error = %e, "progress event dropped");
+        }
     }
 }
 

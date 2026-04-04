@@ -497,7 +497,7 @@ mod tests {
 
         let context = ExecutionContext::permissive()
             .with_session_manager(manager)
-            .session_scope(
+            .with_session_scope(
                 SessionAccessScope::default()
                     .tenant("tenant-a")
                     .principal("user-1"),

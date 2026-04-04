@@ -501,22 +501,15 @@ impl Agent {
                 let tools = &self.runtime.tools;
                 let context_scope = context_scope.clone();
                 async move {
-                    // Create per-tool progress channel
-                    let (ptx, mut prx) = tokio::sync::mpsc::unbounded_channel::<crate::ProgressEvent>();
                     let start = Instant::now();
                     let result = if let Some(ref scope) = context_scope {
-                        let fut = tools.execute_with_progress(&name, input.clone(), Some(ptx));
+                        let fut = tools.execute(&name, input.clone());
                         scope.wrap_tool_future(Box::pin(fut)).await
                     } else {
-                        tools.execute_with_progress(&name, input.clone(), Some(ptx)).await
+                        tools.execute(&name, input.clone()).await
                     };
                     let duration_ms = start.elapsed().as_millis() as u64;
-                    // Collect progress events emitted during execution
-                    let mut progress_events = Vec::new();
-                    while let Ok(p) = prx.try_recv() {
-                        progress_events.push(p);
-                    }
-                    (id, name, input, result, duration_ms, progress_events)
+                    (id, name, input, result, duration_ms)
                 }
             });
 
@@ -525,10 +518,10 @@ impl Agent {
             let all_non_retryable = !parallel_results.is_empty()
                 && parallel_results
                     .iter()
-                    .all(|(_, _, _, result, _, _)| result.is_non_retryable());
+                    .all(|(_, _, _, result, _)| result.is_non_retryable());
 
             let mut results = blocked;
-            for (id, name, input, result, duration_ms, _progress_events) in parallel_results {
+            for (id, name, input, result, duration_ms) in parallel_results {
                 let is_error = result.is_error();
                 debug!(tool = %name, duration_ms, is_error, "Tool execution completed");
                 metrics.record_tool(&id, &name, duration_ms, is_error);

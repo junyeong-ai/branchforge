@@ -145,6 +145,28 @@ pub(crate) fn emit_tool_executed(
     }
 }
 
+/// Emit a [`ToolProgress`](crate::events::EventKind::ToolProgress) event
+/// for sub-step visibility during tool execution.
+pub(crate) fn emit_tool_progress(
+    event_bus: Option<&crate::events::EventBus>,
+    tool_id: &str,
+    tool_name: &str,
+    step: &str,
+    status: &crate::tools::ProgressStatus,
+) {
+    if let Some(bus) = event_bus {
+        bus.emit_simple(
+            crate::events::EventKind::ToolProgress,
+            serde_json::json!({
+                "tool_id": tool_id,
+                "tool_name": tool_name,
+                "step": step,
+                "status": status,
+            }),
+        );
+    }
+}
+
 /// Emit a [`BudgetAlert`](crate::events::EventKind::BudgetAlert) if the budget
 /// usage exceeds the configured warning threshold.
 pub(crate) fn maybe_emit_budget_alert(

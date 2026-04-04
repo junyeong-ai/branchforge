@@ -166,10 +166,10 @@ impl ToolRegistryBuilder {
             context = context.with_session_manager(manager.clone());
         }
         if let Some(ref hooks) = self.hooks {
-            context = context.hooks(hooks.clone(), session_id.to_string());
+            context = context.with_hooks(hooks.clone(), session_id.to_string());
         }
         if let Some(ref scope) = self.scope {
-            context = context.session_scope(scope.clone());
+            context = context.with_session_scope(scope.clone());
         }
         let task_registry = self.task_registry.unwrap_or_else(|| {
             if let Some(ref manager) = self.session_manager {

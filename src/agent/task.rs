@@ -755,7 +755,7 @@ mod tests {
             .unwrap();
 
         let tool = TaskTool::new(registry).session_manager(manager);
-        let context = test_context().session_scope(
+        let context = test_context().with_session_scope(
             crate::session::SessionAccessScope::default()
                 .tenant("tenant-a")
                 .principal("user-2"),

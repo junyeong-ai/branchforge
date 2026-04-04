@@ -34,7 +34,8 @@ pub use crate::common::{is_tool_allowed, matches_tool_pattern};
 #[cfg(feature = "coding-tools")]
 pub use bash::BashTool;
 pub use builder::ToolRegistryBuilder;
-pub use context::{ExecutionContext, ProgressEvent, ProgressSender};
+pub use context::{ExecutionContext, ProgressBuilder, ProgressStatus};
+pub(crate) use context::{PROGRESS_CHANNEL_CAPACITY, ProgressEvent};
 #[cfg(feature = "coding-tools")]
 pub use edit::EditTool;
 pub use env::ToolExecutionEnv;

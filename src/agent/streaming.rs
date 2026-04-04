@@ -5,15 +5,15 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Instant;
 
-use futures::{Stream, StreamExt, future::join_all, stream};
+use futures::{Stream, StreamExt, stream};
 use tracing::{debug, warn};
 
 use super::AgentMetrics;
 use super::common::{
     BudgetContext, accumulate_inner_usage, accumulate_response_usage, emit_cost_report,
-    emit_tokens_consumed, emit_tool_executed, handle_compaction, maybe_emit_budget_alert,
-    maybe_invoke_explicit_skill_command, run_post_tool_hooks, run_stop_hooks,
-    try_activate_dynamic_rules,
+    emit_tokens_consumed, emit_tool_executed, emit_tool_progress, handle_compaction,
+    maybe_emit_budget_alert, maybe_invoke_explicit_skill_command, run_post_tool_hooks,
+    run_stop_hooks, try_activate_dynamic_rules,
 };
 use super::events::{AgentEvent, AgentResult};
 use super::executor::Agent;
@@ -1066,50 +1066,134 @@ impl StreamState {
         let mut parallel_results = Vec::with_capacity(prepared.len());
 
         for batch in batches {
-            let batch_futures = batch.into_iter().map(|(id, name, input)| {
+            // Shared progress channel for real-time streaming.
+            // Per-tool relay tasks annotate events with (tool_id, tool_name).
+            let (shared_ptx, mut shared_prx) =
+                tokio::sync::mpsc::channel::<(String, String, crate::tools::ProgressEvent)>(
+                    crate::tools::PROGRESS_CHANNEL_CAPACITY,
+                );
+
+            let mut tool_futures = futures::stream::FuturesUnordered::new();
+
+            for (id, name, input) in batch {
                 let tools = Arc::clone(&tools_ref);
                 let scope = context_scope.clone();
-                async move {
-                    // Create per-tool progress channel for sub-step visibility
-                    let (ptx, mut prx) = tokio::sync::mpsc::unbounded_channel::<crate::ProgressEvent>();
+                let relay_tx = shared_ptx.clone();
+                let relay_id = id.clone();
+                let relay_name = name.clone();
+
+                let (tool_ptx, mut tool_prx) =
+                    tokio::sync::mpsc::channel::<crate::tools::ProgressEvent>(
+                        crate::tools::PROGRESS_CHANNEL_CAPACITY,
+                    );
+
+                // Relay: annotate per-tool events with (id, name) for correlation
+                tokio::spawn(async move {
+                    while let Some(p) = tool_prx.recv().await {
+                        if relay_tx
+                            .send((relay_id.clone(), relay_name.clone(), p))
+                            .await
+                            .is_err()
+                        {
+                            break;
+                        }
+                    }
+                });
+
+                tool_futures.push(tokio::spawn(async move {
                     let start = Instant::now();
                     let result = if let Some(ref s) = scope {
-                        let fut = tools.execute_with_progress(&name, input.clone(), Some(ptx));
+                        let fut = tools.execute_with_progress(&name, input.clone(), Some(tool_ptx));
                         s.wrap_tool_future(Box::pin(fut)).await
                     } else {
-                        tools.execute_with_progress(&name, input.clone(), Some(ptx)).await
+                        tools
+                            .execute_with_progress(&name, input.clone(), Some(tool_ptx))
+                            .await
                     };
                     let duration_ms = start.elapsed().as_millis() as u64;
-                    // Collect progress events
-                    let mut progress = Vec::new();
-                    while let Ok(p) = prx.try_recv() {
-                        progress.push(p);
+                    (id, name, input, result, duration_ms)
+                }));
+            }
+            drop(shared_ptx);
+
+            // Real-time progress: poll tool futures and progress channel concurrently.
+            // Progress events are pushed to `events` immediately, yielding them
+            // in the agent stream BEFORE ToolComplete.
+            let mut batch_results: Vec<(
+                String,
+                String,
+                serde_json::Value,
+                crate::types::ToolResult,
+                u64,
+            )> = Vec::new();
+            loop {
+                tokio::select! {
+                    biased;
+                    recv = shared_prx.recv() => {
+                        match recv {
+                            Some((id, name, p)) => {
+                                emit_tool_progress(
+                                    self.cfg.runtime.event_bus.as_deref(),
+                                    &id, &name, &p.step, &p.status,
+                                );
+                                events.push(AgentEvent::ToolProgress {
+                                    id, name,
+                                    step: p.step, status: p.status,
+                                    timestamp: Some(p.timestamp),
+                                    duration_ms: p.duration_ms,
+                                    metadata: p.metadata,
+                                });
+                            }
+                            None => {
+                                // All senders dropped — channel closed.
+                                // Drain tool futures without progress polling.
+                                while let Some(join_result) = tool_futures.next().await {
+                                    match join_result {
+                                        Ok(result) => batch_results.push(result),
+                                        Err(e) => warn!(error = %e, "Tool task panicked"),
+                                    }
+                                }
+                                break;
+                            }
+                        }
                     }
-                    (id, name, input, result, duration_ms, progress)
+                    join_result = tool_futures.next(), if !tool_futures.is_empty() => {
+                        match join_result {
+                            Some(Ok(result)) => batch_results.push(result),
+                            Some(Err(e)) => warn!(error = %e, "Tool task panicked"),
+                            None => {}
+                        }
+                        if tool_futures.is_empty() {
+                            // All tools done — drain remaining progress from relay tasks
+                            while let Some((id, name, p)) = shared_prx.recv().await {
+                                emit_tool_progress(
+                                    self.cfg.runtime.event_bus.as_deref(),
+                                    &id, &name, &p.step, &p.status,
+                                );
+                                events.push(AgentEvent::ToolProgress {
+                                    id, name,
+                                    step: p.step, status: p.status,
+                                    timestamp: Some(p.timestamp),
+                                    duration_ms: p.duration_ms,
+                                    metadata: p.metadata,
+                                });
+                            }
+                            break;
+                        }
+                    }
                 }
-            });
-            let batch_results: Vec<_> = join_all(batch_futures).await;
+            }
             parallel_results.extend(batch_results);
         }
 
         self.all_non_retryable = !parallel_results.is_empty()
             && parallel_results
                 .iter()
-                .all(|(_, _, _, result, _, _)| result.is_non_retryable());
+                .all(|(_, _, _, result, _)| result.is_non_retryable());
 
         // Phase 3: Post-processing (serial — metrics, hooks, graph recording)
-        for (id, name, input, result, duration_ms, progress) in parallel_results {
-            // Emit ToolProgress events before ToolComplete
-            for p in progress {
-                events.push(AgentEvent::ToolProgress {
-                    id: id.clone(),
-                    name: name.clone(),
-                    step: p.step,
-                    status: p.status,
-                    duration_ms: p.duration_ms,
-                    metadata: p.metadata,
-                });
-            }
+        // Progress events were already emitted in real-time during Phase 2.
+        for (id, name, input, result, duration_ms) in parallel_results {
             let output = result.text();
             let is_error = result.is_error();
 

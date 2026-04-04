@@ -34,6 +34,8 @@ pub enum EventKind {
     ResponseReceived,
     /// A tool was executed.
     ToolExecuted,
+    /// A tool emitted a sub-step progress event.
+    ToolProgress,
     /// Tokens were consumed (per-turn usage).
     TokensConsumed,
     /// A stream chunk was received.
@@ -60,6 +62,7 @@ impl PartialEq for EventKind {
             (Self::RequestSent, Self::RequestSent)
             | (Self::ResponseReceived, Self::ResponseReceived)
             | (Self::ToolExecuted, Self::ToolExecuted)
+            | (Self::ToolProgress, Self::ToolProgress)
             | (Self::TokensConsumed, Self::TokensConsumed)
             | (Self::StreamChunk, Self::StreamChunk)
             | (Self::Error, Self::Error)
@@ -81,16 +84,17 @@ impl Hash for EventKind {
             Self::RequestSent => state.write_u8(0),
             Self::ResponseReceived => state.write_u8(1),
             Self::ToolExecuted => state.write_u8(2),
-            Self::TokensConsumed => state.write_u8(3),
-            Self::StreamChunk => state.write_u8(4),
-            Self::Error => state.write_u8(5),
-            Self::SessionChanged => state.write_u8(6),
-            Self::BudgetAlert => state.write_u8(7),
-            Self::SessionCompacted => state.write_u8(8),
-            Self::BranchForked => state.write_u8(9),
-            Self::CheckpointCreated => state.write_u8(10),
+            Self::ToolProgress => state.write_u8(3),
+            Self::TokensConsumed => state.write_u8(4),
+            Self::StreamChunk => state.write_u8(5),
+            Self::Error => state.write_u8(6),
+            Self::SessionChanged => state.write_u8(7),
+            Self::BudgetAlert => state.write_u8(8),
+            Self::SessionCompacted => state.write_u8(9),
+            Self::BranchForked => state.write_u8(10),
+            Self::CheckpointCreated => state.write_u8(11),
             Self::Custom(s) => {
-                state.write_u8(11);
+                state.write_u8(12);
                 s.hash(state);
             }
         }

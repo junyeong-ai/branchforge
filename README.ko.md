@@ -49,7 +49,7 @@ Rust로 작성된 stateful coding agent runtime입니다.
 
 ```toml
 [dependencies]
-branchforge = "0.2"
+branchforge = "0.5"
 tokio = { version = "1", features = ["full"] }
 ```
 

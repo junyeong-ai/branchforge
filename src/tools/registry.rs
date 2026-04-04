@@ -113,11 +113,11 @@ impl ToolRegistry {
 
     /// Execute a tool with optional progress channel.
     ///
-    /// If `progress_tx` is provided, the tool can call `ctx.emit_progress()`
+    /// If `progress_tx` is provided, the tool can call `ctx.progress()`
     /// and progress events will be collected in the channel. The caller
     /// (typically the streaming pipeline) drains these and converts them
     /// to `AgentEvent::ToolProgress` events.
-    pub async fn execute_with_progress(
+    pub(crate) async fn execute_with_progress(
         &self,
         name: &str,
         input: serde_json::Value,
@@ -149,11 +149,9 @@ impl ToolRegistry {
             self.env.context().clone()
         };
 
-        let result = tokio::time::timeout(
-            Duration::from_millis(timeout_ms),
-            tool.execute(input, &ctx),
-        )
-        .await;
+        let result =
+            tokio::time::timeout(Duration::from_millis(timeout_ms), tool.execute(input, &ctx))
+                .await;
 
         match result {
             Ok(tool_result) => self.apply_output_limits(tool_result, &limits),
