@@ -201,16 +201,9 @@ impl CompactService {
             vec!["compaction".to_string()],
         )?;
 
-        // Projection replacement only; graph history remains intact.
-        let summary_msg = SessionMessage::assistant(vec![ContentBlock::text(format!(
-            "[Previous conversation summary]\n\n{}",
-            summary
-        ))])
-        .as_compact_summary();
-
-        let new_leaf_id = Some(summary_msg.id.clone());
-        session.messages = vec![summary_msg];
-        session.current_leaf_id = new_leaf_id;
+        // Rebuild projection from graph — the Summary node is now the
+        // compaction checkpoint and graph_projected_messages() will start from it.
+        session.refresh_message_projection();
         session.refresh_summary_cache();
         session.updated_at = chrono::Utc::now();
 

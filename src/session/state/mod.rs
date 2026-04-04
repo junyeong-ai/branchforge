@@ -206,15 +206,15 @@ impl Session {
         if let Some(leaf) = &self.current_leaf_id {
             message.parent_id = Some(leaf.clone());
         }
+        if let Some(usage) = &message.usage {
+            self.total_usage.add(usage);
+        }
         self.record_message_in_graph(&message)?;
         if message.is_compact_summary {
             self.refresh_summary_cache();
         }
-        self.current_leaf_id = Some(message.id.clone());
-        if let Some(usage) = &message.usage {
-            self.total_usage.add(usage);
-        }
-        self.messages.push(message);
+        // Derive current_leaf_id and messages projection from graph.
+        self.refresh_message_projection();
         self.updated_at = Utc::now();
 
         if let Some(ref bus) = self.event_bus {
@@ -633,6 +633,7 @@ impl Session {
     pub fn clear_messages(&mut self) {
         self.messages.clear();
         self.current_leaf_id = None;
+        self.content_overrides.clear();
         self.updated_at = Utc::now();
     }
 

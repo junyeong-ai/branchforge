@@ -122,17 +122,20 @@ impl RecoveryStrategy for ContextRecovery {
     }
 }
 
-/// Aggressively truncate all tool result content blocks to `max_len` characters.
-///
-/// This is a quick in-place reduction that avoids a full compaction round-trip.
+/// Aggressively truncate tool result content blocks to `max_len` characters
+/// using `content_overrides` so the graph remains untouched.
 fn collapse_context(session: &mut crate::session::Session, max_len: usize) {
     use crate::types::{ContentBlock, Role, ToolResultContent, ToolResultContentBlock};
 
-    for message in &mut session.messages {
+    let messages = session.current_branch_messages();
+    for message in &messages {
         if message.role != Role::User {
             continue;
         }
-        for block in &mut message.content {
+        let mut needs_override = false;
+        let mut new_content = message.content.clone();
+
+        for block in &mut new_content {
             if let ContentBlock::ToolResult(result) = block
                 && let Some(ref mut content) = result.content
             {
@@ -141,6 +144,7 @@ fn collapse_context(session: &mut crate::session::Session, max_len: usize) {
                         if text.len() > max_len {
                             text.truncate(max_len);
                             text.push_str("...[truncated]");
+                            needs_override = true;
                         }
                     }
                     ToolResultContent::Blocks(blocks) => {
@@ -150,11 +154,16 @@ fn collapse_context(session: &mut crate::session::Session, max_len: usize) {
                             {
                                 text.truncate(max_len);
                                 text.push_str("...[truncated]");
+                                needs_override = true;
                             }
                         }
                     }
                 }
             }
+        }
+
+        if needs_override && let Ok(node_id) = message.id.0.parse::<uuid::Uuid>() {
+            session.content_overrides.set(node_id, new_content);
         }
     }
 }
