@@ -122,7 +122,7 @@ pub use auth::{CredentialProvider, OAuthConfig};
 pub use budget::report::{CostSummary, ModelCostEntry};
 pub use client::{
     BetaConfig, BetaFeature, CloudProvider, EffortLevel, FallbackConfig, ModelConfig, ModelType,
-    OutputConfig, ProviderConfig,
+    OutputConfig, ProviderConfig, RetryPolicy,
 };
 pub use common::circuit::{CircuitBreaker, CircuitConfig, CircuitState};
 pub use common::{ContentSource, Index, IndexRegistry, Named, SourceType, ToolRestricted};
@@ -400,6 +400,24 @@ impl Error {
             Error::RateLimit { retry_after } => *retry_after,
             _ => None,
         }
+    }
+
+    /// Whether this error is transient and the same request may succeed on retry.
+    pub fn is_retryable(&self) -> bool {
+        matches!(
+            self,
+            Error::RateLimit { .. }
+                | Error::ModelOverloaded { .. }
+                | Error::Timeout(_)
+                | Error::Network(_)
+                | Error::CircuitOpen
+        ) || matches!(
+            self,
+            Error::Api {
+                status: Some(429 | 500..=599),
+                ..
+            }
+        )
     }
 }
 

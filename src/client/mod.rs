@@ -58,11 +58,52 @@ use crate::{Error, Result};
 
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(300);
 
+/// Policy for retrying transient errors with exponential backoff.
+///
+/// Applied before fallback model switching — retries the *same* model first.
+#[derive(Debug, Clone)]
+pub struct RetryPolicy {
+    pub max_retries: u32,
+    pub base_delay: Duration,
+    pub max_delay: Duration,
+}
+
+impl Default for RetryPolicy {
+    fn default() -> Self {
+        Self {
+            max_retries: 2,
+            base_delay: Duration::from_secs(1),
+            max_delay: Duration::from_secs(30),
+        }
+    }
+}
+
+impl RetryPolicy {
+    pub fn none() -> Self {
+        Self {
+            max_retries: 0,
+            ..Default::default()
+        }
+    }
+
+    fn delay_for(&self, attempt: u32, server_retry_after: Option<Duration>) -> Duration {
+        if let Some(server_delay) = server_retry_after {
+            return server_delay;
+        }
+        let exp =
+            self.base_delay.as_millis() as f64 * 2.0f64.powi(attempt.saturating_sub(1) as i32);
+        let clamped = exp.min(self.max_delay.as_millis() as f64);
+        let jitter = clamped * 0.15 * (2.0 * rand::random::<f64>() - 1.0);
+        Duration::from_millis((clamped + jitter).max(0.0) as u64)
+    }
+}
+
 #[derive(Clone)]
 pub struct Client {
     adapter: Arc<dyn ProviderAdapter>,
     http: reqwest::Client,
     fallback_config: Option<FallbackConfig>,
+    retry_policy: RetryPolicy,
     resilience: Option<Arc<Resilience>>,
     event_bus: Option<Arc<EventBus>>,
 }
@@ -79,6 +120,7 @@ impl Client {
             adapter: Arc::new(adapter),
             http,
             fallback_config: None,
+            retry_policy: RetryPolicy::default(),
             resilience: None,
             event_bus: None,
         })
@@ -89,9 +131,15 @@ impl Client {
             adapter: Arc::new(adapter),
             http,
             fallback_config: None,
+            retry_policy: RetryPolicy::default(),
             resilience: None,
             event_bus: None,
         }
+    }
+
+    pub fn retry_policy(mut self, policy: RetryPolicy) -> Self {
+        self.retry_policy = policy;
+        self
     }
 
     /// Attach an [`EventBus`] for non-blocking observability events.
@@ -427,6 +475,10 @@ impl Client {
         FilesClient::new(self)
     }
 
+    pub fn profile(&self) -> ProviderProfile {
+        self.adapter.profile()
+    }
+
     pub fn adapter(&self) -> &dyn ProviderAdapter {
         self.adapter.as_ref()
     }
@@ -465,7 +517,26 @@ impl Client {
         &self,
         request: CreateMessageRequest,
     ) -> Result<crate::types::ApiResponse> {
-        self.with_auth_retry(|| self.send(request.clone())).await
+        let mut last_err = None;
+        for attempt in 0..=self.retry_policy.max_retries {
+            match self.with_auth_retry(|| self.send(request.clone())).await {
+                Ok(resp) => return Ok(resp),
+                Err(e) if e.is_retryable() && attempt < self.retry_policy.max_retries => {
+                    let delay = self.retry_policy.delay_for(attempt + 1, e.retry_after());
+                    tracing::warn!(
+                        error = %e,
+                        attempt = attempt + 1,
+                        max_retries = self.retry_policy.max_retries,
+                        delay_ms = delay.as_millis() as u64,
+                        "Retrying after transient error"
+                    );
+                    tokio::time::sleep(delay).await;
+                    last_err = Some(e);
+                }
+                Err(e) => return Err(e),
+            }
+        }
+        Err(last_err.expect("retry loop ended without error"))
     }
 
     pub async fn send_stream_with_auth_retry(
@@ -473,8 +544,29 @@ impl Client {
         request: CreateMessageRequest,
     ) -> Result<reqwest::Response> {
         request.validate()?;
-        self.with_auth_retry(|| self.adapter.send_stream(&self.http, request.clone()))
-            .await
+        let mut last_err = None;
+        for attempt in 0..=self.retry_policy.max_retries {
+            match self
+                .with_auth_retry(|| self.adapter.send_stream(&self.http, request.clone()))
+                .await
+            {
+                Ok(resp) => return Ok(resp),
+                Err(e) if e.is_retryable() && attempt < self.retry_policy.max_retries => {
+                    let delay = self.retry_policy.delay_for(attempt + 1, e.retry_after());
+                    tracing::warn!(
+                        error = %e,
+                        attempt = attempt + 1,
+                        max_retries = self.retry_policy.max_retries,
+                        delay_ms = delay.as_millis() as u64,
+                        "Retrying stream connection after transient error"
+                    );
+                    tokio::time::sleep(delay).await;
+                    last_err = Some(e);
+                }
+                Err(e) => return Err(e),
+            }
+        }
+        Err(last_err.expect("retry loop ended without error"))
     }
 
     pub async fn count_tokens(
@@ -514,6 +606,7 @@ pub struct ClientBuilder {
     gateway: Option<GatewayConfig>,
     timeout: Option<Duration>,
     fallback_config: Option<FallbackConfig>,
+    retry_policy: Option<RetryPolicy>,
     resilience_config: Option<ResilienceConfig>,
     event_bus: Option<Arc<EventBus>>,
 
@@ -672,6 +765,11 @@ impl ClientBuilder {
         self
     }
 
+    pub fn retry(mut self, policy: RetryPolicy) -> Self {
+        self.retry_policy = Some(policy);
+        self
+    }
+
     pub fn with_resilience(mut self, config: ResilienceConfig) -> Self {
         self.resilience_config = Some(config);
         self
@@ -819,6 +917,7 @@ impl ClientBuilder {
             adapter: Arc::from(adapter),
             http,
             fallback_config: self.fallback_config,
+            retry_policy: self.retry_policy.unwrap_or_default(),
             resilience,
             event_bus: self.event_bus,
         })
