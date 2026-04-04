@@ -108,8 +108,34 @@ impl BashTool {
         let mut stdout_handle = child.stdout.take();
         let mut stderr_handle = child.stderr.take();
 
-        match timeout(timeout_duration, child.wait()).await {
-            Ok(Ok(status)) => {
+        // Race timeout, child wait, and optional cancellation
+        enum WaitOutcome {
+            Completed(std::io::Result<std::process::ExitStatus>),
+            TimedOut,
+            Cancelled,
+        }
+
+        let cancel_token = context.cancel_token().cloned();
+        let outcome = tokio::select! {
+            r = timeout(timeout_duration, child.wait()) => {
+                match r {
+                    Ok(status) => WaitOutcome::Completed(status),
+                    Err(_) => WaitOutcome::TimedOut,
+                }
+            }
+            _ = async {
+                if let Some(ref token) = cancel_token {
+                    token.cancelled().await;
+                } else {
+                    std::future::pending::<()>().await;
+                }
+            } => {
+                WaitOutcome::Cancelled
+            }
+        };
+
+        match outcome {
+            WaitOutcome::Completed(Ok(status)) => {
                 // Read output from taken handles
                 let mut stdout_buf = Vec::new();
                 let mut stderr_buf = Vec::new();
@@ -154,8 +180,10 @@ impl BashTool {
 
                 ToolResult::success(combined)
             }
-            Ok(Err(e)) => ToolResult::error(format!("Failed to execute command: {}", e)),
-            Err(_) => {
+            WaitOutcome::Completed(Err(e)) => {
+                ToolResult::error(format!("Failed to execute command: {}", e))
+            }
+            WaitOutcome::TimedOut => {
                 // Timeout: explicitly kill and wait to prevent zombie process
                 let _ = child.kill().await;
                 let _ = child.wait().await;
@@ -163,6 +191,12 @@ impl BashTool {
                     "Command timed out after {} seconds",
                     timeout_ms / 1000
                 ))
+            }
+            WaitOutcome::Cancelled => {
+                // Cancellation: kill child process and clean up
+                let _ = child.kill().await;
+                let _ = child.wait().await;
+                ToolResult::error("Command cancelled")
             }
         }
     }

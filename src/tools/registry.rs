@@ -4,6 +4,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use dashmap::DashMap;
+use tokio_util::sync::CancellationToken;
 
 /// Default timeout for tool execution in milliseconds (2 minutes).
 const DEFAULT_TOOL_TIMEOUT_MS: u64 = 120_000;
@@ -108,20 +109,24 @@ impl ToolRegistry {
     }
 
     pub async fn execute(&self, name: &str, input: serde_json::Value) -> ToolResult {
-        self.execute_with_progress(name, input, None).await
+        self.execute_with_progress(name, input, None, None).await
     }
 
-    /// Execute a tool with optional progress channel.
+    /// Execute a tool with optional progress channel and cancellation token.
     ///
     /// If `progress_tx` is provided, the tool can call `ctx.progress()`
     /// and progress events will be collected in the channel. The caller
     /// (typically the streaming pipeline) drains these and converts them
     /// to `AgentEvent::ToolProgress` events.
+    ///
+    /// If `cancel_token` is provided, tool execution races against
+    /// cancellation. Tools that opt in can also check the token cooperatively.
     pub(crate) async fn execute_with_progress(
         &self,
         name: &str,
         input: serde_json::Value,
         progress_tx: Option<super::context::ProgressSender>,
+        cancel_token: Option<CancellationToken>,
     ) -> ToolResult {
         let tool = match self.tools.get(name) {
             Some(t) => Arc::clone(t.value()),
@@ -142,21 +147,37 @@ impl ToolRegistry {
         let limits = self.env.context().limits_for(name);
         let timeout_ms = limits.timeout_ms.unwrap_or(DEFAULT_TOOL_TIMEOUT_MS);
 
-        // Create a context with progress channel if provided
-        let ctx = if let Some(ptx) = progress_tx {
-            self.env.context().clone().with_progress(ptx)
-        } else {
-            self.env.context().clone()
+        // Create a context with progress channel and cancel token if provided
+        let mut ctx = self.env.context().clone();
+        if let Some(ptx) = progress_tx {
+            ctx = ctx.with_progress(ptx);
+        }
+        if let Some(ref token) = cancel_token {
+            ctx = ctx.with_cancel_token(token.clone());
+        }
+
+        let result = tokio::select! {
+            timeout_result = tokio::time::timeout(
+                Duration::from_millis(timeout_ms),
+                tool.execute(input, &ctx),
+            ) => {
+                match timeout_result {
+                    Ok(tool_result) => tool_result,
+                    Err(_) => return ToolResult::timeout(timeout_ms),
+                }
+            }
+            _ = async {
+                if let Some(ref token) = cancel_token {
+                    token.cancelled().await;
+                } else {
+                    std::future::pending::<()>().await;
+                }
+            } => {
+                return ToolResult::error("Tool execution cancelled");
+            }
         };
 
-        let result =
-            tokio::time::timeout(Duration::from_millis(timeout_ms), tool.execute(input, &ctx))
-                .await;
-
-        match result {
-            Ok(tool_result) => self.apply_output_limits(tool_result, &limits),
-            Err(_) => ToolResult::timeout(timeout_ms),
-        }
+        self.apply_output_limits(result, &limits)
     }
 
     fn apply_output_limits(

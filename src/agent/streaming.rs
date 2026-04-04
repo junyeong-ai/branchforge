@@ -196,6 +196,8 @@ struct ToolExecutionPhase {
     /// Context needed to spawn the next batch.
     tools_ref: Arc<crate::tools::ToolRegistry>,
     context_scope: Option<crate::SharedContextScope>,
+    /// Cancellation token propagated to tool execution.
+    cancel_token: tokio_util::sync::CancellationToken,
     /// Blocked tool results from pre-processing (passed to finalize).
     blocked_results: Vec<ToolResultBlock>,
 }
@@ -1177,6 +1179,7 @@ impl StreamState {
         // The Phase machine in next_event() handles real-time progress delivery.
         let tools_ref = Arc::clone(&self.cfg.runtime.tools);
         let context_scope = self.cfg.runtime.context_scope.clone();
+        let cancel_token = self.cfg.runtime.shutdown.clone();
 
         let mut batches = partition_tools_by_safety(&tools_ref, &prepared);
 
@@ -1197,7 +1200,7 @@ impl StreamState {
 
         let first_batch = batches.remove(0);
         let (progress_rx, tool_handles) =
-            spawn_tool_batch(&first_batch, &tools_ref, &context_scope);
+            spawn_tool_batch(&first_batch, &tools_ref, &context_scope, &cancel_token);
 
         self.phase = Phase::ExecutingTools(Box::new(ToolExecutionPhase {
             pre_events: events.into(),
@@ -1207,6 +1210,7 @@ impl StreamState {
             remaining_batches: batches,
             tools_ref,
             context_scope,
+            cancel_token,
             blocked_results: all_tool_results,
         }));
 
@@ -1220,6 +1224,7 @@ fn spawn_tool_batch(
     batch: &[(String, String, serde_json::Value)],
     tools_ref: &Arc<crate::tools::ToolRegistry>,
     context_scope: &Option<crate::SharedContextScope>,
+    cancel_token: &tokio_util::sync::CancellationToken,
 ) -> (
     tokio::sync::mpsc::Receiver<AnnotatedProgress>,
     futures::stream::FuturesUnordered<tokio::task::JoinHandle<ToolExecResult>>,
@@ -1232,6 +1237,7 @@ fn spawn_tool_batch(
     for (id, name, input) in batch {
         let tools = Arc::clone(tools_ref);
         let scope = context_scope.clone();
+        let token = cancel_token.clone();
         let relay_tx = shared_ptx.clone();
         let relay_id = id.clone();
         let relay_name = name.clone();
@@ -1259,11 +1265,12 @@ fn spawn_tool_batch(
         tool_handles.push(tokio::spawn(async move {
             let start = Instant::now();
             let result = if let Some(ref s) = scope {
-                let fut = tools.execute_with_progress(&name, input.clone(), Some(tool_ptx));
+                let fut =
+                    tools.execute_with_progress(&name, input.clone(), Some(tool_ptx), Some(token));
                 s.wrap_tool_future(Box::pin(fut)).await
             } else {
                 tools
-                    .execute_with_progress(&name, input.clone(), Some(tool_ptx))
+                    .execute_with_progress(&name, input.clone(), Some(tool_ptx), Some(token))
                     .await
             };
             let duration_ms = start.elapsed().as_millis() as u64;
@@ -1285,7 +1292,12 @@ impl StreamState {
         mut exec: Box<ToolExecutionPhase>,
     ) -> crate::Result<()> {
         if let Some(next_batch) = exec.remaining_batches.first() {
-            let (rx, handles) = spawn_tool_batch(next_batch, &exec.tools_ref, &exec.context_scope);
+            let (rx, handles) = spawn_tool_batch(
+                next_batch,
+                &exec.tools_ref,
+                &exec.context_scope,
+                &exec.cancel_token,
+            );
             exec.remaining_batches.remove(0);
             exec.progress_rx = rx;
             exec.tool_handles = handles;

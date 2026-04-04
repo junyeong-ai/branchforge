@@ -5,6 +5,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
+use tokio_util::sync::CancellationToken;
 
 use crate::authorization::{ToolDecision, ToolLimits};
 use crate::hooks::{HookContext, HookEvent, HookInput, HookManager};
@@ -52,6 +53,7 @@ pub struct ExecutionContext {
     session_manager: Option<SessionManager>,
     session_scope: Option<SessionAccessScope>,
     progress_tx: Option<ProgressSender>,
+    cancel_token: Option<CancellationToken>,
 }
 
 impl ExecutionContext {
@@ -63,6 +65,7 @@ impl ExecutionContext {
             session_manager: None,
             session_scope: None,
             progress_tx: None,
+            cancel_token: None,
         }
     }
 
@@ -80,6 +83,7 @@ impl ExecutionContext {
             session_manager: None,
             session_scope: None,
             progress_tx: None,
+            cancel_token: None,
         })
     }
 
@@ -97,6 +101,17 @@ impl ExecutionContext {
     pub(crate) fn with_progress(mut self, tx: ProgressSender) -> Self {
         self.progress_tx = Some(tx);
         self
+    }
+
+    /// Attach a cancellation token for cooperative tool cancellation.
+    pub fn with_cancel_token(mut self, token: CancellationToken) -> Self {
+        self.cancel_token = Some(token);
+        self
+    }
+
+    /// Returns the cancellation token, if one was attached.
+    pub fn cancel_token(&self) -> Option<&CancellationToken> {
+        self.cancel_token.as_ref()
     }
 
     /// Create a progress builder for the given step name.
