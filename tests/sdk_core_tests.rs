@@ -14,8 +14,9 @@ use std::sync::Arc;
 use tempfile::TempDir;
 
 fn create_test_context(temp_dir: &TempDir) -> ExecutionContext {
-    ExecutionContext::from_path(std::fs::canonicalize(temp_dir.path()).unwrap())
-        .unwrap_or_else(|_| ExecutionContext::permissive())
+    ExecutionContext::from_path(std::fs::canonicalize(temp_dir.path()).unwrap()).unwrap_or_else(
+        |_| ExecutionContext::try_permissive().expect("failed to create permissive context"),
+    )
 }
 
 // =============================================================================
@@ -848,7 +849,7 @@ mod tool_execution_tests {
         let file_path = temp_dir.path().join("test.txt");
         std::fs::write(&file_path, "Line 1\nLine 2\nLine 3\nLine 4").unwrap();
         let tool = ReadTool;
-        let ctx = ExecutionContext::permissive();
+        let ctx = ExecutionContext::try_permissive().expect("failed to create permissive context");
         let result = tool
             .execute(
                 json!({"file_path": file_path.to_str().unwrap(), "offset": 1, "limit": 2}),

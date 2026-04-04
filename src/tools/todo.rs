@@ -171,7 +171,8 @@ mod tests {
         let session_id = SessionId::new();
         let state = ToolState::new(session_id);
         let tool = TodoWriteTool::new(state.clone(), session_id);
-        let execution_context = ExecutionContext::permissive()
+        let execution_context = ExecutionContext::try_permissive()
+            .expect("failed to create permissive context")
             .with_session_manager(manager.clone())
             .with_session_scope(scope.clone());
 

@@ -64,19 +64,16 @@ impl SecureFs {
     }
 
     /// Create a permissive SecureFs that allows all operations.
-    ///
-    /// # Panics
-    /// Panics if "/" cannot be opened, which indicates a fundamentally broken system.
-    pub fn permissive() -> Self {
-        let root_fd = std::fs::File::open("/").expect("failed to open root directory");
-        Self {
+    pub fn try_permissive() -> Result<Self, SecurityError> {
+        let root_fd = std::fs::File::open("/").map_err(SecurityError::Io)?;
+        Ok(Self {
             root_fd: Arc::new(root_fd.into()),
             root_path: PathBuf::from("/"),
             allowed_paths: Vec::new(),
             denied_patterns: Vec::new(),
             max_symlink_depth: 255,
             permissive: true,
-        }
+        })
     }
 
     pub fn is_permissive(&self) -> bool {

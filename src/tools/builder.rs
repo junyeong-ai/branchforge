@@ -158,7 +158,8 @@ impl ToolRegistryBuilder {
                 security.policy = crate::security::SecurityPolicy::new(tool_policy);
                 security
             })
-            .unwrap_or_else(|_| crate::security::SecurityContext::permissive());
+            .or_else(|_| crate::security::SecurityContext::try_permissive())
+            .expect("failed to create security context");
 
         let session_id = self.session_id.unwrap_or_default();
         let mut context = ExecutionContext::new(security);

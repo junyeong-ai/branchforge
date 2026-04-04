@@ -68,7 +68,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let security = SecurityContext::builder()
         .root(&working_dir)
         .build()
-        .unwrap_or_else(|_| SecurityContext::permissive());
+        .or_else(|_| SecurityContext::try_permissive())
+        .expect("failed to create security context");
     let ctx = ExecutionContext::new(security);
 
     let session_id = SessionId::new();

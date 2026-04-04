@@ -69,7 +69,10 @@ mod tests {
     use crate::security::SecurityContext;
 
     fn test_context() -> ExecutionContext {
-        ExecutionContext::new(SecurityContext::permissive())
+        ExecutionContext::new(
+            SecurityContext::try_permissive()
+                .expect("failed to create permissive security context"),
+        )
     }
 
     #[tokio::test]

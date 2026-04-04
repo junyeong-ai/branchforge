@@ -415,7 +415,9 @@ mod phase12_misc {
     #[test]
     fn tool_execution_env_fields_are_private() {
         use branchforge::tools::{ExecutionContext, ToolExecutionEnv};
-        let env = ToolExecutionEnv::new(ExecutionContext::permissive());
+        let env = ToolExecutionEnv::new(
+            ExecutionContext::try_permissive().expect("failed to create permissive context"),
+        );
         let _ctx = env.context();
         let _state = env.tool_state();
         let _pm = env.process_manager();

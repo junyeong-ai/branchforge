@@ -235,7 +235,8 @@ mod tests {
     #[tokio::test]
     async fn test_simple_command() {
         let tool = BashTool::default();
-        let context = ExecutionContext::permissive();
+        let context =
+            ExecutionContext::try_permissive().expect("failed to create permissive context");
         let result = tool
             .execute(
                 serde_json::json!({"command": "echo 'hello world'"}),
@@ -253,7 +254,8 @@ mod tests {
     #[tokio::test]
     async fn test_background_command() {
         let tool = BashTool::default();
-        let context = ExecutionContext::permissive();
+        let context =
+            ExecutionContext::try_permissive().expect("failed to create permissive context");
         let result = tool
             .execute(
                 serde_json::json!({
@@ -274,7 +276,8 @@ mod tests {
     #[tokio::test]
     async fn test_stderr_output() {
         let tool = BashTool::default();
-        let context = ExecutionContext::permissive();
+        let context =
+            ExecutionContext::try_permissive().expect("failed to create permissive context");
         let result = tool
             .execute(
                 serde_json::json!({"command": "echo 'stdout' && echo 'stderr' >&2"}),
@@ -292,7 +295,8 @@ mod tests {
     #[tokio::test]
     async fn test_exit_code_nonzero() {
         let tool = BashTool::default();
-        let context = ExecutionContext::permissive();
+        let context =
+            ExecutionContext::try_permissive().expect("failed to create permissive context");
         let result = tool
             .execute(serde_json::json!({"command": "exit 42"}), &context)
             .await;
@@ -307,7 +311,8 @@ mod tests {
     #[tokio::test]
     async fn test_short_timeout() {
         let tool = BashTool::default();
-        let context = ExecutionContext::permissive();
+        let context =
+            ExecutionContext::try_permissive().expect("failed to create permissive context");
         let result = tool
             .execute(
                 serde_json::json!({

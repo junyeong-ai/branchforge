@@ -21,7 +21,7 @@ mod security_tests {
 
     #[test]
     fn test_security_context_permissive() {
-        let ctx = SecurityContext::permissive();
+        let ctx = SecurityContext::try_permissive().unwrap();
         assert!(ctx.fs.is_permissive());
     }
 
@@ -55,7 +55,8 @@ mod security_tests {
         let security = SecurityContext::builder()
             .root(".")
             .build()
-            .unwrap_or_else(|_| SecurityContext::permissive());
+            .or_else(|_| SecurityContext::try_permissive())
+            .expect("failed to create security context");
         let ctx = ExecutionContext::new(security);
 
         let result = tool

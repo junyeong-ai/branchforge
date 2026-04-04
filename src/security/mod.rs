@@ -51,19 +51,16 @@ impl SecurityContext {
     }
 
     /// Create a permissive SecurityContext that allows all operations.
-    ///
-    /// # Panics
-    /// Panics if the root filesystem cannot be accessed.
-    pub fn permissive() -> Self {
-        Self {
-            fs: SecureFs::permissive(),
+    pub fn try_permissive() -> Result<Self, SecurityError> {
+        Ok(Self {
+            fs: SecureFs::try_permissive()?,
             #[cfg(feature = "coding-tools")]
             bash: bash::BashAnalyzer::new(bash::BashPolicy::default()),
             limits: ResourceLimits::none(),
             policy: SecurityPolicy::permissive(),
             network: Arc::new(NetworkSandbox::permissive()),
             sandbox: Arc::new(Sandbox::disabled()),
-        }
+        })
     }
 
     pub fn root(&self) -> &Path {
@@ -210,7 +207,7 @@ mod tests {
 
     #[test]
     fn test_security_context_permissive() {
-        let security = SecurityContext::permissive();
+        let security = SecurityContext::try_permissive().unwrap();
         assert_eq!(security.root(), Path::new("/"));
     }
 

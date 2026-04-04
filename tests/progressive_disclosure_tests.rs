@@ -389,7 +389,7 @@ mod skill_tool_tests {
 
         let executor = SkillRuntime::new(skill_registry);
         let tool = SkillTool::new(executor);
-        let ctx = ExecutionContext::permissive();
+        let ctx = ExecutionContext::try_permissive().expect("failed to create permissive context");
 
         let result = tool
             .execute(
@@ -425,7 +425,7 @@ Execute the user's request: $ARGUMENTS
 
         let executor = SkillRuntime::new(skill_registry);
         let skill_tool = SkillTool::new(executor);
-        let ctx = ExecutionContext::permissive();
+        let ctx = ExecutionContext::try_permissive().expect("failed to create permissive context");
 
         let result = skill_tool
             .execute(
