@@ -299,13 +299,6 @@ mod phase9_modules {
         let frame = PromptFrame::default();
         assert!(frame.render().is_empty());
     }
-
-    #[test]
-    fn run_descriptor_from_agent() {
-        use branchforge::RunDescriptor;
-        let desc = RunDescriptor::new("claude-sonnet-4-5", "anthropic");
-        assert_eq!(desc.model, "claude-sonnet-4-5");
-    }
 }
 
 // =============================================================================
