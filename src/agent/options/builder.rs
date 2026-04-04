@@ -116,7 +116,9 @@ impl AgentBuilder {
     ) -> crate::Result<crate::session::SessionId> {
         let value = value.as_ref();
         crate::session::SessionId::parse(value).ok_or_else(|| {
-            crate::Error::Session(format!("Invalid session ID for {operation}: {value}"))
+            crate::Error::Session(crate::session::SessionError::InvalidId {
+                value: format!("{operation}: {value}"),
+            })
         })
     }
 
@@ -612,10 +614,7 @@ impl AgentBuilder {
         let manager = self.session_manager.take().unwrap_or_default();
         let session_id_str: String = session_id.into();
         let original_id = Self::parse_session_id(&session_id_str, "fork_session")?;
-        let forked = manager
-            .fork(&original_id)
-            .await
-            .map_err(|e| crate::Error::Session(e.to_string()))?;
+        let forked = manager.fork(&original_id).await?;
 
         self.initial_messages = Some(forked.to_api_messages());
         self.resume_session_id = Some(forked.id.to_string());
@@ -632,10 +631,7 @@ impl AgentBuilder {
         let manager = self.session_manager.take().unwrap_or_default();
         let session_id = session_id.into();
         let original_id = Self::parse_session_id(&session_id, "fork_session_from_node")?;
-        let forked = manager
-            .fork_from_node(&original_id, from_node)
-            .await
-            .map_err(|e| crate::Error::Session(e.to_string()))?;
+        let forked = manager.fork_from_node(&original_id, from_node).await?;
 
         self.initial_messages = Some(forked.to_api_messages());
         self.resume_session_id = Some(forked.id.to_string());
@@ -1074,10 +1070,6 @@ mod tests {
 
         assert!(result.is_err());
         let error = result.err().unwrap();
-        assert!(
-            error
-                .to_string()
-                .contains("Invalid session ID for resume_session")
-        );
+        assert!(error.to_string().contains("Invalid session ID"));
     }
 }

@@ -239,7 +239,7 @@ impl Agent {
         manager
             .persist_snapshot(&session, self.session_scope.as_ref())
             .await
-            .map_err(|e| crate::Error::Session(e.to_string()))
+            .map_err(crate::Error::from)
     }
 
     pub fn orchestrator(&self) -> Option<&Arc<RwLock<PromptOrchestrator>>> {

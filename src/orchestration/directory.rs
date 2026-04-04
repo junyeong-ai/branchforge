@@ -110,10 +110,11 @@ impl AgentHandle {
     /// Send a message to this agent.
     pub async fn send(&self, from: AgentId, content: impl Into<String>) -> crate::Result<()> {
         let msg = AgentMessage::new(from, self.id, content);
-        self.channel
-            .send(msg)
-            .await
-            .map_err(|_| crate::Error::Session(format!("Agent '{}' channel closed", self.name)))
+        self.channel.send(msg).await.map_err(|_| {
+            crate::Error::Session(crate::session::SessionError::ChannelClosed {
+                message: format!("Agent '{}' channel closed", self.name),
+            })
+        })
     }
 }
 
@@ -167,15 +168,19 @@ impl AgentDirectory {
 
         if !handle.is_running() {
             let last = handle.last_result().await.unwrap_or_default();
-            return Err(crate::Error::Session(format!(
-                "Agent '{}' has already completed. Last result: {}",
-                to_name,
-                if last.len() > 500 {
-                    format!("{}...", &last[..500])
-                } else {
-                    last
-                }
-            )));
+            return Err(crate::Error::Session(
+                crate::session::SessionError::ChannelClosed {
+                    message: format!(
+                        "Agent '{}' has already completed. Last result: {}",
+                        to_name,
+                        if last.len() > 500 {
+                            format!("{}...", &last[..500])
+                        } else {
+                            last
+                        }
+                    ),
+                },
+            ));
         }
 
         handle.send(from, content).await

@@ -265,7 +265,7 @@ pub enum Error {
 
     /// Session operation failed.
     #[error("Session error: {0}")]
-    Session(String),
+    Session(#[from] session::SessionError),
 
     /// MCP server communication failed.
     #[error("MCP error: {0}")]
@@ -443,22 +443,7 @@ impl From<context::ContextError> for Error {
     }
 }
 
-impl From<session::SessionError> for Error {
-    fn from(err: session::SessionError) -> Self {
-        match err {
-            session::SessionError::NotFound { id } => {
-                Error::Config(format!("Session not found: {}", id))
-            }
-            session::SessionError::Expired { id } => {
-                Error::Config(format!("Session expired: {}", id))
-            }
-            session::SessionError::Storage { message } => Error::Config(message),
-            session::SessionError::Serialization(e) => Error::Json(e),
-            session::SessionError::Compact { message } => Error::Config(message),
-            session::SessionError::Context(e) => e.into(),
-        }
-    }
-}
+// From<SessionError> is auto-derived via #[from] on Error::Session.
 
 impl From<graph::GraphError> for Error {
     fn from(err: graph::GraphError) -> Self {

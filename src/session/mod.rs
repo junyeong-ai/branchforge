@@ -71,6 +71,7 @@ pub use types::{
 use thiserror::Error;
 
 #[derive(Error, Debug)]
+#[non_exhaustive]
 pub enum SessionError {
     #[error("Session not found: {id}")]
     NotFound { id: String },
@@ -89,6 +90,18 @@ pub enum SessionError {
 
     #[error("Context error: {0}")]
     Context(#[from] crate::context::ContextError),
+
+    #[error("Invalid session ID: {value}")]
+    InvalidId { value: String },
+
+    #[error("Queue full: {message}")]
+    QueueFull { message: String },
+
+    #[error("Channel closed: {message}")]
+    ChannelClosed { message: String },
+
+    #[error("Execution error: {message}")]
+    Execution { message: String },
 }
 
 pub type SessionResult<T> = std::result::Result<T, SessionError>;

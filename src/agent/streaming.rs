@@ -66,10 +66,11 @@ impl Agent {
             .unwrap_or(default_timeout);
 
         if self.state.is_executing() {
-            self.state
-                .enqueue(&*prompt)
-                .await
-                .map_err(|e| crate::Error::Session(format!("Queue full: {}", e)))?;
+            self.state.enqueue(&*prompt).await.map_err(|e| {
+                crate::Error::Session(crate::session::SessionError::QueueFull {
+                    message: e.to_string(),
+                })
+            })?;
         }
         let static_context = match &self.runtime.orchestrator {
             Some(orchestrator) => orchestrator.read().await.static_context().clone(),
@@ -1478,7 +1479,7 @@ async fn persist_stream_session_state(
     manager
         .persist_snapshot(&session, scope.as_ref())
         .await
-        .map_err(|e| crate::Error::Session(e.to_string()))
+        .map_err(crate::Error::from)
 }
 
 #[cfg(test)]

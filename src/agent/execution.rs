@@ -64,10 +64,11 @@ impl Agent {
             .unwrap_or(default_timeout);
 
         if self.state.is_executing() {
-            self.state
-                .enqueue(prompt)
-                .await
-                .map_err(|e| crate::Error::Session(format!("Queue full: {}", e)))?;
+            self.state.enqueue(prompt).await.map_err(|e| {
+                crate::Error::Session(crate::session::SessionError::QueueFull {
+                    message: e.to_string(),
+                })
+            })?;
             return self.wait_for_execution(timeout).await;
         }
 

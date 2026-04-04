@@ -72,18 +72,15 @@ impl ExecutionContext {
     }
 
     /// Create a permissive ExecutionContext that allows all operations.
-    ///
-    /// # Panics
-    /// Panics if the root filesystem cannot be accessed.
-    pub fn permissive() -> Self {
-        Self {
-            security: Arc::new(SecurityContext::permissive()),
+    pub fn try_permissive() -> Result<Self, crate::security::SecurityError> {
+        Ok(Self {
+            security: Arc::new(SecurityContext::try_permissive()?),
             hooks: None,
             session_id: None,
             session_manager: None,
             session_scope: None,
             progress_tx: None,
-        }
+        })
     }
 
     pub fn with_hooks(mut self, hooks: HookManager, session_id: impl Into<String>) -> Self {
@@ -148,10 +145,9 @@ impl ExecutionContext {
             return Ok(());
         };
         let session = state.session().await;
-        manager
+        Ok(manager
             .persist_snapshot(&session, self.session_scope.as_ref())
-            .await
-            .map_err(|e| crate::Error::Session(e.to_string()))
+            .await?)
     }
 
     pub async fn fire_hook(&self, event: HookEvent, input: HookInput) {
@@ -307,7 +303,8 @@ impl Default for ExecutionContext {
     fn default() -> Self {
         let security = SecurityContext::builder()
             .build()
-            .unwrap_or_else(|_| SecurityContext::permissive());
+            .or_else(|_| SecurityContext::try_permissive())
+            .expect("failed to create security context");
         Self::new(security)
     }
 }
@@ -382,7 +379,7 @@ mod tests {
 
     #[test]
     fn test_permissive_context() {
-        let context = ExecutionContext::permissive();
+        let context = ExecutionContext::try_permissive().unwrap();
         assert!(context.can_bypass_sandbox());
     }
 

@@ -586,7 +586,7 @@ async fn test_execute_routes_explicit_skill_with_default_authorization_mode() {
 }
 
 #[tokio::test]
-async fn test_execute_explicit_skill_respects_deny_rule() {
+async fn test_execute_by_name_skill_respects_deny_rule() {
     let (_server, client) = mock_client_with_message("model reply").await;
 
     let mut skill_registry = IndexRegistry::new();
@@ -748,7 +748,9 @@ fn test_tool_registry_with_dummy() {
 async fn test_tool_registry_execute() {
     use helpers::DummyTool;
 
-    let registry = ToolRegistry::from_context(ExecutionContext::permissive());
+    let registry = ToolRegistry::from_context(
+        ExecutionContext::try_permissive().expect("failed to create permissive context"),
+    );
     let tool = Arc::new(DummyTool {
         name: "TestTool".to_string(),
         output: ToolOutput::Success("test output".to_string()),

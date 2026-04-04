@@ -314,10 +314,11 @@ impl ToolState {
     }
 
     pub async fn acquire_execution(&self) -> crate::Result<ExecutionGuard<'_>> {
-        let permit =
-            self.0.execution_lock.acquire().await.map_err(|_| {
-                crate::Error::Session("execution semaphore unexpectedly closed".into())
-            })?;
+        let permit = self.0.execution_lock.acquire().await.map_err(|_| {
+            crate::Error::Session(crate::session::SessionError::Execution {
+                message: "execution semaphore unexpectedly closed".into(),
+            })
+        })?;
         self.0.executing.store(true, Ordering::Release);
         Ok(ExecutionGuard {
             permit,
