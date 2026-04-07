@@ -316,15 +316,15 @@ pub(crate) async fn maybe_invoke_explicit_skill_command(
     let result = Box::pin(skill_tool.execute_by_name_input(typed_input)).await;
     let duration_ms = start.elapsed().as_millis() as u64;
     let is_error = result.is_error();
-    let tool_use_id = format!("skill_{}", uuid::Uuid::new_v4().simple());
+    let tool_call_id = format!("skill_{}", uuid::Uuid::new_v4().simple());
 
     run_post_tool_hooks(hooks, hook_ctx, session_id, "Skill", is_error, &result).await;
-    metrics.record_tool(&tool_use_id, "Skill", duration_ms, is_error);
+    metrics.record_tool(&tool_call_id, "Skill", duration_ms, is_error);
 
     tool_state
         .record_tool_execution(
             ToolExecution::new(tool_state.session_id(), "Skill", actual_input.clone())
-                .message(tool_use_id.clone())
+                .message(tool_call_id.clone())
                 .output(result.output.text(), is_error)
                 .duration(duration_ms),
         )
@@ -334,7 +334,7 @@ pub(crate) async fn maybe_invoke_explicit_skill_command(
         .with_session_mut(|session| -> crate::session::SessionResult<()> {
             session.add_assistant_message(
                 vec![crate::ir::ContentPart::ToolCall {
-                    id: tool_use_id.clone(),
+                    id: tool_call_id.clone(),
                     name: "Skill".to_string(),
                     arguments: actual_input.clone(),
                     origin: crate::ir::ToolOrigin::Local,
@@ -342,7 +342,7 @@ pub(crate) async fn maybe_invoke_explicit_skill_command(
                 None,
             )?;
             session.add_tool_results(vec![ToolResultBlock::from_tool_result(
-                &tool_use_id,
+                &tool_call_id,
                 &result,
             )])?;
             Ok(())
