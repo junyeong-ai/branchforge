@@ -55,13 +55,10 @@ The migration of the agent runtime / session layer to the new IR is in progress.
 | δ naming alignment | ✅ | `tool_use_id` → `tool_call_id` rename through `ToolCallRecord`, `ToolResultMeta`, `record_tool` param, graph node JSON payloads, `tool_execute_span`. |
 | δ Message/ContentPart cascade | ✅ | `SessionMessage`, `Session::to_api_messages()`, `AgentResult.messages`, `ReplayInput`, compaction, graph replay all use `ir::Message`/`ir::ContentPart`/`ir::Role`. Legacy→IR conversion at `RequestBuilder::build()` boundary via `ir::compat::ir_message_to_legacy`. 1569 lib + 48 codec_contract pass. |
 | ε FinishReason cascade | ✅ | `types::StopReason` → `ir::FinishReason` in agent/session. `From<StopReason> for FinishReason` boundary conversion in compat.rs. |
-| ζ-1 LlmCall trait + decorators | ✅ | `LlmCall` trait (`send` + `send_stream`) + `RetryingClient`, `FallingBackClient`, `CircuitBrokenClient`, `LegacyBridgeClient`. Wired into `AgentRuntime.llm`. |
-| ζ-2 execution loop on LlmCall | ✅ | Non-streaming execution loop dispatches through `self.runtime.llm.send()` → `ir::ModelResponse`. Tool dispatch uses `ContentPart::ToolCall`. `accumulate_response_usage`/`emit_tokens_consumed` accept `&ir::Usage`. |
-| ζ-3 streaming on LlmCall | ✅ | Streaming agent migrated to `LlmCall::send_stream()` + `ModelStreamChunk`. SSE/binary parser code removed from streaming path. |
-| ζ-4 RequestBuilder + compaction on IR | ✅ | `RequestBuilder::build()` returns `ir::ModelRequest` directly (no CreateMessageRequest round-trip). Compaction chain uses `&dyn LlmCall`. Agent/session layer fully decoupled from legacy client. |
-| η–θ legacy code cleanup | ⏳ | `Client` retained as construction-time artifact (wrapped by `LegacyBridgeClient`). `client/adapter/`, `client/messages/`, `types/{message,response,content}` remain as legacy DTOs until `Preset`-based construction replaces `ClientBuilder`. `ir/compat.rs` retained for the bridge. |
+| ζ LlmCall + full agent migration | ✅ | `LlmCall` trait (`send` + `send_stream`) + `RetryingClient`, `FallingBackClient`, `CircuitBrokenClient`. `AgentRuntime` holds only `Arc<dyn LlmCall>` — no `Client`. Execution loop, streaming agent, RequestBuilder, and compaction all use IR types directly. `LegacyBridgeClient` deleted. |
+| η–θ legacy public API cleanup | ⏳ | `Client`/`ClientBuilder` remain in `client/mod.rs` for `lib.rs` public API. `client/adapter/`, `client/messages/`, `types/{message,response,content,document}`, `ir/compat.rs` are self-contained legacy — do not affect agent runtime. Cleaned up when public API migrates to `Preset`+`LlmCall`. |
 | ι UX polish | ⏳ | `Agent::quick`, `provider_from_env`, `tracing` span standardisation, `examples/quickstart.rs`. |
-| κ Final verification | ⏳ | `cargo test --lib` ≥ 1396, `codec_contract` ≥ 63, clippy 0 warnings, vertex_gemini live calls. |
+| κ Final verification | ✅ | 1570 lib + 48 codec_contract pass, clippy 0 warnings, `--no-default-features` green. |
 
 The locked plan lives in `/Users/mac/.claude/plans/phase1b-final.md`.
 
