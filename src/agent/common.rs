@@ -83,25 +83,31 @@ pub(crate) fn accumulate_response_usage(
     budget_tracker: &BudgetTracker,
     tenant_budget: Option<&TenantBudget>,
     model: &str,
-    usage: &Usage,
+    ir_usage: &crate::ir::Usage,
 ) -> Decimal {
-    total_usage.input_tokens = total_usage.input_tokens.saturating_add(usage.input_tokens);
+    total_usage.input_tokens = total_usage
+        .input_tokens
+        .saturating_add(ir_usage.input_tokens as u32);
     total_usage.output_tokens = total_usage
         .output_tokens
-        .saturating_add(usage.output_tokens);
-    metrics.add_usage_with_cache(usage);
-    metrics.record_model_usage(model, usage);
+        .saturating_add(ir_usage.output_tokens as u32);
 
-    if let Some(ref server_usage) = usage.server_tool_use {
-        metrics.update_server_tool_use_from_api(server_usage);
-    }
+    // Bridge to legacy metrics (still on types::Usage)
+    let legacy = Usage {
+        input_tokens: ir_usage.input_tokens as u32,
+        output_tokens: ir_usage.output_tokens as u32,
+        cache_read_input_tokens: ir_usage.cached_input_tokens.map(|v| v as u32),
+        cache_creation_input_tokens: ir_usage.cache_creation_tokens.map(|v| v as u32),
+        server_tool_use: None,
+    };
+    metrics.add_usage_with_cache(&legacy);
+    metrics.record_model_usage(model, &legacy);
 
-    let ir_usage: crate::ir::Usage = usage.into();
-    let cost = budget_tracker.record(model, &ir_usage);
+    let cost = budget_tracker.record(model, ir_usage);
     metrics.add_cost(cost);
 
     if let Some(tenant_budget) = tenant_budget {
-        tenant_budget.record(model, &ir_usage);
+        tenant_budget.record(model, ir_usage);
     }
 
     cost
@@ -111,7 +117,7 @@ pub(crate) fn accumulate_response_usage(
 /// for real-time token tracking.
 pub(crate) fn emit_tokens_consumed(
     event_bus: Option<&crate::events::EventBus>,
-    usage: &Usage,
+    usage: &crate::ir::Usage,
     model: &str,
 ) {
     if let Some(bus) = event_bus {

@@ -977,18 +977,19 @@ impl StreamState {
             )
             .await;
 
+        let ir_usage: crate::ir::Usage = (&accumulated_usage).into();
         accumulate_response_usage(
             &mut self.total_usage,
             &mut self.metrics,
             &self.cfg.runtime.budget_tracker,
             self.cfg.runtime.tenant_budget.as_deref(),
             &self.cfg.runtime.config.model.primary,
-            &accumulated_usage,
+            &ir_usage,
         );
 
         emit_tokens_consumed(
             self.cfg.runtime.event_bus.as_deref(),
-            &accumulated_usage,
+            &ir_usage,
             &self.cfg.runtime.config.model.primary,
         );
 

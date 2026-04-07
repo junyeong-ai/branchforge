@@ -351,8 +351,9 @@ impl Agent {
             }
 
             let api_start = Instant::now();
-            let request = request_builder.build(messages, &dynamic_rules_context);
-            let response = match self.runtime.client.send_with_auth_retry(request).await {
+            let legacy_request = request_builder.build(messages, &dynamic_rules_context);
+            let ir_request: crate::ir::ModelRequest = (&legacy_request).into();
+            let response = match self.runtime.llm.send(&ir_request).await {
                 Ok(resp) => resp,
                 Err(e) if is_context_overflow_error(&e) => {
                     if let Some(action) = try_recover(
@@ -380,13 +381,13 @@ impl Agent {
             debug!(api_time_ms = api_duration_ms, "API call completed");
 
             // Fire PostMessage hook (observation only, fail-open)
-            let stop_reason_str = response.stop_reason.map(|sr| format!("{:?}", sr));
+            let stop_reason_str = Some(format!("{:?}", response.finish_reason));
             let post_msg_input = HookInput::post_message(
                 &*self.session_id,
                 &response.model,
                 stop_reason_str,
-                response.usage.input_tokens,
-                response.usage.output_tokens,
+                response.usage.input_tokens as u32,
+                response.usage.output_tokens as u32,
             );
             let _ = self
                 .runtime
@@ -416,10 +417,7 @@ impl Agent {
             );
 
             final_text = response.text();
-            final_stop_reason = response
-                .stop_reason
-                .map(FinishReason::from)
-                .unwrap_or(FinishReason::Stop);
+            final_stop_reason = response.finish_reason.clone();
             let assistant_metadata = MessageMetadata {
                 model: Some(response.model.clone()),
                 request_id: Some(response.id.clone()),
@@ -427,39 +425,52 @@ impl Agent {
                 ..Default::default()
             };
 
+            // Convert ir::Usage → types::Usage for session storage
+            let session_usage = Usage {
+                input_tokens: response.usage.input_tokens as u32,
+                output_tokens: response.usage.output_tokens as u32,
+                cache_read_input_tokens: response.usage.cached_input_tokens.map(|v| v as u32),
+                cache_creation_input_tokens: response.usage.cache_creation_tokens.map(|v| v as u32),
+                server_tool_use: None,
+            };
             self.state
                 .with_session_mut(|session| {
-                    let ir_content: Vec<crate::ir::ContentPart> = response
-                        .content
-                        .iter()
-                        .map(crate::ir::compat::legacy_block_to_ir)
-                        .collect();
                     session.add_assistant_message_with_metadata(
-                        ir_content,
-                        Some(response.usage),
+                        response.content.clone(),
+                        Some(session_usage),
                         assistant_metadata,
                     )
                 })
                 .await?;
             self.persist_session_state().await?;
 
-            if !response.wants_tool_use() {
-                debug!("No tool use requested, ending loop");
+            if !response.finish_reason.should_continue() {
+                debug!("Model finished, ending loop");
                 break;
             }
 
-            let tool_uses = response.tool_uses();
+            // Extract tool calls from the response content
+            let tool_calls: Vec<_> = response
+                .content
+                .iter()
+                .filter_map(|part| match part {
+                    crate::ir::ContentPart::ToolCall {
+                        id,
+                        name,
+                        arguments,
+                        ..
+                    } => Some((id.clone(), name.clone(), arguments.clone())),
+                    _ => None,
+                })
+                .collect();
             let hook_ctx = self.hook_context();
 
-            let mut prepared = Vec::with_capacity(tool_uses.len());
-            let mut blocked = Vec::with_capacity(tool_uses.len());
+            let mut prepared = Vec::with_capacity(tool_calls.len());
+            let mut blocked = Vec::with_capacity(tool_calls.len());
 
-            for tool_use in &tool_uses {
-                let pre_input = HookInput::pre_tool_use(
-                    &*self.session_id,
-                    &tool_use.name,
-                    tool_use.input.clone(),
-                );
+            for (tool_id, tool_name, tool_input) in &tool_calls {
+                let pre_input =
+                    HookInput::pre_tool_use(&*self.session_id, tool_name, tool_input.clone());
                 let pre_output = self
                     .runtime
                     .hooks
@@ -467,33 +478,29 @@ impl Agent {
                     .await?;
 
                 if !pre_output.continue_execution {
-                    debug!(tool = %tool_use.name, "Tool blocked by hook");
+                    debug!(tool = %tool_name, "Tool blocked by hook");
                     let reason = pre_output
                         .stop_reason
                         .clone()
                         .unwrap_or_else(|| "Blocked by hook".into());
-                    blocked.push(ToolResultBlock::error(&tool_use.id, reason.clone()));
+                    blocked.push(ToolResultBlock::error(tool_id, reason.clone()));
                     metrics.record_authorization_denial(
-                        AuthorizationDenied::new(
-                            &tool_use.name,
-                            &tool_use.id,
-                            tool_use.input.clone(),
-                        )
-                        .reason(reason),
+                        AuthorizationDenied::new(tool_name, tool_id, tool_input.clone())
+                            .reason(reason),
                     );
                 } else {
-                    let input = pre_output.updated_input.unwrap_or(tool_use.input.clone());
+                    let input = pre_output.updated_input.unwrap_or(tool_input.clone());
                     self.state
                         .append_graph_node(
                             crate::graph::NodeKind::ToolCall,
                             serde_json::json!({
-                                "tool_call_id": tool_use.id.clone(),
-                                "tool_name": tool_use.name.clone(),
+                                "tool_call_id": tool_id.clone(),
+                                "tool_name": tool_name.clone(),
                                 "tool_input": input.clone(),
                             }),
                         )
                         .await?;
-                    prepared.push((tool_use.id.clone(), tool_use.name.clone(), input));
+                    prepared.push((tool_id.clone(), tool_name.clone(), input));
                 }
             }
 
