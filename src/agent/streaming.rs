@@ -715,11 +715,10 @@ impl StreamState {
             }
         }
 
-        let legacy_request = self
+        let ir_request = self
             .cfg
             .request_builder
             .build(messages, &self.dynamic_rules);
-        let ir_request: crate::ir::ModelRequest = (&legacy_request).into();
 
         let chunk_stream = match self.cfg.runtime.llm.send_stream(&ir_request).await {
             Ok(s) => s,

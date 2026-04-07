@@ -145,20 +145,20 @@ impl CompactService {
     pub async fn execute(
         &self,
         session: &mut Session,
-        client: &crate::Client,
+        llm: &dyn crate::client::LlmCall,
     ) -> crate::Result<CompactResult> {
-        use crate::client::messages::CreateMessageRequest;
-
         let prepared = self.prepare_compact(session)?;
         let PreparedCompact::Ready { summary_prompt, .. } = prepared else {
             return Ok(CompactResult::NotNeeded);
         };
 
-        let legacy_msg = crate::ir::compat::ir_message_to_legacy(&Message::user(&summary_prompt));
-        let request = CreateMessageRequest::new(&self.config.summary_model, vec![legacy_msg])
-            .max_tokens(self.config.max_summary_tokens);
-        let response = client.send(request).await?;
-        let result = self.apply_compact(session, response.text())?;
+        let ir_request = crate::ir::ModelRequest::new(
+            &self.config.summary_model,
+            vec![Message::user(&summary_prompt)],
+        )
+        .with_max_tokens(self.config.max_summary_tokens);
+        let ir_response = llm.send(&ir_request).await?;
+        let result = self.apply_compact(session, ir_response.text())?;
         self.record_compact(session, &result);
         Ok(result)
     }

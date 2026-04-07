@@ -49,7 +49,7 @@ pub trait RecoveryStrategy: Send + Sync + fmt::Debug {
         &self,
         ctx: &RecoveryContext,
         tool_state: &ToolState,
-        client: Option<&crate::Client>,
+        llm: Option<&dyn crate::client::LlmCall>,
         compaction_chain: Option<&str>,
     ) -> crate::Result<RecoveryAction>;
 
@@ -84,7 +84,7 @@ impl RecoveryStrategy for ContextRecovery {
         &self,
         ctx: &RecoveryContext,
         tool_state: &ToolState,
-        client: Option<&crate::Client>,
+        llm: Option<&dyn crate::client::LlmCall>,
         _compaction_chain: Option<&str>,
     ) -> crate::Result<RecoveryAction> {
         if ctx.attempt >= self.max_attempts {
@@ -100,8 +100,8 @@ impl RecoveryStrategy for ContextRecovery {
                 Ok(RecoveryAction::Retry)
             }
             1 => {
-                if let Some(client) = client {
-                    let result = tool_state.compact(client).await;
+                if let Some(llm) = llm {
+                    let result = tool_state.compact(llm).await;
                     match result {
                         Ok(_) => Ok(RecoveryAction::CompactAndRetry),
                         Err(e) => {

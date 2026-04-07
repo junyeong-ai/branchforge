@@ -33,7 +33,7 @@ impl CompactionChain {
         &self,
         ctx: &CompactionContext,
         session: &mut Session,
-        client: Option<&crate::Client>,
+        llm: Option<&dyn crate::client::LlmCall>,
     ) -> crate::Result<CompactResult> {
         if !self.circuit_breaker.allow_request() {
             debug!("Compaction circuit breaker is open, skipping");
@@ -43,7 +43,7 @@ impl CompactionChain {
         }
 
         for strategy in &self.strategies {
-            if strategy.requires_llm() && client.is_none() {
+            if strategy.requires_llm() && llm.is_none() {
                 debug!(
                     strategy = strategy.name(),
                     "Skipping LLM-dependent strategy (no client)"
@@ -74,7 +74,7 @@ impl CompactionChain {
 
             info!(strategy = strategy.name(), "Executing compaction");
 
-            match strategy.execute(plan, session, client).await {
+            match strategy.execute(plan, session, llm).await {
                 Ok(result) => {
                     self.circuit_breaker.record_success();
                     info!(

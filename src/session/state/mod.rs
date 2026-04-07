@@ -624,12 +624,12 @@ impl Session {
 
     pub async fn compact(
         &mut self,
-        client: &crate::Client,
+        llm: &dyn crate::client::LlmCall,
     ) -> crate::Result<crate::types::CompactResult> {
         let executor = crate::session::compact::CompactService::new(
             crate::session::compact::CompactConfig::default(),
         );
-        let result = executor.execute(self, client).await?;
+        let result = executor.execute(self, llm).await?;
         if matches!(result, crate::types::CompactResult::Compacted { .. }) {
             self.current_input_tokens = 0;
         }

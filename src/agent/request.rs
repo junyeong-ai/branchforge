@@ -1,22 +1,22 @@
 //! Request building utilities for agent execution.
 
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use crate::agent::config::{AgentConfig, CacheConfig, ServerToolsConfig, SystemPromptMode};
-use crate::client::messages::{CreateMessageRequest, RequestMetadata};
+use crate::agent::config::{AgentConfig, CacheConfig, SystemPromptMode};
+use crate::client::messages::RequestMetadata;
 use crate::context::{McpToolMeta, StaticContext};
-use crate::ir::Message;
+use crate::ir::{self, Message, ModelRequest, ModelSettings, SystemPrompt};
 use crate::output_style::{OutputStyle, SystemPromptGenerator};
 use crate::tools::ToolRegistry;
-use crate::tools::search::{PreparedTools, SearchMode};
-use crate::types::{CacheTtl, SystemBlock, SystemPrompt, ToolDefinition, ToolSearchTool};
+use crate::tools::search::PreparedTools;
+use crate::types::CacheTtl;
 
 pub struct RequestBuilder {
     model: String,
     max_tokens: u32,
     tools: Arc<ToolRegistry>,
-    server_tools: ServerToolsConfig,
     tool_surface: crate::tools::ToolSurface,
     system_prompt_mode: SystemPromptMode,
     custom_system_prompt: Option<String>,
@@ -24,8 +24,6 @@ pub struct RequestBuilder {
     static_context: StaticContext,
     cache_config: CacheConfig,
     prepared_mcp_tools: Option<PreparedTools>,
-    /// JSON schema for structured output
-    output_schema: Option<serde_json::Value>,
     metadata: Option<RequestMetadata>,
 }
 
@@ -45,7 +43,6 @@ impl RequestBuilder {
             model: config.model.primary.clone(),
             max_tokens: config.model.max_tokens,
             tools,
-            server_tools: config.server_tools.clone(),
             tool_surface: config.security.tool_surface.clone(),
             system_prompt_mode: config.prompt.system_prompt_mode,
             custom_system_prompt: config.prompt.system_prompt.clone(),
@@ -53,7 +50,6 @@ impl RequestBuilder {
             static_context,
             cache_config: config.cache.clone(),
             prepared_mcp_tools: None,
-            output_schema: config.prompt.output_schema.clone(),
             metadata: None,
         }
     }
@@ -89,47 +85,49 @@ impl RequestBuilder {
         self.system_prompt_mode = SystemPromptMode::Replace;
     }
 
-    pub fn build(&self, messages: Vec<Message>, dynamic_rules: &str) -> CreateMessageRequest {
+    pub fn build(&self, messages: Vec<Message>, dynamic_rules: &str) -> ModelRequest {
         let prepared_tools = self.prepare_request_tools();
         let system_prompt = self.build_system_prompt_blocks(dynamic_rules, &prepared_tools);
 
-        let legacy_messages: Vec<crate::types::Message> = messages
+        let ir_tools: Vec<ir::ToolDefinition> = prepared_tools
+            .tool_definitions
             .iter()
-            .map(crate::ir::compat::ir_message_to_legacy)
+            .map(|t| ir::ToolDefinition {
+                name: t.name.clone(),
+                description: Some(t.description.clone()),
+                parameters: t.input_schema.clone(),
+                strict: t.strict.unwrap_or(false),
+            })
             .collect();
 
-        let mut request = CreateMessageRequest::new(&self.model, legacy_messages)
-            .max_tokens(self.max_tokens)
-            .system(system_prompt);
-
-        if !prepared_tools.tool_definitions.is_empty() {
-            request = request.tools(prepared_tools.tool_definitions.clone());
+        let mut metadata = BTreeMap::new();
+        if let Some(ref req_meta) = self.metadata {
+            if let Some(ref user_id) = req_meta.user_id {
+                metadata.insert("user_id".to_string(), user_id.clone());
+            }
+            if let Some(ref tenant_id) = req_meta.tenant_id {
+                metadata.insert("tenant_id".to_string(), tenant_id.clone());
+            }
+            if let Some(ref session_id) = req_meta.session_id {
+                metadata.insert("session_id".to_string(), session_id.clone());
+            }
         }
 
-        if let Some(metadata) = self.metadata.clone() {
-            request = request.metadata(metadata);
+        ModelRequest {
+            model: self.model.clone(),
+            messages,
+            system: Some(system_prompt),
+            tools: ir_tools,
+            tool_choice: None,
+            settings: ModelSettings {
+                max_output_tokens: Some(self.max_tokens),
+                ..Default::default()
+            },
+            provider_options: ir::ProviderOptions::default(),
+            continuation: None,
+            metadata,
+            idempotency_key: None,
         }
-
-        if let Some(tool_search) = prepared_tools.tool_search {
-            request = request.tool_search(tool_search);
-        }
-
-        if self.tool_surface.is_allowed("WebSearch") {
-            let web_search = self.server_tools.web_search.clone().unwrap_or_default();
-            request = request.web_search(web_search);
-        }
-
-        if self.tool_surface.is_allowed("WebFetch") {
-            let web_fetch = self.server_tools.web_fetch.clone().unwrap_or_default();
-            request = request.web_fetch(web_fetch);
-        }
-
-        // Add structured output schema if configured
-        if let Some(ref schema) = self.output_schema {
-            request = request.json_schema(schema.clone());
-        }
-
-        request
     }
 
     fn build_system_prompt_blocks(
@@ -150,10 +148,12 @@ impl RequestBuilder {
             static_context = static_context.mcp_tools(prepared_tools.mcp_tool_metadata.clone());
         }
 
-        blocks.extend(static_context.to_system_blocks(
+        // StaticContext returns types::SystemBlock; convert to ir::SystemBlock
+        let legacy_blocks = static_context.to_system_blocks(
             self.cache_config.strategy.cache_static(),
             self.cache_config.static_ttl,
-        ));
+        );
+        blocks.extend(legacy_blocks.into_iter().map(legacy_system_block_to_ir));
 
         if let Some(tool_summary) = static_context.tool_summary() {
             let mut combined_tool_summary = tool_summary;
@@ -191,7 +191,7 @@ impl RequestBuilder {
 
         // Dynamic rules are never cached (they change frequently)
         if !dynamic_rules.is_empty() {
-            blocks.push(SystemBlock::uncached(dynamic_rules));
+            blocks.push(ir::SystemBlock::uncached(dynamic_rules));
         }
 
         if blocks.is_empty() {
@@ -237,14 +237,6 @@ impl RequestBuilder {
                     static_tool_definitions: builtin_tools,
                     mcp_tool_metadata,
                     server_tool_summaries: self.server_tool_summaries(prepared.use_search),
-                    tool_search: if prepared.use_search {
-                        Some(match prepared.search_mode {
-                            SearchMode::Regex => ToolSearchTool::regex(),
-                            SearchMode::Bm25 => ToolSearchTool::bm25(),
-                        })
-                    } else {
-                        None
-                    },
                 }
             }
             None => PreparedRequestTools {
@@ -252,7 +244,6 @@ impl RequestBuilder {
                 tool_definitions: builtin_tools,
                 mcp_tool_metadata: Vec::new(),
                 server_tool_summaries: self.server_tool_summaries(false),
-                tool_search: None,
             },
         }
     }
@@ -274,11 +265,15 @@ impl RequestBuilder {
         }
     }
 
-    fn make_block(&self, text: &str, cached: bool, ttl: CacheTtl) -> SystemBlock {
+    fn make_block(&self, text: &str, cached: bool, ttl: CacheTtl) -> ir::SystemBlock {
         if cached {
-            SystemBlock::cached_with_ttl(text, ttl)
+            let ttl_str = match ttl {
+                CacheTtl::FiveMinutes => "5m",
+                CacheTtl::OneHour => "1h",
+            };
+            ir::SystemBlock::cached_with_ttl(text, ttl_str)
         } else {
-            SystemBlock::uncached(text)
+            ir::SystemBlock::uncached(text)
         }
     }
 
@@ -317,15 +312,33 @@ impl RequestBuilder {
 
 #[derive(Default)]
 struct PreparedRequestTools {
-    tool_definitions: Vec<ToolDefinition>,
-    static_tool_definitions: Vec<ToolDefinition>,
+    tool_definitions: Vec<crate::types::ToolDefinition>,
+    static_tool_definitions: Vec<crate::types::ToolDefinition>,
     mcp_tool_metadata: Vec<McpToolMeta>,
     server_tool_summaries: Vec<String>,
-    tool_search: Option<ToolSearchTool>,
 }
 
 fn split_mcp_tool_name(name: &str) -> Option<(&str, &str)> {
     name.strip_prefix("mcp__")?.split_once("__")
+}
+
+/// Convert a legacy `types::SystemBlock` to an `ir::SystemBlock`.
+fn legacy_system_block_to_ir(block: crate::types::SystemBlock) -> ir::SystemBlock {
+    if let Some(cc) = block.cache_control {
+        let ttl_str = cc.ttl.map(|ttl| match ttl {
+            CacheTtl::FiveMinutes => "5m".to_string(),
+            CacheTtl::OneHour => "1h".to_string(),
+        });
+        ir::SystemBlock {
+            text: block.text,
+            cache_control: Some(ir::CacheControl {
+                mode: ir::CacheControlMode::System,
+                ttl: ttl_str,
+            }),
+        }
+    } else {
+        ir::SystemBlock::uncached(block.text)
+    }
 }
 
 #[cfg(test)]
@@ -353,7 +366,7 @@ mod tests {
         let builder = RequestBuilder::new(&config, tools, static_context);
         let request = builder.build(vec![Message::user("hello")], "# Active Rules");
         let system = request.system.expect("system prompt should exist");
-        let text = system.as_text();
+        let text = system.flatten();
 
         assert!(text.contains("Project Memory"));
         assert!(text.contains("Available Skills"));
@@ -434,13 +447,19 @@ mod tests {
 
         let builder = RequestBuilder::new(&config, tools, StaticContext::new()).metadata(metadata);
         let request = builder.build(vec![Message::user("hello")], "");
-        let metadata = request
-            .metadata
-            .expect("request metadata should be present");
 
-        assert_eq!(metadata.user_id.as_deref(), Some("user-1"));
-        assert_eq!(metadata.tenant_id.as_deref(), Some("tenant-a"));
-        assert_eq!(metadata.session_id.as_deref(), Some("session-1"));
+        assert_eq!(
+            request.metadata.get("user_id").map(|s| s.as_str()),
+            Some("user-1")
+        );
+        assert_eq!(
+            request.metadata.get("tenant_id").map(|s| s.as_str()),
+            Some("tenant-a")
+        );
+        assert_eq!(
+            request.metadata.get("session_id").map(|s| s.as_str()),
+            Some("session-1")
+        );
     }
 
     #[test]
@@ -452,6 +471,6 @@ mod tests {
         );
         let request = builder.build(vec![Message::user("hello")], "");
 
-        assert!(request.metadata.is_none());
+        assert!(request.metadata.is_empty());
     }
 }

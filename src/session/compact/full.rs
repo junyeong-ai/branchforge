@@ -78,24 +78,23 @@ impl CompactionStrategy for FullCompaction {
         &self,
         plan: CompactionPlan,
         session: &mut Session,
-        client: Option<&crate::Client>,
+        llm: Option<&dyn crate::client::LlmCall>,
     ) -> crate::Result<CompactResult> {
         let CompactionPlan::Summarize { prompt, .. } = plan else {
             return Ok(CompactResult::NotNeeded);
         };
 
-        let client = client
+        let llm = llm
             .ok_or_else(|| crate::Error::Config("FullCompaction requires an LLM client".into()))?;
 
-        use crate::client::messages::CreateMessageRequest;
-        use crate::types::Message;
+        let ir_request = crate::ir::ModelRequest::new(
+            &self.config.summary_model,
+            vec![crate::ir::Message::user(&prompt)],
+        )
+        .with_max_tokens(self.config.max_summary_tokens);
 
-        let request =
-            CreateMessageRequest::new(&self.config.summary_model, vec![Message::user(&prompt)])
-                .max_tokens(self.config.max_summary_tokens);
-
-        let response = client.send(request).await?;
-        let summary = response.text();
+        let ir_response = llm.send(&ir_request).await?;
+        let summary = ir_response.text();
 
         let service = CompactService::new(self.config.clone());
         let result = service.apply_compact(session, summary)?;

@@ -351,8 +351,7 @@ impl Agent {
             }
 
             let api_start = Instant::now();
-            let legacy_request = request_builder.build(messages, &dynamic_rules_context);
-            let ir_request: crate::ir::ModelRequest = (&legacy_request).into();
+            let ir_request = request_builder.build(messages, &dynamic_rules_context);
             let response = match self.runtime.llm.send(&ir_request).await {
                 Ok(resp) => resp,
                 Err(e) if is_context_overflow_error(&e) => {

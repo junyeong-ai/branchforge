@@ -471,7 +471,7 @@ pub(crate) async fn handle_compaction(
     }
 
     debug!("Compacting session context");
-    let compact_result = tool_state.compact(&runtime.client).await;
+    let compact_result = tool_state.compact(runtime.llm.as_ref()).await;
 
     match compact_result {
         Ok(CompactResult::Compacted {
@@ -583,7 +583,7 @@ pub(crate) async fn try_recover(
     };
 
     let result = strategy
-        .attempt_recovery(&ctx, tool_state, Some(&runtime.client), None)
+        .attempt_recovery(&ctx, tool_state, Some(runtime.llm.as_ref()), None)
         .await;
 
     *attempt += 1;

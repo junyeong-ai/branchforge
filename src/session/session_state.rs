@@ -356,21 +356,21 @@ impl ToolState {
 
     pub async fn compact(
         &self,
-        client: &crate::Client,
+        llm: &dyn crate::client::LlmCall,
     ) -> crate::Result<crate::types::CompactResult> {
         let mut session = self.0.session.write().await;
-        session.compact(client).await
+        session.compact(llm).await
     }
 
     /// Compact using a custom compaction chain.
     pub async fn compact_with_chain(
         &self,
         ctx: &crate::session::compact::CompactionContext,
-        client: &crate::Client,
+        llm: &dyn crate::client::LlmCall,
         chain: &crate::session::compact::CompactionChain,
     ) -> crate::Result<crate::types::CompactResult> {
         let mut session = self.0.session.write().await;
-        chain.try_compact(ctx, &mut session, Some(client)).await
+        chain.try_compact(ctx, &mut session, Some(llm)).await
     }
 }
 

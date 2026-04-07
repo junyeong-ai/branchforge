@@ -161,7 +161,7 @@ impl CompactionStrategy for MicroCompaction {
         &self,
         plan: CompactionPlan,
         session: &mut Session,
-        _client: Option<&crate::Client>,
+        _llm: Option<&dyn crate::client::LlmCall>,
     ) -> crate::Result<CompactResult> {
         let CompactionPlan::Override {
             overrides,

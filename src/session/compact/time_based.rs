@@ -75,9 +75,9 @@ impl CompactionStrategy for TimeBasedCompaction {
         &self,
         plan: CompactionPlan,
         session: &mut Session,
-        client: Option<&crate::Client>,
+        llm: Option<&dyn crate::client::LlmCall>,
     ) -> crate::Result<CompactResult> {
-        self.inner.execute(plan, session, client).await
+        self.inner.execute(plan, session, llm).await
     }
 }
 
