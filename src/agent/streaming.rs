@@ -1,7 +1,6 @@
 //! Agent streaming execution with session-based context management.
 
 use std::collections::VecDeque;
-use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -20,16 +19,12 @@ use super::executor::Agent;
 use super::request::RequestBuilder;
 use super::run_config::RunConfig;
 use super::runtime::AgentRuntime;
-use crate::client::StreamItem;
+use crate::client::provider_client::ChunkStream;
 use crate::hooks::{HookContext, HookEvent, HookInput};
+use crate::ir::ModelStreamChunk;
 use crate::session::ToolExecution;
 use crate::session::{MessageMetadata, SessionAccessScope, SessionManager, ToolState};
-use crate::types::{
-    AuthorizationDenied, ContentBlock, ContentDelta, StreamEvent, ToolResultBlock, ToolUseBlock,
-    Usage, context_window,
-};
-
-type BoxedItemStream = Pin<Box<dyn Stream<Item = crate::Result<StreamItem>> + Send>>;
+use crate::types::{AuthorizationDenied, ToolResultBlock, ToolUseBlock, Usage, context_window};
 
 impl Agent {
     pub async fn execute_stream(
@@ -152,7 +147,7 @@ enum Phase {
     StartRequest,
     Streaming(Box<StreamingPhase>),
     StreamEnded {
-        accumulated_usage: Usage,
+        accumulated_usage: crate::ir::Usage,
     },
     /// Tools are running — yields ToolProgress events in real-time via tokio::select!.
     ExecutingTools(Box<ToolExecutionPhase>),
@@ -203,8 +198,8 @@ struct ToolExecutionPhase {
 }
 
 struct StreamingPhase {
-    stream: BoxedItemStream,
-    accumulated_usage: Usage,
+    stream: ChunkStream,
+    accumulated_usage: crate::ir::Usage,
 }
 
 struct StreamState {
@@ -219,10 +214,10 @@ struct StreamState {
     pending_tool_uses: Vec<ToolUseBlock>,
     recovery_attempts: u32,
     /// Accumulator for tool_use content blocks being streamed.
-    /// Bedrock (and direct API with BoxedItemStream) sends ContentBlockStart,
-    /// then ContentBlockDelta(InputJsonDelta), then ContentBlockStop.
-    /// We accumulate the partial JSON here and emit ToolUseComplete on stop.
-    accumulating_tool_use: Option<(ToolUseBlock, String)>,
+    /// Codecs emit ToolCallStart, ToolCallArgsDelta, ToolCallEnd.
+    /// We accumulate the partial JSON here and emit ToolUseComplete on end.
+    /// Tuple: (tool_call_id, tool_name, json_buffer).
+    accumulating_tool_use: Option<(String, String, String)>,
     final_text: String,
     total_usage: Usage,
     phase: Phase,
@@ -720,20 +715,14 @@ impl StreamState {
             }
         }
 
-        let stream_request = self
+        let legacy_request = self
             .cfg
             .request_builder
-            .build(messages, &self.dynamic_rules)
-            .stream();
+            .build(messages, &self.dynamic_rules);
+        let ir_request: crate::ir::ModelRequest = (&legacy_request).into();
 
-        let response = match self
-            .cfg
-            .runtime
-            .client
-            .send_stream_with_auth_retry(stream_request)
-            .await
-        {
-            Ok(r) => r,
+        let chunk_stream = match self.cfg.runtime.llm.send_stream(&ir_request).await {
+            Ok(s) => s,
             Err(e) if super::common::is_context_overflow_error(&e) => {
                 if let Some(action) = super::common::try_recover(
                     &e,
@@ -768,34 +757,9 @@ impl StreamState {
 
         self.metrics.record_api_call();
 
-        // Select the appropriate stream parser based on the provider.
-        // Providers that use a binary format (e.g. Bedrock's AWS EventStream)
-        // return a custom stream from create_binary_stream; others use SSE.
-        let item_stream: BoxedItemStream = if self.cfg.runtime.client.adapter().stream_format()
-            != crate::client::adapter::StreamFormat::Sse
-        {
-            match self
-                .cfg
-                .runtime
-                .client
-                .adapter()
-                .create_binary_stream(Box::pin(response.bytes_stream()))
-            {
-                Some(stream) => stream,
-                None => {
-                    self.phase = Phase::Done;
-                    return Some(Err(crate::Error::Config(
-                        "binary stream provider must implement create_binary_stream".into(),
-                    )));
-                }
-            }
-        } else {
-            Box::pin(crate::client::StreamParser::new(response.bytes_stream()))
-        };
-
         self.phase = Phase::Streaming(Box::new(StreamingPhase {
-            stream: item_stream,
-            accumulated_usage: Usage::default(),
+            stream: chunk_stream,
+            accumulated_usage: crate::ir::Usage::default(),
         }));
 
         None
@@ -803,15 +767,15 @@ impl StreamState {
 
     async fn do_poll_stream(
         &mut self,
-        stream: &mut BoxedItemStream,
-        accumulated_usage: &mut Usage,
+        stream: &mut ChunkStream,
+        accumulated_usage: &mut crate::ir::Usage,
     ) -> StreamPollResult {
         let chunk_result = tokio::time::timeout(self.chunk_timeout, stream.next()).await;
 
         match chunk_result {
-            Ok(Some(Ok(item))) => {
+            Ok(Some(Ok(chunk))) => {
                 self.last_chunk_time = Instant::now();
-                self.handle_stream_item(item, accumulated_usage)
+                self.handle_stream_chunk(chunk, accumulated_usage)
             }
             Ok(Some(Err(e))) => {
                 self.phase = Phase::Done;
@@ -828,13 +792,14 @@ impl StreamState {
         }
     }
 
-    fn handle_stream_item(
+    fn handle_stream_chunk(
         &mut self,
-        item: StreamItem,
-        accumulated_usage: &mut Usage,
+        chunk: ModelStreamChunk,
+        accumulated_usage: &mut crate::ir::Usage,
     ) -> StreamPollResult {
-        match item {
-            StreamItem::Text(text) => {
+        match chunk {
+            ModelStreamChunk::MessageStart { .. } => StreamPollResult::Continue,
+            ModelStreamChunk::TextDelta { text, .. } => {
                 self.final_text.push_str(&text);
                 self.fire_post_stream_chunk_sync(&text, "text");
                 if let Some(ref bus) = self.cfg.runtime.event_bus {
@@ -848,35 +813,69 @@ impl StreamState {
                 }
                 StreamPollResult::Event(Ok(AgentEvent::Text { delta: text }))
             }
-            StreamItem::Thinking(thinking) => {
-                self.fire_post_stream_chunk_sync(&thinking, "thinking");
+            ModelStreamChunk::ReasoningDelta { text, .. } => {
+                self.fire_post_stream_chunk_sync(&text, "thinking");
                 if let Some(ref bus) = self.cfg.runtime.event_bus {
                     bus.emit_simple(
                         crate::events::EventKind::StreamChunk,
                         serde_json::json!({
                             "chunk_type": "thinking",
-                            "length": thinking.len(),
+                            "length": text.len(),
                         }),
                     );
                 }
-                StreamPollResult::Event(Ok(AgentEvent::Thinking { content: thinking }))
+                StreamPollResult::Event(Ok(AgentEvent::Thinking { content: text }))
             }
-            StreamItem::Citation(_) => StreamPollResult::Continue,
-            StreamItem::ToolUseComplete(tool_use) => {
-                self.fire_post_stream_chunk_sync(&tool_use.name, "tool_use");
-                if let Some(ref bus) = self.cfg.runtime.event_bus {
-                    bus.emit_simple(
-                        crate::events::EventKind::StreamChunk,
-                        serde_json::json!({
-                            "chunk_type": "tool_use",
-                            "tool_name": &tool_use.name,
-                        }),
-                    );
-                }
-                self.pending_tool_uses.push(tool_use);
+            ModelStreamChunk::ToolCallStart { id, name, .. } => {
+                self.accumulating_tool_use = Some((id, name, String::new()));
                 StreamPollResult::Continue
             }
-            StreamItem::Event(event) => self.handle_stream_event(event, accumulated_usage),
+            ModelStreamChunk::ToolCallArgsDelta { partial_json, .. } => {
+                if let Some((_, _, ref mut json_buf)) = self.accumulating_tool_use {
+                    json_buf.push_str(&partial_json);
+                }
+                StreamPollResult::Continue
+            }
+            ModelStreamChunk::ToolCallEnd { .. } => {
+                if let Some((id, name, json_buf)) = self.accumulating_tool_use.take() {
+                    let input: serde_json::Value =
+                        serde_json::from_str(&json_buf).unwrap_or(serde_json::json!({}));
+                    let tool_use = ToolUseBlock {
+                        id,
+                        name: name.clone(),
+                        input,
+                    };
+                    self.fire_post_stream_chunk_sync(&name, "tool_use");
+                    if let Some(ref bus) = self.cfg.runtime.event_bus {
+                        bus.emit_simple(
+                            crate::events::EventKind::StreamChunk,
+                            serde_json::json!({
+                                "chunk_type": "tool_use",
+                                "tool_name": &tool_use.name,
+                            }),
+                        );
+                    }
+                    self.pending_tool_uses.push(tool_use);
+                }
+                StreamPollResult::Continue
+            }
+            ModelStreamChunk::UsageDelta(partial) => {
+                partial.apply(accumulated_usage);
+                StreamPollResult::Continue
+            }
+            ModelStreamChunk::Finish { usage, .. } => {
+                *accumulated_usage = usage;
+                StreamPollResult::StreamEnded
+            }
+            ModelStreamChunk::Error { message, .. } => {
+                self.phase = Phase::Done;
+                StreamPollResult::Event(Err(crate::Error::Stream(message)))
+            }
+            ModelStreamChunk::Heartbeat
+            | ModelStreamChunk::Warning(_)
+            | ModelStreamChunk::Source(_)
+            | ModelStreamChunk::ReasoningSignature { .. }
+            | ModelStreamChunk::BuiltinToolEvent { .. } => StreamPollResult::Continue,
         }
     }
 
@@ -897,74 +896,17 @@ impl StreamState {
         });
     }
 
-    fn handle_stream_event(
-        &mut self,
-        event: StreamEvent,
-        accumulated_usage: &mut Usage,
-    ) -> StreamPollResult {
-        match event {
-            StreamEvent::MessageStart { message } => {
-                accumulated_usage.input_tokens = message.usage.input_tokens;
-                accumulated_usage.output_tokens = message.usage.output_tokens;
-                accumulated_usage.cache_creation_input_tokens =
-                    message.usage.cache_creation_input_tokens;
-                accumulated_usage.cache_read_input_tokens = message.usage.cache_read_input_tokens;
-                StreamPollResult::Continue
-            }
-            StreamEvent::ContentBlockStart {
-                content_block: ContentBlock::ToolUse(tu),
-                ..
-            } => {
-                // Start accumulating a tool_use content block.
-                self.accumulating_tool_use = Some((tu, String::new()));
-                StreamPollResult::Continue
-            }
-            StreamEvent::ContentBlockStart { .. } => StreamPollResult::Continue,
-            StreamEvent::ContentBlockDelta {
-                delta: ContentDelta::InputJsonDelta { partial_json },
-                ..
-            } => {
-                // Accumulate partial JSON for the in-progress tool_use.
-                if let Some((_, ref mut json_buf)) = self.accumulating_tool_use {
-                    json_buf.push_str(&partial_json);
-                }
-                StreamPollResult::Continue
-            }
-            StreamEvent::ContentBlockDelta { .. } => StreamPollResult::Continue,
-            StreamEvent::ContentBlockStop { .. } => {
-                // Finalize accumulated tool_use and push to pending_tool_uses.
-                if let Some((mut tool_use, json_buf)) = self.accumulating_tool_use.take() {
-                    let input: serde_json::Value =
-                        serde_json::from_str(&json_buf).unwrap_or(serde_json::json!({}));
-                    tool_use.input = input;
-                    self.pending_tool_uses.push(tool_use);
-                }
-                StreamPollResult::Continue
-            }
-            StreamEvent::MessageDelta { usage, .. } => {
-                accumulated_usage.output_tokens = usage.output_tokens;
-                StreamPollResult::Continue
-            }
-            StreamEvent::MessageStop => StreamPollResult::StreamEnded,
-            StreamEvent::Ping => StreamPollResult::Continue,
-            StreamEvent::Error { error } => {
-                self.phase = Phase::Done;
-                StreamPollResult::Event(Err(crate::Error::Stream(error.message)))
-            }
-        }
-    }
-
     async fn do_handle_stream_end(
         &mut self,
-        accumulated_usage: Usage,
+        accumulated_usage: crate::ir::Usage,
     ) -> Option<crate::Result<AgentEvent>> {
         // Fire PostMessage hook (observation only, fail-open)
         let post_msg_input = HookInput::post_message(
             &*self.cfg.session_id,
             self.cfg.request_builder.current_model(),
             None, // stop_reason is not directly available from stream end
-            accumulated_usage.input_tokens,
-            accumulated_usage.output_tokens,
+            accumulated_usage.input_tokens as u32,
+            accumulated_usage.output_tokens as u32,
         );
         let _ = self
             .cfg
@@ -977,19 +919,18 @@ impl StreamState {
             )
             .await;
 
-        let ir_usage: crate::ir::Usage = (&accumulated_usage).into();
         accumulate_response_usage(
             &mut self.total_usage,
             &mut self.metrics,
             &self.cfg.runtime.budget_tracker,
             self.cfg.runtime.tenant_budget.as_deref(),
             &self.cfg.runtime.config.model.primary,
-            &ir_usage,
+            &accumulated_usage,
         );
 
         emit_tokens_consumed(
             self.cfg.runtime.event_bus.as_deref(),
-            &ir_usage,
+            &accumulated_usage,
             &self.cfg.runtime.config.model.primary,
         );
 
@@ -1019,9 +960,20 @@ impl StreamState {
                     });
                 }
                 if !content.is_empty() {
+                    let legacy_usage = Usage {
+                        input_tokens: accumulated_usage.input_tokens as u32,
+                        output_tokens: accumulated_usage.output_tokens as u32,
+                        cache_creation_input_tokens: accumulated_usage
+                            .cache_creation_tokens
+                            .map(|v| v as u32),
+                        cache_read_input_tokens: accumulated_usage
+                            .cached_input_tokens
+                            .map(|v| v as u32),
+                        ..Default::default()
+                    };
                     session.add_assistant_message_with_metadata(
                         content,
-                        Some(accumulated_usage),
+                        Some(legacy_usage),
                         MessageMetadata {
                             structured_output: structured_output.clone(),
                             ..Default::default()

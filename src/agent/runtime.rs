@@ -29,7 +29,6 @@ pub struct AgentRuntime {
     /// New IR-native LLM call surface. Prefer this over `client` for all new
     /// code paths. During migration both fields coexist; `client` is deleted
     /// once the streaming agent is fully on `llm`.
-    #[allow(dead_code)] // Used once execution loop is migrated
     pub(crate) llm: Arc<dyn LlmCall>,
     pub(crate) config: Arc<AgentConfig>,
     pub(crate) tools: Arc<ToolRegistry>,

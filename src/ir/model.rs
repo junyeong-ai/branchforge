@@ -94,6 +94,12 @@ impl ModelRequest {
             idempotency_key: None,
         }
     }
+
+    /// Builder-style: set `max_output_tokens`.
+    pub fn with_max_tokens(mut self, n: u32) -> Self {
+        self.settings.max_output_tokens = Some(n);
+        self
+    }
 }
 
 /// A complete (non-streaming) model response.
