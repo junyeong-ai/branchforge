@@ -40,10 +40,13 @@ use crate::types::{AuthorizationDenied, ModelUsage, ServerToolUse, ServerToolUse
 pub struct AgentMetrics {
     pub iterations: usize,
     pub tool_calls: usize,
-    pub input_tokens: u32,
-    pub output_tokens: u32,
-    pub cache_read_tokens: u32,
-    pub cache_creation_tokens: u32,
+    /// Total input tokens accumulated across all API calls in this agent.
+    /// `u64` because long-running sessions on 1M-context Anthropic / Gemini
+    /// 2.5 Pro can saturate `u32` after roughly 4,000 turns.
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub cache_read_tokens: u64,
+    pub cache_creation_tokens: u64,
     pub execution_time_ms: u64,
     pub errors: usize,
     pub compactions: usize,
@@ -73,19 +76,21 @@ pub struct ToolCallRecord {
 }
 
 impl AgentMetrics {
-    pub fn total_tokens(&self) -> u32 {
+    pub fn total_tokens(&self) -> u64 {
         self.input_tokens.saturating_add(self.output_tokens)
     }
 
     pub fn add_usage_with_cache(&mut self, usage: &Usage) {
-        self.input_tokens = self.input_tokens.saturating_add(usage.input_tokens);
-        self.output_tokens = self.output_tokens.saturating_add(usage.output_tokens);
+        self.input_tokens = self.input_tokens.saturating_add(usage.input_tokens as u64);
+        self.output_tokens = self
+            .output_tokens
+            .saturating_add(usage.output_tokens as u64);
         self.cache_read_tokens = self
             .cache_read_tokens
-            .saturating_add(usage.cache_read_input_tokens.unwrap_or(0));
+            .saturating_add(usage.cache_read_input_tokens.unwrap_or(0) as u64);
         self.cache_creation_tokens = self
             .cache_creation_tokens
-            .saturating_add(usage.cache_creation_input_tokens.unwrap_or(0));
+            .saturating_add(usage.cache_creation_input_tokens.unwrap_or(0) as u64);
     }
 
     /// Calculate cache hit rate as a proportion of input tokens.
@@ -120,8 +125,8 @@ impl AgentMetrics {
     /// Estimate tokens saved through caching.
     ///
     /// Cache reads are billed at 10%, so 90% of read tokens are "saved".
-    pub fn cache_tokens_saved(&self) -> u32 {
-        (self.cache_read_tokens as f64 * 0.9) as u32
+    pub fn cache_tokens_saved(&self) -> u64 {
+        (self.cache_read_tokens as f64 * 0.9) as u64
     }
 
     /// Calculate estimated cost savings from caching in USD.
@@ -236,10 +241,10 @@ impl AgentMetrics {
                     output_tokens: usage.output_tokens as u64,
                 })
                 .collect(),
-            total_input_tokens: self.input_tokens as u64,
-            total_output_tokens: self.output_tokens as u64,
-            cache_read_tokens: self.cache_read_tokens as u64,
-            cache_creation_tokens: self.cache_creation_tokens as u64,
+            total_input_tokens: self.input_tokens,
+            total_output_tokens: self.output_tokens,
+            cache_read_tokens: self.cache_read_tokens,
+            cache_creation_tokens: self.cache_creation_tokens,
             duration_ms: self.execution_time_ms,
         }
     }
