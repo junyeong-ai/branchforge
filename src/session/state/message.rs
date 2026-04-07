@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 
 use super::ids::MessageId;
 use crate::session::types::EnvironmentContext;
-use crate::types::{ContentBlock, Message, Role, StopReason, TokenUsage, Usage};
+use crate::types::{ContentBlock, Message, Role, StopReason, TokenUsage};
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct ExecutionMetadata {
@@ -19,7 +19,7 @@ pub struct ExecutionMetadata {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_calls: Option<usize>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub usage: Option<Usage>,
+    pub usage: Option<crate::ir::Usage>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub execution_time_ms: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

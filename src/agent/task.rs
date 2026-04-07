@@ -306,7 +306,7 @@ fn completed_task_output(agent_id: String, result: &super::AgentResult) -> TaskO
             stop_reason: Some(result.stop_reason),
             iterations: Some(result.iterations),
             tool_calls: Some(result.tool_calls),
-            usage: Some(result.usage),
+            usage: Some((&result.usage).into()),
             execution_time_ms: Some(result.metrics.execution_time_ms),
             api_calls: Some(result.metrics.api_calls),
             compactions: Some(result.metrics.compactions),

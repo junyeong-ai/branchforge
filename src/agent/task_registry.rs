@@ -14,7 +14,7 @@ use crate::session::{
     SessionId, SessionManager, SessionResult, SessionState, SessionType, ThinkingMetadata,
     ToolResultMeta,
 };
-use crate::types::{ContentBlock, Message, Role, StopReason, Usage};
+use crate::types::{ContentBlock, Message, Role, StopReason};
 
 use super::AgentResult;
 
@@ -73,7 +73,7 @@ pub struct TaskExecutionSummary {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_calls: Option<usize>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub usage: Option<Usage>,
+    pub usage: Option<crate::ir::Usage>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub execution_time_ms: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -797,15 +797,19 @@ impl TaskRegistry {
 
     fn execution_summary(message: &crate::session::SessionMessage) -> Option<TaskExecutionSummary> {
         let execution = message.metadata.execution.as_ref();
-        let usage = execution.and_then(|metadata| metadata.usage).or_else(|| {
-            message.usage.as_ref().map(|usage| Usage {
-                input_tokens: usage.input_tokens as u32,
-                output_tokens: usage.output_tokens as u32,
-                cache_read_input_tokens: Some(usage.cache_read_input_tokens as u32),
-                cache_creation_input_tokens: Some(usage.cache_creation_input_tokens as u32),
-                server_tool_use: None,
-            })
-        });
+        let usage = execution
+            .and_then(|metadata| metadata.usage.clone())
+            .or_else(|| {
+                message.usage.as_ref().map(|usage| crate::ir::Usage {
+                    input_tokens: usage.input_tokens,
+                    output_tokens: usage.output_tokens,
+                    cached_input_tokens: (usage.cache_read_input_tokens > 0)
+                        .then_some(usage.cache_read_input_tokens),
+                    cache_creation_tokens: (usage.cache_creation_input_tokens > 0)
+                        .then_some(usage.cache_creation_input_tokens),
+                    ..Default::default()
+                })
+            });
 
         (execution.is_some() || usage.is_some()).then(|| TaskExecutionSummary {
             result_uuid: execution.and_then(|metadata| metadata.result_uuid.clone()),
@@ -839,7 +843,7 @@ impl TaskRegistry {
                 stop_reason: Some(result.stop_reason),
                 iterations: Some(result.iterations),
                 tool_calls: Some(result.tool_calls),
-                usage: Some(result.usage),
+                usage: Some((&result.usage).into()),
                 execution_time_ms: Some(result.metrics.execution_time_ms),
                 api_calls: Some(result.metrics.api_calls),
                 compactions: Some(result.metrics.compactions),
@@ -1557,7 +1561,7 @@ mod tests {
             snapshot
                 .execution
                 .as_ref()
-                .and_then(|execution| execution.usage)
+                .and_then(|execution| execution.usage.clone())
                 .map(|usage| usage.output_tokens),
             Some(20)
         );

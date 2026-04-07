@@ -454,7 +454,7 @@ mod tests {
                 parsed
                     .execution
                     .as_ref()
-                    .and_then(|execution| execution.usage)
+                    .and_then(|execution| execution.usage.clone())
                     .map(|usage| usage.output_tokens),
                 Some(9)
             );
