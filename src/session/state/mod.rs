@@ -23,9 +23,10 @@ use serde::{Deserialize, Serialize};
 
 use crate::events::EventBus;
 use crate::graph::{GraphNode, NodeId, NodeKind, NodeProvenance, SessionGraph};
+use crate::ir::{ContentPart, Message, Role};
 use crate::session::types::{CompactRecord, Plan, TodoItem, TodoStatus};
 use crate::session::{SessionError, SessionResult};
-use crate::types::{CacheControl, CacheTtl, ContentBlock, Message, Role, TokenUsage, Usage};
+use crate::types::{CacheTtl, TokenUsage, Usage};
 
 /// Transient content overrides for micro-compaction.
 ///
@@ -34,7 +35,7 @@ use crate::types::{CacheControl, CacheTtl, ContentBlock, Message, Role, TokenUsa
 /// Intentionally excluded from serialization: lost on reload.
 #[derive(Clone, Debug, Default)]
 pub struct ContentOverrides {
-    replacements: std::collections::HashMap<NodeId, Vec<ContentBlock>>,
+    replacements: std::collections::HashMap<NodeId, Vec<ContentPart>>,
 }
 
 impl ContentOverrides {
@@ -47,7 +48,7 @@ impl ContentOverrides {
     pub fn len(&self) -> usize {
         self.replacements.len()
     }
-    pub fn set(&mut self, node_id: NodeId, content: Vec<ContentBlock>) {
+    pub fn set(&mut self, node_id: NodeId, content: Vec<ContentPart>) {
         self.replacements.insert(node_id, content);
     }
     pub fn remove(&mut self, node_id: &NodeId) {
@@ -56,7 +57,7 @@ impl ContentOverrides {
     pub fn clear(&mut self) {
         self.replacements.clear();
     }
-    pub fn get(&self, node_id: &NodeId) -> Option<&Vec<ContentBlock>> {
+    pub fn get(&self, node_id: &NodeId) -> Option<&Vec<ContentPart>> {
         self.replacements.get(node_id)
     }
 }
@@ -358,10 +359,10 @@ impl Session {
             NodeKind::Assistant | NodeKind::Summary => Role::Assistant,
             _ => return None,
         };
-        let content: Vec<ContentBlock> =
+        let content: Vec<ContentPart> =
             serde_json::from_value(node.payload.get("content")?.clone()).ok()?;
         let mut message = match role {
-            Role::User => SessionMessage::user(content),
+            Role::User | Role::Tool => SessionMessage::user(content),
             Role::Assistant => SessionMessage::assistant(content),
         };
         message.id = MessageId::from_string(node.id.to_string());
@@ -394,21 +395,26 @@ impl Session {
     }
 
     /// Convert session messages to API format with default caching (5m TTL).
+    ///
+    /// Cache hints are now applied at the codec/transport layer via
+    /// `ProviderOptions::anthropic.cache_control`, not on individual
+    /// content parts. The `ttl` parameter is retained for backward
+    /// compatibility but is currently unused.
     pub fn to_api_messages(&self) -> Vec<Message> {
         self.to_api_messages_with_cache(Some(CacheTtl::FiveMinutes))
     }
 
-    /// Convert session messages to API format with optional caching.
+    /// Convert session messages to API format.
     ///
-    /// Per Anthropic best practices, caches the last user message with the specified TTL.
-    /// Pass `None` to disable caching.
-    pub fn to_api_messages_with_cache(&self, ttl: Option<CacheTtl>) -> Vec<Message> {
+    /// The `ttl` parameter is retained for signature compatibility but
+    /// cache breakpoints are now handled by the codec layer.
+    pub fn to_api_messages_with_cache(&self, _ttl: Option<CacheTtl>) -> Vec<Message> {
         let branch_messages = self.current_branch_messages();
         if branch_messages.is_empty() {
             return Vec::new();
         }
 
-        let mut messages: Vec<Message> = if self.content_overrides.is_empty() {
+        if self.content_overrides.is_empty() {
             branch_messages
                 .iter()
                 .map(SessionMessage::to_api_message)
@@ -428,30 +434,6 @@ impl Session {
                     sm.to_api_message()
                 })
                 .collect()
-        };
-
-        if let Some(ttl) = ttl {
-            self.apply_cache_breakpoint(&mut messages, ttl);
-        }
-
-        messages
-    }
-
-    /// Apply cache breakpoint to the last user message.
-    ///
-    /// Per Anthropic best practices for multi-turn conversations,
-    /// only the last user message needs cache_control to enable
-    /// caching of the entire conversation history before it.
-    fn apply_cache_breakpoint(&self, messages: &mut [Message], ttl: CacheTtl) {
-        let last_user_idx = messages
-            .iter()
-            .enumerate()
-            .rev()
-            .find(|(_, m)| m.role == Role::User)
-            .map(|(i, _)| i);
-
-        if let Some(idx) = last_user_idx {
-            messages[idx].set_cache_on_last_block(CacheControl::ephemeral().ttl(ttl));
         }
     }
 
@@ -524,7 +506,7 @@ impl Session {
             self.graph.primary_branch,
             NodeKind::Summary,
             serde_json::json!({
-                "content": [ContentBlock::text(format!("[Previous conversation summary]\n\n{}", summary))],
+                "content": [ContentPart::text(format!("[Previous conversation summary]\n\n{}", summary))],
                 "summary": summary,
             }),
             self.principal_id.clone(),
@@ -539,13 +521,13 @@ impl Session {
     }
 
     pub fn add_user_message(&mut self, content: impl Into<String>) -> SessionResult<()> {
-        let msg = SessionMessage::user(vec![ContentBlock::text(content.into())]);
+        let msg = SessionMessage::user(vec![ContentPart::text(content.into())]);
         self.add_message(msg)
     }
 
     pub fn add_assistant_message(
         &mut self,
-        content: Vec<ContentBlock>,
+        content: Vec<ContentPart>,
         usage: Option<Usage>,
     ) -> SessionResult<()> {
         self.add_assistant_message_with_metadata(content, usage, MessageMetadata::default())
@@ -553,7 +535,7 @@ impl Session {
 
     pub fn add_assistant_message_with_metadata(
         &mut self,
-        content: Vec<ContentBlock>,
+        content: Vec<ContentPart>,
         usage: Option<Usage>,
         metadata: MessageMetadata,
     ) -> SessionResult<()> {
@@ -576,8 +558,32 @@ impl Session {
         &mut self,
         results: Vec<crate::types::ToolResultBlock>,
     ) -> SessionResult<()> {
-        let content: Vec<ContentBlock> =
-            results.into_iter().map(ContentBlock::ToolResult).collect();
+        let content: Vec<ContentPart> = results
+            .into_iter()
+            .map(|tr| ContentPart::ToolResult {
+                tool_call_id: tr.tool_use_id,
+                content: match tr.content {
+                    Some(crate::types::ToolResultContent::Text(s)) => {
+                        crate::ir::ToolResultContent::Text(s)
+                    }
+                    Some(crate::types::ToolResultContent::Blocks(blocks)) => {
+                        let text = blocks
+                            .iter()
+                            .filter_map(|b| match b {
+                                crate::types::ToolResultContentBlock::Text { text } => {
+                                    Some(text.as_str())
+                                }
+                                _ => None,
+                            })
+                            .collect::<Vec<_>>()
+                            .join("\n");
+                        crate::ir::ToolResultContent::Text(text)
+                    }
+                    None => crate::ir::ToolResultContent::Text(String::new()),
+                },
+                is_error: tr.is_error.unwrap_or(false),
+            })
+            .collect();
         let msg = SessionMessage::user(content);
         self.add_message(msg)
     }
@@ -685,7 +691,7 @@ pub(crate) fn graph_node_kind_for_message(message: &SessionMessage) -> NodeKind 
         NodeKind::Summary
     } else {
         match message.role {
-            Role::User => NodeKind::User,
+            Role::User | Role::Tool => NodeKind::User,
             Role::Assistant => NodeKind::Assistant,
         }
     }
@@ -722,7 +728,7 @@ pub(crate) fn compact_summary_text(message: &SessionMessage) -> Option<String> {
     let text = message
         .content
         .iter()
-        .filter_map(ContentBlock::as_text)
+        .filter_map(ContentPart::as_text)
         .collect::<Vec<_>>()
         .join("\n");
     if text.is_empty() {
@@ -790,7 +796,7 @@ fn parse_message_node_id(message_id: &MessageId, field: &str) -> SessionResult<u
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::{ContentBlock, Role};
+    use crate::ir::{ContentPart, Role};
 
     #[test]
     fn test_session_creation() {
@@ -806,7 +812,7 @@ mod tests {
     fn test_add_message() {
         let mut session = Session::new(SessionConfig::default());
 
-        let msg1 = SessionMessage::user(vec![ContentBlock::text("Hello")]);
+        let msg1 = SessionMessage::user(vec![ContentPart::text("Hello")]);
         session.add_message(msg1).unwrap();
 
         assert_eq!(session.current_branch_messages().len(), 1);
@@ -817,7 +823,7 @@ mod tests {
     #[test]
     fn test_add_message_rejects_invalid_message_uuid() {
         let mut session = Session::new(SessionConfig::default());
-        let mut message = SessionMessage::user(vec![ContentBlock::text("Hello")]);
+        let mut message = SessionMessage::user(vec![ContentPart::text("Hello")]);
         message.id = MessageId::from_string("not-a-uuid");
 
         let error = session.add_message(message).unwrap_err();
@@ -829,10 +835,10 @@ mod tests {
         let mut session = Session::new(SessionConfig::default());
 
         session
-            .add_message(SessionMessage::user(vec![ContentBlock::text("Hello")]))
+            .add_message(SessionMessage::user(vec![ContentPart::text("Hello")]))
             .unwrap();
         session
-            .add_message(SessionMessage::assistant(vec![ContentBlock::text(
+            .add_message(SessionMessage::assistant(vec![ContentPart::text(
                 "Hi there!",
             )]))
             .unwrap();
@@ -851,7 +857,7 @@ mod tests {
     fn test_refresh_message_projection_from_graph() {
         let mut session = Session::new(SessionConfig::default());
         session
-            .add_message(SessionMessage::user(vec![ContentBlock::text("Hello")]))
+            .add_message(SessionMessage::user(vec![ContentPart::text("Hello")]))
             .unwrap();
         session.clear_messages();
 
@@ -865,7 +871,7 @@ mod tests {
     fn test_refresh_message_projection_preserves_updated_at() {
         let mut session = Session::new(SessionConfig::default());
         session
-            .add_message(SessionMessage::user(vec![ContentBlock::text("Hello")]))
+            .add_message(SessionMessage::user(vec![ContentPart::text("Hello")]))
             .unwrap();
         let updated_at = session.updated_at;
         session.clear_messages();
@@ -881,7 +887,7 @@ mod tests {
         let mut session = Session::new(SessionConfig::default());
         session
             .add_message(
-                SessionMessage::assistant(vec![ContentBlock::text(
+                SessionMessage::assistant(vec![ContentPart::text(
                     "[Previous conversation summary]\n\nSummary body",
                 )])
                 .as_compact_summary(),
@@ -898,10 +904,10 @@ mod tests {
     fn test_message_tree() {
         let mut session = Session::new(SessionConfig::default());
 
-        let user_msg = SessionMessage::user(vec![ContentBlock::text("Hello")]);
+        let user_msg = SessionMessage::user(vec![ContentPart::text("Hello")]);
         session.add_message(user_msg).unwrap();
 
-        let assistant_msg = SessionMessage::assistant(vec![ContentBlock::text("Hi there!")]);
+        let assistant_msg = SessionMessage::assistant(vec![ContentPart::text("Hi there!")]);
         session.add_message(assistant_msg).unwrap();
 
         let branch = session.current_branch_messages();
@@ -927,7 +933,7 @@ mod tests {
         let mut session = Session::new(SessionConfig::default());
 
         let msg1 =
-            SessionMessage::assistant(vec![ContentBlock::text("Response 1")]).usage(TokenUsage {
+            SessionMessage::assistant(vec![ContentPart::text("Response 1")]).usage(TokenUsage {
                 input_tokens: 100,
                 output_tokens: 50,
                 ..Default::default()
@@ -935,7 +941,7 @@ mod tests {
         session.add_message(msg1).unwrap();
 
         let msg2 =
-            SessionMessage::assistant(vec![ContentBlock::text("Response 2")]).usage(TokenUsage {
+            SessionMessage::assistant(vec![ContentPart::text("Response 2")]).usage(TokenUsage {
                 input_tokens: 150,
                 output_tokens: 75,
                 ..Default::default()
@@ -970,55 +976,40 @@ mod tests {
     }
 
     #[test]
-    fn test_message_caching_applies_to_last_user_turn() {
+    fn test_to_api_messages_returns_conversation() {
         let mut session = Session::new(SessionConfig::default());
 
         session.add_user_message("First question").unwrap();
         session
-            .add_message(SessionMessage::assistant(vec![ContentBlock::text(
+            .add_message(SessionMessage::assistant(vec![ContentPart::text(
                 "First answer",
             )]))
             .unwrap();
         session.add_user_message("Second question").unwrap();
 
         let messages = session.to_api_messages();
-
         assert_eq!(messages.len(), 3);
-        assert!(!messages[0].has_cache_control());
-        assert!(!messages[1].has_cache_control());
-        assert!(messages[2].has_cache_control());
+        assert_eq!(messages[0].text(), "First question");
+        assert_eq!(messages[1].text(), "First answer");
+        assert_eq!(messages[2].text(), "Second question");
     }
 
     #[test]
-    fn test_message_caching_disabled() {
-        let mut session = Session::new(SessionConfig::default());
-
-        session.add_user_message("Question").unwrap();
-
-        // Pass None to disable caching
-        let messages = session.to_api_messages_with_cache(None);
-
-        assert_eq!(messages.len(), 1);
-        assert!(!messages[0].has_cache_control());
-    }
-
-    #[test]
-    fn test_message_caching_empty_session() {
+    fn test_to_api_messages_empty_session() {
         let session = Session::new(SessionConfig::default());
         let messages = session.to_api_messages();
         assert!(messages.is_empty());
     }
 
     #[test]
-    fn test_message_caching_assistant_only() {
+    fn test_to_api_messages_assistant_only() {
         let mut session = Session::new(SessionConfig::default());
         session
-            .add_message(SessionMessage::assistant(vec![ContentBlock::text("Hi")]))
+            .add_message(SessionMessage::assistant(vec![ContentPart::text("Hi")]))
             .unwrap();
 
         let messages = session.to_api_messages();
-
         assert_eq!(messages.len(), 1);
-        assert!(!messages[0].has_cache_control());
+        assert_eq!(messages[0].text(), "Hi");
     }
 }

@@ -10,10 +10,11 @@ use super::task_output::TaskStatus;
 use super::task_registry::{TaskAssistantMetadata, TaskExecutionSummary, TaskRegistry};
 use crate::common::{Index, IndexRegistry};
 use crate::hooks::{HookEvent, HookInput};
+use crate::ir::{ContentPart, Message};
 use crate::session::{SessionId, SessionManager};
 use crate::subagents::{SubagentIndex, builtin_subagents};
 use crate::tools::{ExecutionContext, SchemaTool};
-use crate::types::{ContentBlock, Message, Role, ToolResult};
+use crate::types::ToolResult;
 
 pub struct TaskTool {
     registry: TaskRegistry,
@@ -260,7 +261,7 @@ pub struct TaskOutput {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub text: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub content: Option<Vec<ContentBlock>>,
+    pub content: Option<Vec<ContentPart>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub structured_output: Option<serde_json::Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -271,20 +272,20 @@ pub struct TaskOutput {
     pub error: Option<String>,
 }
 
-fn final_assistant_content(messages: &[Message]) -> Option<Vec<ContentBlock>> {
+fn final_assistant_content(messages: &[Message]) -> Option<Vec<ContentPart>> {
     messages
         .iter()
         .rev()
-        .find(|message| message.role == Role::Assistant)
+        .find(|message| message.role == crate::ir::Role::Assistant)
         .map(|message| message.content.clone())
 }
 
-fn final_assistant_text(content: &[ContentBlock]) -> Option<String> {
-    let text = Message {
-        role: Role::Assistant,
-        content: content.to_vec(),
-    }
-    .text();
+fn final_assistant_text(content: &[ContentPart]) -> Option<String> {
+    let text: String = content
+        .iter()
+        .filter_map(|p| p.as_text())
+        .collect::<Vec<_>>()
+        .join("");
     if text.is_empty() { None } else { Some(text) }
 }
 
@@ -583,9 +584,10 @@ impl SchemaTool for TaskTool {
 mod tests {
     use super::*;
     use crate::agent::{AgentMetrics, AgentResult, AgentState};
+    use crate::ir::{ContentPart, Role};
     use crate::session::{MemoryPersistence, SessionConfig, SessionManager};
     use crate::tools::{ExecutionContext, Tool};
-    use crate::types::{ContentBlock, StopReason, Usage};
+    use crate::types::{StopReason, Usage};
 
     fn test_context() -> ExecutionContext {
         ExecutionContext::default()
@@ -685,8 +687,8 @@ mod tests {
             messages: vec![
                 Message::user("run task"),
                 Message {
-                    role: Role::Assistant,
-                    content: vec![ContentBlock::text("first "), ContentBlock::text("second")],
+                    role: crate::ir::Role::Assistant,
+                    content: vec![ContentPart::text("first "), ContentPart::text("second")],
                 },
             ],
             uuid: "test-uuid".to_string(),
@@ -749,7 +751,7 @@ mod tests {
         manager
             .add_message(
                 &session.id,
-                crate::session::SessionMessage::user(vec![ContentBlock::text("hello")]),
+                crate::session::SessionMessage::user(vec![ContentPart::text("hello")]),
             )
             .await
             .unwrap();

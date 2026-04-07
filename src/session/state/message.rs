@@ -5,8 +5,9 @@ use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 
 use super::ids::MessageId;
+use crate::ir::{ContentPart, Message, Role};
 use crate::session::types::EnvironmentContext;
-use crate::types::{ContentBlock, Message, Role, StopReason, TokenUsage};
+use crate::types::{StopReason, TokenUsage};
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct ExecutionMetadata {
@@ -66,7 +67,7 @@ pub struct SessionMessage {
     pub id: MessageId,
     pub parent_id: Option<MessageId>,
     pub role: Role,
-    pub content: Vec<ContentBlock>,
+    pub content: Vec<ContentPart>,
     #[serde(default)]
     pub is_sidechain: bool,
     #[serde(default)]
@@ -80,7 +81,7 @@ pub struct SessionMessage {
 }
 
 impl SessionMessage {
-    pub fn user(content: Vec<ContentBlock>) -> Self {
+    pub fn user(content: Vec<ContentPart>) -> Self {
         Self {
             id: MessageId::new(),
             parent_id: None,
@@ -95,7 +96,7 @@ impl SessionMessage {
         }
     }
 
-    pub fn assistant(content: Vec<ContentBlock>) -> Self {
+    pub fn assistant(content: Vec<ContentPart>) -> Self {
         Self {
             id: MessageId::new(),
             parent_id: None,

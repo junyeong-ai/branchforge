@@ -12,10 +12,10 @@ use async_trait::async_trait;
 use super::strategy::{
     CompactionContext, CompactionPlan, CompactionStrategy, ContentOverrideEntry,
 };
+use crate::ir::{ContentPart, ToolResultContent};
 use crate::session::SessionResult;
 use crate::session::state::Session;
-use crate::types::content::{ToolResultBlock, ToolResultContent, ToolResultContentBlock};
-use crate::types::{CompactResult, ContentBlock};
+use crate::types::CompactResult;
 
 /// Default threshold (fraction of max tokens) to trigger micro-compaction.
 const DEFAULT_MICRO_THRESHOLD: f64 = 0.6;
@@ -91,7 +91,7 @@ impl MicroCompaction {
             let Some(content_value) = node.payload.get("content") else {
                 continue;
             };
-            let Ok(blocks) = serde_json::from_value::<Vec<ContentBlock>>(content_value.clone())
+            let Ok(blocks) = serde_json::from_value::<Vec<ContentPart>>(content_value.clone())
             else {
                 continue;
             };
@@ -185,90 +185,105 @@ impl CompactionStrategy for MicroCompaction {
     }
 }
 
-/// Estimate the character count of a content block.
-fn estimate_block_chars(block: &ContentBlock) -> usize {
-    match block {
-        ContentBlock::Text { text, .. } => text.len(),
-        ContentBlock::ToolResult(result) => estimate_tool_result_chars(result),
-        ContentBlock::ToolUse(tool_use) => tool_use.input.to_string().len() + tool_use.name.len(),
+/// Estimate the character count of a content part.
+fn estimate_block_chars(part: &ContentPart) -> usize {
+    match part {
+        ContentPart::Text { text } => text.len(),
+        ContentPart::ToolResult { content, .. } => estimate_tool_result_chars(content),
+        ContentPart::ToolCall {
+            name, arguments, ..
+        } => arguments.to_string().len() + name.len(),
         _ => 0,
     }
 }
 
-/// Estimate chars in a ToolResultBlock.
-fn estimate_tool_result_chars(result: &ToolResultBlock) -> usize {
-    match &result.content {
-        Some(ToolResultContent::Text(text)) => text.len(),
-        Some(ToolResultContent::Blocks(blocks)) => blocks
+/// Estimate chars in tool result content.
+fn estimate_tool_result_chars(content: &ToolResultContent) -> usize {
+    match content {
+        ToolResultContent::Text(text) => text.len(),
+        ToolResultContent::Json(val) => val.to_string().len(),
+        ToolResultContent::MultiPart(parts) => parts
             .iter()
-            .map(|b| match b {
-                ToolResultContentBlock::Text { text } => text.len(),
-                _ => 100, // approximate for images/search results
+            .map(|p| match p {
+                ContentPart::Text { text } => text.len(),
+                _ => 100,
             })
             .sum(),
-        None => 0,
     }
 }
 
-/// Check if a content block is suitable for truncation.
-fn is_truncatable(block: &ContentBlock) -> bool {
-    match block {
-        ContentBlock::ToolResult(_) => true,
-        ContentBlock::Text { text, .. } => text.len() > 4000,
+/// Check if a content part is suitable for truncation.
+fn is_truncatable(part: &ContentPart) -> bool {
+    match part {
+        ContentPart::ToolResult { .. } => true,
+        ContentPart::Text { text } => text.len() > 4000,
         _ => false,
     }
 }
 
-/// Create a truncated version of a content block.
-fn truncate_block(block: &ContentBlock, max_chars: usize) -> ContentBlock {
-    match block {
-        ContentBlock::Text { text, .. } => ContentBlock::text(format!(
+/// Create a truncated version of a content part.
+fn truncate_block(part: &ContentPart, max_chars: usize) -> ContentPart {
+    match part {
+        ContentPart::Text { text } => ContentPart::text(format!(
             "{}... [truncated, {} chars total]",
             safe_truncate(text, max_chars),
             text.len()
         )),
-        ContentBlock::ToolResult(result) => {
-            ContentBlock::ToolResult(truncate_tool_result(result, max_chars))
-        }
+        ContentPart::ToolResult {
+            tool_call_id,
+            content,
+            is_error,
+        } => ContentPart::ToolResult {
+            tool_call_id: tool_call_id.clone(),
+            content: truncate_tool_result_content(content, max_chars),
+            is_error: *is_error,
+        },
         other => other.clone(),
     }
 }
 
-/// Truncate a ToolResultBlock's content.
-fn truncate_tool_result(result: &ToolResultBlock, max_chars: usize) -> ToolResultBlock {
-    let truncated_content = match &result.content {
-        Some(ToolResultContent::Text(text)) if text.len() > max_chars => {
-            Some(ToolResultContent::Text(format!(
+/// Truncate tool result content.
+fn truncate_tool_result_content(
+    content: &ToolResultContent,
+    max_chars: usize,
+) -> ToolResultContent {
+    match content {
+        ToolResultContent::Text(text) if text.len() > max_chars => {
+            ToolResultContent::Text(format!(
                 "{}... [truncated, {} chars total]",
                 safe_truncate(text, max_chars),
                 text.len()
-            )))
+            ))
         }
-        Some(ToolResultContent::Blocks(blocks)) => {
-            let truncated: Vec<ToolResultContentBlock> = blocks
+        ToolResultContent::Json(val) => {
+            let s = val.to_string();
+            if s.len() > max_chars {
+                ToolResultContent::Text(format!(
+                    "{}... [truncated, {} chars total]",
+                    safe_truncate(&s, max_chars),
+                    s.len()
+                ))
+            } else {
+                content.clone()
+            }
+        }
+        ToolResultContent::MultiPart(parts) => {
+            let truncated: Vec<ContentPart> = parts
                 .iter()
-                .map(|b| match b {
-                    ToolResultContentBlock::Text { text } if text.len() > max_chars => {
-                        ToolResultContentBlock::Text {
-                            text: format!(
-                                "{}... [truncated, {} chars total]",
-                                safe_truncate(text, max_chars),
-                                text.len()
-                            ),
-                        }
+                .map(|p| match p {
+                    ContentPart::Text { text } if text.len() > max_chars => {
+                        ContentPart::text(format!(
+                            "{}... [truncated, {} chars total]",
+                            safe_truncate(text, max_chars),
+                            text.len()
+                        ))
                     }
                     other => other.clone(),
                 })
                 .collect();
-            Some(ToolResultContent::Blocks(truncated))
+            ToolResultContent::MultiPart(truncated)
         }
         other => other.clone(),
-    };
-
-    ToolResultBlock {
-        tool_use_id: result.tool_use_id.clone(),
-        content: truncated_content,
-        is_error: result.is_error,
     }
 }
 
@@ -336,10 +351,10 @@ mod tests {
 
     #[test]
     fn truncate_tool_result_text() {
-        let result = ToolResultBlock::success("id1", "a".repeat(10_000));
-        let truncated = truncate_tool_result(&result, 100);
-        match &truncated.content {
-            Some(ToolResultContent::Text(text)) => {
+        let content = ToolResultContent::Text("a".repeat(10_000));
+        let truncated = truncate_tool_result_content(&content, 100);
+        match &truncated {
+            ToolResultContent::Text(text) => {
                 assert!(text.len() < 200);
                 assert!(text.contains("truncated"));
             }
@@ -349,7 +364,7 @@ mod tests {
 
     #[test]
     fn estimate_tool_result_text_size() {
-        let result = ToolResultBlock::success("id1", "hello world");
-        assert_eq!(estimate_tool_result_chars(&result), 11);
+        let content = ToolResultContent::Text("hello world".to_string());
+        assert_eq!(estimate_tool_result_chars(&content), 11);
     }
 }

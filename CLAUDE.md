@@ -39,6 +39,7 @@ cargo build --all-features                      # full + multimedia
 - Feature flags gate optional dependencies. Core SDK has zero cloud/DB deps.
 - **Token counts are `u64` end-to-end** (Phase 1b-γ). `ir::Usage`, `AgentMetrics.{input,output,cache_*}_tokens`, `ExecutionMetadata.usage`, `TaskExecutionSummary.usage`, and `pricing::PricingTable::calculate` all operate on `u64` / `ir::Usage`. Legacy `types::Usage` (u32) survives only as the on-the-wire DTO for the legacy adapter response shape and is converted at the boundary via `From<&types::Usage> for ir::Usage` in `src/ir/compat.rs` (deleted with the rest of compat in Phase θ).
 - **Tool call linkage uses `tool_call_id`** (Phase 1b-δ). The legacy `tool_use_id` field name lives only in `src/types/` and on-the-wire Anthropic payloads. New code (`ToolCallRecord`, `ToolResultMeta`, graph node payloads, OTel spans) all use `tool_call_id`.
+- **Session/agent layer uses IR types end-to-end** (Phase 1b-δ). `SessionMessage`, `Session::to_api_messages()`, `AgentResult.messages`, `ReplayInput.messages`, and all content overrides/compaction use `ir::Message`, `ir::ContentPart`, `ir::Role`. Legacy `types::Message`/`types::ContentBlock` survive only in `src/types/`, `src/client/`, `src/ir/compat.rs`, and the on-the-wire DTO. The boundary conversion lives in `ir::compat::{ir_message_to_legacy, legacy_block_to_ir}`. Cache breakpoints moved from per-message `cache_control` to the codec/transport layer.
 
 ## Phase 1b migration status
 
@@ -51,8 +52,8 @@ The migration of the agent runtime / session layer to the new IR is in progress.
 | γ-1 pricing IR-native | ✅ | `pricing.calculate(&ir::Usage)`, `BudgetTracker::record(&ir::Usage)`, `TenantBudget::record(&ir::Usage)` |
 | γ-2 truncation fix | ✅ | `ExecutionMetadata.usage` and `TaskExecutionSummary.usage` migrated to `ir::Usage` (u64). The CRITICAL u64→u32 truncation at the old `task_registry::execution_summary` is gone. |
 | γ-3 AgentMetrics widen | ✅ | `AgentMetrics.{input,output,cache_*}_tokens` widened to u64. |
-| δ naming alignment | ✅ partial | `tool_use_id` → `tool_call_id` rename through `ToolCallRecord`, `ToolResultMeta`, `record_tool` param, graph node JSON payloads, `tool_execute_span`. |
-| δ Message/ContentPart cascade | ⏳ | Largest remaining cascade. Requires a single dedicated session: type-alias swap (`types::Message` → `pub use ir::Message`, etc.) followed by ~150 pattern-match fixes across `agent/`, `session/`, `graph/replay`, `session/compact`, `session/persistence_*`. CacheConfig and ServerToolsConfig deletion belong here. |
+| δ naming alignment | ✅ | `tool_use_id` → `tool_call_id` rename through `ToolCallRecord`, `ToolResultMeta`, `record_tool` param, graph node JSON payloads, `tool_execute_span`. |
+| δ Message/ContentPart cascade | ✅ | `SessionMessage`, `Session::to_api_messages()`, `AgentResult.messages`, `ReplayInput`, compaction, graph replay all use `ir::Message`/`ir::ContentPart`/`ir::Role`. Legacy→IR conversion at `RequestBuilder::build()` boundary via `ir::compat::ir_message_to_legacy`. 1569 lib + 48 codec_contract pass. |
 | ε FinishReason + ApiResponse | ⏳ | Replace `types::StopReason`, `types::ApiResponse` with IR equivalents. |
 | ζ Client/adapter dismantling + LlmCall trait | ⏳ | Delete `src/client/adapter/`, `src/client/messages/`, `provider_profile.rs`, `recovery.rs`, `streaming.rs`, `batch.rs`, `files.rs`. Delete `Client` / `ClientBuilder`. Introduce `LlmCall` trait + `RetryingClient`/`FallingBackClient`/`CircuitBrokenClient` decorators. Delete `Auth::vertex/bedrock/foundry`. |
 | η `src/types/*` cleanup + `src/client/` → `src/provider/` rename | ⏳ | Delete `types/{message,response,content,document}.rs`. Keep `types/tool/`. |

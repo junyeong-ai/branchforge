@@ -81,7 +81,7 @@ pub struct TaskOutputResult {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub text: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub content: Option<Vec<crate::types::ContentBlock>>,
+    pub content: Option<Vec<crate::ir::ContentPart>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub structured_output: Option<Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -162,9 +162,10 @@ impl SchemaTool for TaskOutputTool {
 mod tests {
     use super::*;
     use crate::agent::{AgentMetrics, AgentResult, AgentState};
+    use crate::ir::ContentPart;
     use crate::session::MemoryPersistence;
     use crate::tools::Tool;
-    use crate::types::{ContentBlock, StopReason, ToolOutput, Usage};
+    use crate::types::{StopReason, ToolOutput, Usage};
     use std::sync::Arc;
 
     // Use valid UUIDs for tests to ensure consistent session IDs
@@ -308,7 +309,7 @@ mod tests {
         manager
             .add_message(
                 &session_id,
-                crate::session::SessionMessage::assistant(vec![crate::types::ContentBlock::text(
+                crate::session::SessionMessage::assistant(vec![crate::ir::ContentPart::text(
                     "{\"value\":42}",
                 )])
                 .metadata(crate::session::MessageMetadata {
@@ -355,8 +356,8 @@ mod tests {
             .add_message(
                 &session_id,
                 crate::session::SessionMessage::assistant(vec![
-                    ContentBlock::text("first "),
-                    ContentBlock::text("second"),
+                    ContentPart::text("first "),
+                    ContentPart::text("second"),
                 ]),
             )
             .await
@@ -398,7 +399,7 @@ mod tests {
         manager
             .add_message(
                 &session_id,
-                crate::session::SessionMessage::assistant(vec![ContentBlock::text("answer")])
+                crate::session::SessionMessage::assistant(vec![ContentPart::text("answer")])
                     .metadata(crate::session::MessageMetadata {
                         model: Some("claude-sonnet".to_string()),
                         request_id: Some("req_123".to_string()),

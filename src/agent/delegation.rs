@@ -9,12 +9,12 @@ use crate::common::{IndexRegistry, matches_tool_pattern};
 use crate::config::SandboxConfig;
 use crate::context::MemoryContent;
 use crate::hooks::{CommandHook, HookEvent, HookManager, HookRule};
+use crate::ir::Message;
 use crate::mcp::{is_mcp_name, parse_mcp_name};
 use crate::session::SessionManager;
 use crate::skills::{SkillIndex, SkillSpec};
 use crate::subagents::SubagentIndex;
 use crate::tools::ToolSurface;
-use crate::types::Message;
 
 #[derive(Clone)]
 pub(crate) struct DelegationRuntime {

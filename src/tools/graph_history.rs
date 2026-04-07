@@ -423,9 +423,9 @@ fn render_checkpoints(checkpoints: &[crate::graph::Checkpoint]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ir::ContentPart;
     use crate::session::{SessionAccessScope, SessionConfig, SessionManager, SessionMessage};
     use crate::tools::Tool;
-    use crate::types::ContentBlock;
 
     #[tokio::test]
     async fn graph_history_tool_uses_bound_session_manager() {
@@ -434,7 +434,7 @@ mod tests {
         manager
             .add_message(
                 &session.id,
-                SessionMessage::user(vec![ContentBlock::text("alpha")]),
+                SessionMessage::user(vec![ContentPart::text("alpha")]),
             )
             .await
             .unwrap();
@@ -464,7 +464,7 @@ mod tests {
         manager
             .add_message(
                 &session.id,
-                SessionMessage::user(vec![ContentBlock::text("alpha")]),
+                SessionMessage::user(vec![ContentPart::text("alpha")]),
             )
             .await
             .unwrap();

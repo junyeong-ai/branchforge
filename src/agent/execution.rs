@@ -18,10 +18,9 @@ use super::request::RequestBuilder;
 use super::run_config::RunConfig;
 use crate::graph::ReplayInput;
 use crate::hooks::{HookContext, HookEvent, HookInput};
+use crate::ir::Message;
 use crate::session::{MessageMetadata, ToolExecution};
-use crate::types::{
-    AuthorizationDenied, ContentBlock, Message, StopReason, ToolResultBlock, Usage, context_window,
-};
+use crate::types::{AuthorizationDenied, StopReason, ToolResultBlock, Usage, context_window};
 
 impl Agent {
     fn check_budget(&self) -> crate::Result<()> {
@@ -99,15 +98,7 @@ impl Agent {
     ) -> crate::Result<AgentResult> {
         let context_summary = previous_messages
             .iter()
-            .filter_map(|m| {
-                m.content
-                    .iter()
-                    .filter_map(|b| match b {
-                        ContentBlock::Text { text, .. } => Some(text.as_str()),
-                        _ => None,
-                    })
-                    .next()
-            })
+            .filter_map(|m| m.content.iter().filter_map(|b| b.as_text()).next())
             .collect::<Vec<_>>()
             .join("\n---\n");
 
@@ -434,8 +425,13 @@ impl Agent {
 
             self.state
                 .with_session_mut(|session| {
+                    let ir_content: Vec<crate::ir::ContentPart> = response
+                        .content
+                        .iter()
+                        .map(crate::ir::compat::legacy_block_to_ir)
+                        .collect();
                     session.add_assistant_message_with_metadata(
-                        response.content.clone(),
+                        ir_content,
                         Some(response.usage),
                         assistant_metadata,
                     )

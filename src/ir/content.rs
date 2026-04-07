@@ -121,6 +121,29 @@ impl ContentPart {
             is_error: true,
         }
     }
+
+    /// Extract the text content if this is a `Text` part.
+    pub fn as_text(&self) -> Option<&str> {
+        match self {
+            ContentPart::Text { text } => Some(text),
+            _ => None,
+        }
+    }
+
+    /// `true` if this is a reasoning/thinking part (visible or redacted).
+    pub fn is_thinking(&self) -> bool {
+        matches!(self, ContentPart::Reasoning { .. })
+    }
+
+    /// `true` if this is a tool call part.
+    pub fn is_tool_call(&self) -> bool {
+        matches!(self, ContentPart::ToolCall { .. })
+    }
+
+    /// `true` if this is a tool result part.
+    pub fn is_tool_result(&self) -> bool {
+        matches!(self, ContentPart::ToolResult { .. })
+    }
 }
 
 /// Source of media content (image, document, …).
@@ -155,16 +178,16 @@ pub enum ToolOrigin {
 
 /// Content of a [`ContentPart::ToolResult`].
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
+#[serde(untagged)]
 pub enum ToolResultContent {
     /// Plain text result.
     Text(String),
-    /// Structured JSON result.
-    Json(serde_json::Value),
     /// Multi-part result (for tools that return text + images, etc.).
     /// Nested parts must not themselves be `ToolResult` to avoid
     /// pathological recursion.
     MultiPart(Vec<ContentPart>),
+    /// Structured JSON result.
+    Json(serde_json::Value),
 }
 
 /// Reasoning content visibility.

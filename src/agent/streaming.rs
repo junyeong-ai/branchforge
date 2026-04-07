@@ -276,7 +276,7 @@ impl StreamState {
         &self,
         iterations: usize,
         stop_reason: StopReason,
-        messages: Vec<crate::types::Message>,
+        messages: Vec<crate::ir::Message>,
     ) -> AgentResult {
         emit_cost_report(
             self.cfg.runtime.event_bus.as_deref(),
@@ -1000,14 +1000,15 @@ impl StreamState {
                 let text_count = if self.final_text.is_empty() { 0 } else { 1 };
                 let mut content = Vec::with_capacity(text_count + self.pending_tool_uses.len());
                 if !self.final_text.is_empty() {
-                    content.push(ContentBlock::Text {
-                        text: self.final_text.clone(),
-                        citations: None,
-                        cache_control: None,
-                    });
+                    content.push(crate::ir::ContentPart::text(self.final_text.clone()));
                 }
                 for tool_use in &self.pending_tool_uses {
-                    content.push(ContentBlock::ToolUse(tool_use.clone()));
+                    content.push(crate::ir::ContentPart::ToolCall {
+                        id: tool_use.id.clone(),
+                        name: tool_use.name.clone(),
+                        arguments: tool_use.input.clone(),
+                        origin: crate::ir::ToolOrigin::Local,
+                    });
                 }
                 if !content.is_empty() {
                     session.add_assistant_message_with_metadata(

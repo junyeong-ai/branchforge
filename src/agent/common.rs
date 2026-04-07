@@ -14,7 +14,7 @@ use crate::budget::{BudgetTracker, TenantBudget};
 use crate::context::PromptOrchestrator;
 use crate::hooks::{HookContext, HookEvent, HookInput, HookManager};
 use crate::session::{ToolExecution, ToolState};
-use crate::types::{CompactResult, ContentBlock, ToolResult, ToolResultBlock, ToolUseBlock, Usage};
+use crate::types::{CompactResult, ToolResult, ToolResultBlock, Usage};
 
 use super::config::BudgetConfig;
 use super::state::AgentMetrics;
@@ -327,11 +327,12 @@ pub(crate) async fn maybe_invoke_explicit_skill_command(
     tool_state
         .with_session_mut(|session| -> crate::session::SessionResult<()> {
             session.add_assistant_message(
-                vec![ContentBlock::ToolUse(ToolUseBlock {
+                vec![crate::ir::ContentPart::ToolCall {
                     id: tool_use_id.clone(),
                     name: "Skill".to_string(),
-                    input: actual_input.clone(),
-                })],
+                    arguments: actual_input.clone(),
+                    origin: crate::ir::ToolOrigin::Local,
+                }],
                 None,
             )?;
             session.add_tool_results(vec![ToolResultBlock::from_tool_result(

@@ -1174,15 +1174,15 @@ impl RedisPersistence {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ir::ContentPart;
     use crate::session::{SessionConfig, SessionMessage};
-    use crate::types::ContentBlock;
 
     #[test]
     fn validate_loaded_session_rejects_invalid_graph() {
         let mut session = Session::new(SessionConfig::default());
         session.set_identity(Some("tenant-a".to_string()), Some("user-1".to_string()));
         session
-            .add_message(SessionMessage::user(vec![ContentBlock::text("hello")]))
+            .add_message(SessionMessage::user(vec![ContentPart::text("hello")]))
             .unwrap();
 
         let node = session

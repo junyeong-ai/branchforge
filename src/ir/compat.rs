@@ -169,6 +169,20 @@ impl From<&ir::Usage> for types::TokenUsage {
 // Helpers
 // =============================================================================
 
+/// Convert an IR message back to a legacy `types::Message`.
+///
+/// Used by the session/agent layer after Phase 1b-δ to bridge the
+/// IR-native internal representation back to the legacy `CreateMessageRequest`
+/// pipeline. Deleted together with `CreateMessageRequest` in Phase ζ.
+pub fn ir_message_to_legacy(m: &ir::Message) -> types::Message {
+    let role = match m.role {
+        ir::Role::User | ir::Role::Tool => types::Role::User,
+        ir::Role::Assistant => types::Role::Assistant,
+    };
+    let content = m.content.iter().map(ir_content_to_legacy).collect();
+    types::Message { role, content }
+}
+
 fn legacy_message_to_ir(m: &types::Message) -> ir::Message {
     let role = match m.role {
         types::Role::User => ir::Role::User,
@@ -178,7 +192,7 @@ fn legacy_message_to_ir(m: &types::Message) -> ir::Message {
     ir::Message { role, content }
 }
 
-fn legacy_block_to_ir(block: &types::ContentBlock) -> ir::ContentPart {
+pub fn legacy_block_to_ir(block: &types::ContentBlock) -> ir::ContentPart {
     match block {
         types::ContentBlock::Text { text, .. } => ir::ContentPart::Text { text: text.clone() },
         types::ContentBlock::ToolUse(tu) => ir::ContentPart::ToolCall {

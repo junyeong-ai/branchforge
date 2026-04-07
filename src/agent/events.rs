@@ -3,7 +3,8 @@
 use serde::{Deserialize, Serialize};
 
 use super::state::{AgentMetrics, AgentState};
-use crate::types::{Message, StopReason, Usage};
+use crate::ir::Message;
+use crate::types::{StopReason, Usage};
 
 /// Events emitted during agent execution.
 ///

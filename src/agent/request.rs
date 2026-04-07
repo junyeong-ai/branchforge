@@ -6,10 +6,11 @@ use std::sync::Arc;
 use crate::agent::config::{AgentConfig, CacheConfig, ServerToolsConfig, SystemPromptMode};
 use crate::client::messages::{CreateMessageRequest, RequestMetadata};
 use crate::context::{McpToolMeta, StaticContext};
+use crate::ir::Message;
 use crate::output_style::{OutputStyle, SystemPromptGenerator};
 use crate::tools::ToolRegistry;
 use crate::tools::search::{PreparedTools, SearchMode};
-use crate::types::{CacheTtl, Message, SystemBlock, SystemPrompt, ToolDefinition, ToolSearchTool};
+use crate::types::{CacheTtl, SystemBlock, SystemPrompt, ToolDefinition, ToolSearchTool};
 
 pub struct RequestBuilder {
     model: String,
@@ -92,7 +93,12 @@ impl RequestBuilder {
         let prepared_tools = self.prepare_request_tools();
         let system_prompt = self.build_system_prompt_blocks(dynamic_rules, &prepared_tools);
 
-        let mut request = CreateMessageRequest::new(&self.model, messages)
+        let legacy_messages: Vec<crate::types::Message> = messages
+            .iter()
+            .map(crate::ir::compat::ir_message_to_legacy)
+            .collect();
+
+        let mut request = CreateMessageRequest::new(&self.model, legacy_messages)
             .max_tokens(self.max_tokens)
             .system(system_prompt);
 

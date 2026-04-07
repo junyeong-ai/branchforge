@@ -2095,9 +2095,9 @@ impl Persistence for JsonlPersistence {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ir::ContentPart;
     use crate::session::EnvironmentContext;
     use crate::session::{SessionMessage, TodoItem};
-    use crate::types::ContentBlock;
     use tempfile::TempDir;
 
     async fn create_test_persistence() -> (JsonlPersistence, TempDir) {
@@ -2115,10 +2115,10 @@ mod tests {
 
         let mut session = Session::new(SessionConfig::default());
         session
-            .add_message(SessionMessage::user(vec![ContentBlock::text("Hello")]))
+            .add_message(SessionMessage::user(vec![ContentPart::text("Hello")]))
             .unwrap();
         session
-            .add_message(SessionMessage::assistant(vec![ContentBlock::text(
+            .add_message(SessionMessage::assistant(vec![ContentPart::text(
                 "Hi there!",
             )]))
             .unwrap();
@@ -2136,14 +2136,12 @@ mod tests {
 
         let mut session = Session::new(SessionConfig::default());
         session
-            .add_message(SessionMessage::user(vec![ContentBlock::text("First")]))
+            .add_message(SessionMessage::user(vec![ContentPart::text("First")]))
             .unwrap();
         persistence.save(&session).await.unwrap();
 
         session
-            .add_message(SessionMessage::assistant(vec![ContentBlock::text(
-                "Second",
-            )]))
+            .add_message(SessionMessage::assistant(vec![ContentPart::text("Second")]))
             .unwrap();
         persistence.save(&session).await.unwrap();
 
@@ -2249,16 +2247,16 @@ mod tests {
 
         let mut session = Session::new(SessionConfig::default());
         session
-            .add_message(SessionMessage::user(vec![ContentBlock::text("Q1")]))
+            .add_message(SessionMessage::user(vec![ContentPart::text("Q1")]))
             .unwrap();
         session
-            .add_message(SessionMessage::assistant(vec![ContentBlock::text("A1")]))
+            .add_message(SessionMessage::assistant(vec![ContentPart::text("A1")]))
             .unwrap();
         session
-            .add_message(SessionMessage::user(vec![ContentBlock::text("Q2")]))
+            .add_message(SessionMessage::user(vec![ContentPart::text("Q2")]))
             .unwrap();
         session
-            .add_message(SessionMessage::assistant(vec![ContentBlock::text("A2")]))
+            .add_message(SessionMessage::assistant(vec![ContentPart::text("A2")]))
             .unwrap();
 
         persistence.save(&session).await.unwrap();
@@ -2332,7 +2330,7 @@ mod tests {
 
         let mut session = Session::new(SessionConfig::default());
         session
-            .add_message(SessionMessage::user(vec![ContentBlock::text("Hello")]))
+            .add_message(SessionMessage::user(vec![ContentPart::text("Hello")]))
             .unwrap();
         persistence.save(&session).await.unwrap();
         persistence.save(&session).await.unwrap(); // Save same data twice
@@ -2496,7 +2494,7 @@ mod tests {
         let mut session = Session::new(SessionConfig::default());
         session
             .add_message(
-                SessionMessage::user(vec![ContentBlock::text("Hello")])
+                SessionMessage::user(vec![ContentPart::text("Hello")])
                     .environment(EnvironmentContext::capture(Some(project_dir.path()))),
             )
             .unwrap();
@@ -2522,10 +2520,10 @@ mod tests {
 
         let mut session = Session::new(SessionConfig::default());
         session
-            .add_message(SessionMessage::user(vec![ContentBlock::text("Hello")]))
+            .add_message(SessionMessage::user(vec![ContentPart::text("Hello")]))
             .unwrap();
         session
-            .add_message(SessionMessage::assistant(vec![ContentBlock::text("Hi")]))
+            .add_message(SessionMessage::assistant(vec![ContentPart::text("Hi")]))
             .unwrap();
         assert_eq!(session.graph.events.len(), 2);
 
@@ -2558,7 +2556,7 @@ mod tests {
 
         let mut session = Session::new(SessionConfig::default());
         session
-            .add_message(SessionMessage::user(vec![ContentBlock::text("Hello")]))
+            .add_message(SessionMessage::user(vec![ContentPart::text("Hello")]))
             .unwrap();
         session.bookmark_current_head("start", Some("saved".to_string()));
 
@@ -2574,7 +2572,7 @@ mod tests {
 
         let mut session = Session::new(SessionConfig::default());
         session
-            .add_message(SessionMessage::user(vec![ContentBlock::text("Hello")]))
+            .add_message(SessionMessage::user(vec![ContentPart::text("Hello")]))
             .unwrap();
         session
             .graph
@@ -2600,10 +2598,10 @@ mod tests {
 
         let mut session = Session::new(SessionConfig::default());
         session
-            .add_message(SessionMessage::user(vec![ContentBlock::text("hello")]))
+            .add_message(SessionMessage::user(vec![ContentPart::text("hello")]))
             .unwrap();
         session
-            .add_message(SessionMessage::assistant(vec![ContentBlock::text("world")]))
+            .add_message(SessionMessage::assistant(vec![ContentPart::text("world")]))
             .unwrap();
         session.clear_messages();
 

@@ -4,7 +4,7 @@ use super::GraphError;
 use super::SessionGraph;
 use super::query::ReplaySegment;
 use super::types::{BranchId, NodeId, NodeKind};
-use crate::types::{ContentBlock, Message, Role};
+use crate::ir::{ContentPart, Message, Role};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ReplayInput {
@@ -66,7 +66,7 @@ fn node_to_message(node: &super::types::GraphNode) -> Option<Message> {
         _ => return None,
     };
 
-    let content: Vec<ContentBlock> =
+    let content: Vec<ContentPart> =
         serde_json::from_value(node.payload.get("content")?.clone()).ok()?;
     Some(Message { role, content })
 }

@@ -66,7 +66,7 @@ pub struct AgentBuilder {
     pub(super) custom_tools: Vec<Arc<dyn Tool>>,
     pub(super) memory_provider: Option<LeveledMemoryProvider>,
     pub(super) sandbox_settings: Option<crate::config::SandboxConfig>,
-    pub(super) initial_messages: Option<Vec<crate::types::Message>>,
+    pub(super) initial_messages: Option<Vec<crate::ir::Message>>,
     pub(super) resume_session_id: Option<String>,
     pub(super) resumed_session: Option<crate::session::Session>,
     pub(super) tenant_budget_manager: Option<TenantBudgetManager>,
@@ -672,10 +672,10 @@ impl AgentBuilder {
         let manager = self.session_manager.take().unwrap_or_default();
         let session = manager.get(&id).await?;
 
-        let messages: Vec<crate::types::Message> = session
+        let messages: Vec<crate::ir::Message> = session
             .messages
             .iter()
-            .map(|m| crate::types::Message {
+            .map(|m| crate::ir::Message {
                 role: m.role,
                 content: m.content.clone(),
             })
@@ -707,7 +707,7 @@ impl AgentBuilder {
     }
 
     /// Sets initial messages for the conversation.
-    pub fn messages(mut self, messages: Vec<crate::types::Message>) -> Self {
+    pub fn messages(mut self, messages: Vec<crate::ir::Message>) -> Self {
         self.initial_messages = Some(messages);
         self
     }
@@ -1004,8 +1004,8 @@ impl AgentBuilder {
 mod tests {
     use super::*;
     use crate::client::DEFAULT_MAX_TOKENS;
+    use crate::ir::ContentPart;
     use crate::session::{SessionConfig, SessionManager, SessionMessage};
-    use crate::types::ContentBlock;
 
     #[test]
     fn test_tool_surface() {
@@ -1038,14 +1038,14 @@ mod tests {
         manager
             .add_message(
                 &session_id,
-                SessionMessage::user(vec![ContentBlock::text("one")]),
+                SessionMessage::user(vec![ContentPart::text("one")]),
             )
             .await
             .unwrap();
         manager
             .add_message(
                 &session_id,
-                SessionMessage::assistant(vec![ContentBlock::text("two")]),
+                SessionMessage::assistant(vec![ContentPart::text("two")]),
             )
             .await
             .unwrap();

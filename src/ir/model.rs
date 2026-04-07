@@ -190,6 +190,20 @@ impl Message {
             content: vec![ContentPart::tool_result_text(call_id, text)],
         }
     }
+
+    /// Concatenate all text parts. Used by the session/agent layer.
+    pub fn text(&self) -> String {
+        self.content
+            .iter()
+            .filter_map(|p| p.as_text())
+            .collect::<Vec<_>>()
+            .join("")
+    }
+
+    /// `true` if any content part is a tool call.
+    pub fn has_tool_calls(&self) -> bool {
+        self.content.iter().any(|p| p.is_tool_call())
+    }
 }
 
 /// Conversation participant role.
@@ -261,6 +275,38 @@ pub struct SystemBlock {
     /// Anthropic `cache_control` marker. Lossy on every other codec.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cache_control: Option<super::provider_options::CacheControl>,
+}
+
+impl SystemBlock {
+    /// Create a block with caching enabled (default TTL).
+    pub fn cached(text: impl Into<String>) -> Self {
+        Self {
+            text: text.into(),
+            cache_control: Some(super::provider_options::CacheControl {
+                mode: super::provider_options::CacheControlMode::System,
+                ttl: None,
+            }),
+        }
+    }
+
+    /// Create a block with caching and a specific TTL string (`"5m"`, `"1h"`).
+    pub fn cached_with_ttl(text: impl Into<String>, ttl: impl Into<String>) -> Self {
+        Self {
+            text: text.into(),
+            cache_control: Some(super::provider_options::CacheControl {
+                mode: super::provider_options::CacheControlMode::System,
+                ttl: Some(ttl.into()),
+            }),
+        }
+    }
+
+    /// Create a block without caching.
+    pub fn uncached(text: impl Into<String>) -> Self {
+        Self {
+            text: text.into(),
+            cache_control: None,
+        }
+    }
 }
 
 /// Tool / function definition exposed to the model.

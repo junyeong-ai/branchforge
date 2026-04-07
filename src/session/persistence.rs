@@ -563,8 +563,8 @@ impl PersistenceFactory {
 mod tests {
     use super::*;
     use crate::graph::{GraphEvent, GraphEventBody, NodeKind};
+    use crate::ir::ContentPart;
     use crate::session::state::SessionConfig;
-    use crate::types::ContentBlock;
 
     #[tokio::test]
     async fn test_save_load() {
@@ -617,7 +617,7 @@ mod tests {
 
         persistence.save(&session).await.unwrap();
         persistence
-            .add_message(&id, SessionMessage::user(vec![ContentBlock::text("Hello")]))
+            .add_message(&id, SessionMessage::user(vec![ContentPart::text("Hello")]))
             .await
             .unwrap();
 
@@ -694,7 +694,7 @@ mod tests {
         let persistence = MemoryPersistence::new();
         let mut session = Session::new(SessionConfig::default());
         session
-            .add_message(SessionMessage::user(vec![ContentBlock::text("Hello")]))
+            .add_message(SessionMessage::user(vec![ContentPart::text("Hello")]))
             .unwrap();
         session.clear_messages();
 
@@ -709,7 +709,7 @@ mod tests {
         let persistence = MemoryPersistence::new();
         let mut session = Session::new(SessionConfig::default());
         session
-            .add_message(SessionMessage::user(vec![ContentBlock::text("Hello")]))
+            .add_message(SessionMessage::user(vec![ContentPart::text("Hello")]))
             .unwrap();
         session
             .graph

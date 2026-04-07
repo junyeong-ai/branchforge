@@ -125,20 +125,18 @@ impl RecoveryStrategy for ContextRecovery {
 /// Aggressively truncate tool result content blocks to `max_len` characters
 /// using `content_overrides` so the graph remains untouched.
 fn collapse_context(session: &mut crate::session::Session, max_len: usize) {
-    use crate::types::{ContentBlock, Role, ToolResultContent, ToolResultContentBlock};
+    use crate::ir::{ContentPart, Role, ToolResultContent};
 
     let messages = session.current_branch_messages();
     for message in &messages {
-        if message.role != Role::User {
+        if message.role != Role::User && message.role != Role::Tool {
             continue;
         }
         let mut needs_override = false;
         let mut new_content = message.content.clone();
 
-        for block in &mut new_content {
-            if let ContentBlock::ToolResult(result) = block
-                && let Some(ref mut content) = result.content
-            {
+        for part in &mut new_content {
+            if let ContentPart::ToolResult { content, .. } = part {
                 match content {
                     ToolResultContent::Text(text) => {
                         if text.len() > max_len {
@@ -147,9 +145,17 @@ fn collapse_context(session: &mut crate::session::Session, max_len: usize) {
                             needs_override = true;
                         }
                     }
-                    ToolResultContent::Blocks(blocks) => {
-                        for inner in blocks.iter_mut() {
-                            if let ToolResultContentBlock::Text { text } = inner
+                    ToolResultContent::Json(val) => {
+                        let s = val.to_string();
+                        if s.len() > max_len {
+                            *content =
+                                ToolResultContent::Text(format!("{}...[truncated]", &s[..max_len]));
+                            needs_override = true;
+                        }
+                    }
+                    ToolResultContent::MultiPart(parts) => {
+                        for inner in parts.iter_mut() {
+                            if let ContentPart::Text { text } = inner
                                 && text.len() > max_len
                             {
                                 text.truncate(max_len);

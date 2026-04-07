@@ -9,12 +9,13 @@ use tokio::sync::{OnceCell, RwLock, oneshot};
 use tokio::task::JoinHandle;
 use tracing::warn;
 
+use crate::ir::{ContentPart, Message, Role};
 use crate::session::{
     ExecutionMetadata, MessageMetadata, Persistence, Session, SessionConfig, SessionError,
     SessionId, SessionManager, SessionResult, SessionState, SessionType, ThinkingMetadata,
     ToolResultMeta,
 };
-use crate::types::{ContentBlock, Message, Role, StopReason};
+use crate::types::StopReason;
 
 use super::AgentResult;
 
@@ -92,7 +93,7 @@ pub struct TaskResultSnapshot {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub text: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub content: Option<Vec<ContentBlock>>,
+    pub content: Option<Vec<ContentPart>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub structured_output: Option<serde_json::Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -952,8 +953,9 @@ impl TaskRegistry {
 mod tests {
     use super::*;
     use crate::agent::AgentState;
+    use crate::ir::Role;
     use crate::session::{MemoryPersistence, QueueItem, SessionMessage};
-    use crate::types::{Role, StopReason, Usage};
+    use crate::types::{StopReason, Usage};
     use std::sync::atomic::{AtomicBool, Ordering};
     use uuid::Uuid;
 
@@ -1319,14 +1321,14 @@ mod tests {
         manager
             .add_message(
                 &session_id,
-                SessionMessage::user(vec![ContentBlock::text("Hello")]),
+                SessionMessage::user(vec![ContentPart::text("Hello")]),
             )
             .await
             .unwrap();
         manager
             .add_message(
                 &session_id,
-                SessionMessage::assistant(vec![ContentBlock::text("Hi there!")]),
+                SessionMessage::assistant(vec![ContentPart::text("Hi there!")]),
             )
             .await
             .unwrap();
@@ -1352,14 +1354,14 @@ mod tests {
         manager
             .add_message(
                 &session_id,
-                SessionMessage::user(vec![ContentBlock::text("question")]),
+                SessionMessage::user(vec![ContentPart::text("question")]),
             )
             .await
             .unwrap();
         manager
             .add_message(
                 &session_id,
-                SessionMessage::assistant(vec![ContentBlock::text("answer")]),
+                SessionMessage::assistant(vec![ContentPart::text("answer")]),
             )
             .await
             .unwrap();
@@ -1427,7 +1429,7 @@ mod tests {
         manager
             .add_message(
                 &session_id,
-                SessionMessage::assistant(vec![ContentBlock::text("{\"value\":42}")]).metadata(
+                SessionMessage::assistant(vec![ContentPart::text("{\"value\":42}")]).metadata(
                     crate::session::MessageMetadata {
                         structured_output: Some(serde_json::json!({"value": 42})),
                         ..Default::default()
@@ -1463,8 +1465,8 @@ mod tests {
             .add_message(
                 &session_id,
                 SessionMessage::assistant(vec![
-                    ContentBlock::text("first "),
-                    ContentBlock::text("second"),
+                    ContentPart::text("first "),
+                    ContentPart::text("second"),
                 ]),
             )
             .await
@@ -1493,7 +1495,7 @@ mod tests {
         manager
             .add_message(
                 &session_id,
-                SessionMessage::assistant(vec![ContentBlock::text("answer")]).metadata(
+                SessionMessage::assistant(vec![ContentPart::text("answer")]).metadata(
                     crate::session::MessageMetadata {
                         model: Some("claude-sonnet".to_string()),
                         request_id: Some("req_123".to_string()),

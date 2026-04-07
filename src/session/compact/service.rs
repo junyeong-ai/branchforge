@@ -6,10 +6,11 @@
 use serde::{Deserialize, Serialize};
 
 use crate::client::DEFAULT_FAST_MODEL;
+use crate::ir::{ContentPart, Message, Role};
 use crate::session::state::{Session, SessionMessage};
 use crate::session::types::CompactRecord;
 use crate::session::{SessionError, SessionResult};
-use crate::types::{CompactResult, ContentBlock, Message, Role};
+use crate::types::CompactResult;
 
 /// Context usage threshold for triggering compaction (80%).
 pub const DEFAULT_COMPACT_THRESHOLD: f32 = 0.8;
@@ -153,11 +154,9 @@ impl CompactService {
             return Ok(CompactResult::NotNeeded);
         };
 
-        let request = CreateMessageRequest::new(
-            &self.config.summary_model,
-            vec![Message::user(&summary_prompt)],
-        )
-        .max_tokens(self.config.max_summary_tokens);
+        let legacy_msg = crate::ir::compat::ir_message_to_legacy(&Message::user(&summary_prompt));
+        let request = CreateMessageRequest::new(&self.config.summary_model, vec![legacy_msg])
+            .max_tokens(self.config.max_summary_tokens);
         let response = client.send(request).await?;
         let result = self.apply_compact(session, response.text())?;
         self.record_compact(session, &result);
@@ -189,7 +188,7 @@ impl CompactService {
             branch_id,
             crate::graph::NodeKind::Summary,
             serde_json::json!({
-                "content": [ContentBlock::text(format!("[Previous conversation summary]\n\n{}", summary))],
+                "content": [ContentPart::text(format!("[Previous conversation summary]\n\n{}", summary))],
                 "summary": summary,
             }),
         ).map_err(|e| SessionError::Storage {
@@ -254,7 +253,7 @@ impl CompactService {
 
         for msg in messages {
             let role = match msg.role {
-                Role::User => "Human",
+                Role::User | Role::Tool => "Human",
                 Role::Assistant => "Assistant",
             };
 
@@ -452,9 +451,9 @@ mod tests {
             };
 
             let msg = if i % 2 == 0 {
-                SessionMessage::user(vec![ContentBlock::text(content)])
+                SessionMessage::user(vec![ContentPart::text(content)])
             } else {
-                SessionMessage::assistant(vec![ContentBlock::text(content)])
+                SessionMessage::assistant(vec![ContentPart::text(content)])
             };
 
             session.add_message(msg).unwrap();

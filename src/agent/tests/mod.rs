@@ -13,11 +13,12 @@ use crate::client::{DEFAULT_FAST_MODEL, GatewayConfig, ModelConfig, ProviderConf
 use crate::common::{ContentSource, IndexRegistry};
 use crate::context::{PromptOrchestrator, StaticContext};
 use crate::hooks::{HookContext, HookEvent, HookInput, HookManager, HookOutput};
+use crate::ir::ContentPart;
 use crate::session::types::TodoItem;
 use crate::session::{Session, SessionAccessScope, SessionConfig, SessionId, SessionManager};
 use crate::skills::{SkillIndex, SkillRuntime};
 use crate::tools::{ExecutionContext, ToolOutput, ToolRegistry, ToolResult, ToolSurface};
-use crate::types::{ContentBlock, StopReason, ToolResultBlock, ToolResultContent, Usage};
+use crate::types::{StopReason, ToolResultBlock, Usage};
 
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
@@ -527,15 +528,18 @@ async fn test_execute_routes_explicit_manual_only_skill_before_model_request() {
         messages[0].content[0].as_text(),
         Some("/math-helper 15 * 23 + 47")
     );
-    assert!(matches!(messages[1].content[0], ContentBlock::ToolUse(_)));
+    assert!(matches!(
+        messages[1].content[0],
+        ContentPart::ToolCall { .. }
+    ));
     assert!(matches!(
         messages[2].content[0],
-        ContentBlock::ToolResult(_)
+        ContentPart::ToolResult { .. }
     ));
 
-    if let ContentBlock::ToolResult(result_block) = &messages[2].content[0] {
-        match &result_block.content {
-            Some(ToolResultContent::Text(text)) => {
+    if let ContentPart::ToolResult { ref content, .. } = messages[2].content[0] {
+        match content {
+            crate::ir::ToolResultContent::Text(text) => {
                 assert!(text.contains("Calculate: 15 * 23 + 47"));
             }
             _ => panic!("expected text tool result"),
@@ -579,9 +583,10 @@ async fn test_execute_routes_explicit_skill_with_default_authorization_mode() {
         .with_session(|session| session.current_branch_messages())
         .await;
     assert!(messages.iter().any(|message| {
-        message.content.iter().any(
-            |block| matches!(block, ContentBlock::ToolUse(tool_use) if tool_use.name == "Skill"),
-        )
+        message
+            .content
+            .iter()
+            .any(|block| matches!(block, ContentPart::ToolCall { name, .. } if name == "Skill"))
     }));
 }
 

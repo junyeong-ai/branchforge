@@ -2339,8 +2339,8 @@ impl Persistence for PostgresPersistence {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ir::ContentPart;
     use crate::session::{Session, SessionConfig};
-    use crate::types::ContentBlock;
 
     #[test]
     fn postgres_config_includes_graph_events_table() {
@@ -2368,12 +2368,12 @@ mod tests {
         let mut session = Session::new(SessionConfig::default());
         session
             .add_message(crate::session::SessionMessage::user(vec![
-                ContentBlock::text("hi"),
+                ContentPart::text("hi"),
             ]))
             .unwrap();
         session
             .add_message(crate::session::SessionMessage::assistant(vec![
-                ContentBlock::text("hello"),
+                ContentPart::text("hello"),
             ]))
             .unwrap();
 

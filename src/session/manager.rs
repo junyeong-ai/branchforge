@@ -297,8 +297,10 @@ impl SessionManager {
 
         for message in replay.messages {
             let mut session_message = match message.role {
-                crate::types::Role::User => SessionMessage::user(message.content),
-                crate::types::Role::Assistant => SessionMessage::assistant(message.content),
+                crate::ir::Role::User | crate::ir::Role::Tool => {
+                    SessionMessage::user(message.content)
+                }
+                crate::ir::Role::Assistant => SessionMessage::assistant(message.content),
             };
             session_message.is_sidechain = true;
             forked.add_message(session_message)?;
@@ -325,8 +327,10 @@ impl SessionManager {
 
         for message in replay.messages {
             let mut session_message = match message.role {
-                crate::types::Role::User => SessionMessage::user(message.content),
-                crate::types::Role::Assistant => SessionMessage::assistant(message.content),
+                crate::ir::Role::User | crate::ir::Role::Tool => {
+                    SessionMessage::user(message.content)
+                }
+                crate::ir::Role::Assistant => SessionMessage::assistant(message.content),
             };
             session_message.is_sidechain = true;
             forked.add_message(session_message)?;
@@ -1014,7 +1018,7 @@ impl ScopedSessionManager {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::ContentBlock;
+    use crate::ir::ContentPart;
 
     #[tokio::test]
     async fn test_session_manager_create() {
@@ -1062,7 +1066,7 @@ mod tests {
         let session = manager.create(SessionConfig::default()).await.unwrap();
         let session_id = session.id;
 
-        let message = SessionMessage::user(vec![ContentBlock::text("Hello")]);
+        let message = SessionMessage::user(vec![ContentPart::text("Hello")]);
         manager.add_message(&session_id, message).await.unwrap();
 
         let restored = manager.get(&session_id).await.unwrap();
@@ -1077,10 +1081,10 @@ mod tests {
         let session = manager.create(SessionConfig::default()).await.unwrap();
         let session_id = session.id;
 
-        let msg1 = SessionMessage::user(vec![ContentBlock::text("Hello")]);
+        let msg1 = SessionMessage::user(vec![ContentPart::text("Hello")]);
         manager.add_message(&session_id, msg1).await.unwrap();
 
-        let msg2 = SessionMessage::assistant(vec![ContentBlock::text("Hi!")]);
+        let msg2 = SessionMessage::assistant(vec![ContentPart::text("Hi!")]);
         manager.add_message(&session_id, msg2).await.unwrap();
 
         // Fork
@@ -1106,14 +1110,14 @@ mod tests {
         manager
             .add_message(
                 &session_id,
-                SessionMessage::user(vec![ContentBlock::text("hello")]),
+                SessionMessage::user(vec![ContentPart::text("hello")]),
             )
             .await
             .unwrap();
         manager
             .add_message(
                 &session_id,
-                SessionMessage::assistant(vec![ContentBlock::text("world")]),
+                SessionMessage::assistant(vec![ContentPart::text("world")]),
             )
             .await
             .unwrap();
@@ -1130,10 +1134,10 @@ mod tests {
         let manager = SessionManager::in_memory();
         let mut session = manager.create(SessionConfig::default()).await.unwrap();
         session
-            .add_message(SessionMessage::user(vec![ContentBlock::text("hello")]))
+            .add_message(SessionMessage::user(vec![ContentPart::text("hello")]))
             .unwrap();
         session
-            .add_message(SessionMessage::assistant(vec![ContentBlock::text("world")]))
+            .add_message(SessionMessage::assistant(vec![ContentPart::text("world")]))
             .unwrap();
         session.clear_messages();
         manager.persistence.save(&session).await.unwrap();
@@ -1157,7 +1161,7 @@ mod tests {
         manager
             .add_message(
                 &session_id,
-                SessionMessage::user(vec![ContentBlock::text("hello")]),
+                SessionMessage::user(vec![ContentPart::text("hello")]),
             )
             .await
             .unwrap();
@@ -1195,7 +1199,7 @@ mod tests {
         manager
             .add_message(
                 &session_id,
-                SessionMessage::user(vec![ContentBlock::text("hello")]),
+                SessionMessage::user(vec![ContentPart::text("hello")]),
             )
             .await
             .unwrap();
@@ -1214,14 +1218,14 @@ mod tests {
         manager
             .add_message(
                 &session_id,
-                SessionMessage::user(vec![ContentBlock::text("one")]),
+                SessionMessage::user(vec![ContentPart::text("one")]),
             )
             .await
             .unwrap();
         manager
             .add_message(
                 &session_id,
-                SessionMessage::assistant(vec![ContentBlock::text("two")]),
+                SessionMessage::assistant(vec![ContentPart::text("two")]),
             )
             .await
             .unwrap();
@@ -1255,7 +1259,7 @@ mod tests {
         manager
             .add_message(
                 &session_id,
-                SessionMessage::user(vec![ContentBlock::text("hello")]),
+                SessionMessage::user(vec![ContentPart::text("hello")]),
             )
             .await
             .unwrap();
@@ -1281,7 +1285,7 @@ mod tests {
         manager
             .add_message(
                 &session_id,
-                SessionMessage::user(vec![ContentBlock::text("hello")]),
+                SessionMessage::user(vec![ContentPart::text("hello")]),
             )
             .await
             .unwrap();
@@ -1306,7 +1310,7 @@ mod tests {
         );
         subagent.set_identity(Some("tenant-a".to_string()), Some("user-1".to_string()));
         subagent
-            .add_message(SessionMessage::user(vec![ContentBlock::text("alpha")]))
+            .add_message(SessionMessage::user(vec![ContentPart::text("alpha")]))
             .unwrap();
 
         let node = subagent.current_branch_graph_nodes()[0];
@@ -1329,7 +1333,7 @@ mod tests {
         manager
             .add_message(
                 &session_id,
-                SessionMessage::user(vec![ContentBlock::text("secret path")]),
+                SessionMessage::user(vec![ContentPart::text("secret path")]),
             )
             .await
             .unwrap();
@@ -1369,7 +1373,7 @@ mod tests {
         manager
             .add_message(
                 &session_id,
-                SessionMessage::user(vec![ContentBlock::text("alpha")]),
+                SessionMessage::user(vec![ContentPart::text("alpha")]),
             )
             .await
             .unwrap();
@@ -1413,7 +1417,7 @@ mod tests {
         manager
             .add_message(
                 &session_id,
-                SessionMessage::user(vec![ContentBlock::text("alpha")]),
+                SessionMessage::user(vec![ContentPart::text("alpha")]),
             )
             .await
             .unwrap();
@@ -1453,14 +1457,14 @@ mod tests {
         manager
             .add_message(
                 &session_id,
-                SessionMessage::user(vec![ContentBlock::text("root")]),
+                SessionMessage::user(vec![ContentPart::text("root")]),
             )
             .await
             .unwrap();
         manager
             .add_message(
                 &session_id,
-                SessionMessage::assistant(vec![ContentBlock::text("left")]),
+                SessionMessage::assistant(vec![ContentPart::text("left")]),
             )
             .await
             .unwrap();
@@ -1504,7 +1508,7 @@ mod tests {
         manager
             .add_message(
                 &session_id,
-                SessionMessage::user(vec![ContentBlock::text("root")]),
+                SessionMessage::user(vec![ContentPart::text("root")]),
             )
             .await
             .unwrap();
@@ -1522,7 +1526,7 @@ mod tests {
         manager
             .add_message(
                 &session_id,
-                SessionMessage::assistant(vec![ContentBlock::text("after-checkpoint")]),
+                SessionMessage::assistant(vec![ContentPart::text("after-checkpoint")]),
             )
             .await
             .unwrap();
@@ -1562,7 +1566,7 @@ mod tests {
         manager
             .add_message(
                 &session_id,
-                SessionMessage::user(vec![ContentBlock::text("alpha")]),
+                SessionMessage::user(vec![ContentPart::text("alpha")]),
             )
             .await
             .unwrap();

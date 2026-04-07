@@ -13,9 +13,10 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 
 use crate::graph::NodeId;
+use crate::ir::ContentPart;
 use crate::session::SessionResult;
 use crate::session::state::Session;
-use crate::types::{CompactResult, ContentBlock};
+use crate::types::CompactResult;
 
 /// Context available when deciding whether compaction is needed.
 #[derive(Debug, Clone)]
@@ -75,7 +76,7 @@ pub struct ContentOverrideEntry {
     /// Graph node ID whose content should be replaced.
     pub node_id: NodeId,
     /// Replacement content blocks (truncated version).
-    pub replacement_content: Vec<ContentBlock>,
+    pub replacement_content: Vec<ContentPart>,
     /// Original token count of the content being replaced.
     pub original_tokens: u64,
 }

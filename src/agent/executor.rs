@@ -14,9 +14,9 @@ use crate::context::PromptOrchestrator;
 use crate::context_scope::SharedContextScope;
 use crate::events::EventBus;
 use crate::hooks::HookManager;
+use crate::ir::Message;
 use crate::session::{SessionAccessScope, SessionManager, ToolState};
 use crate::tools::{ToolRegistry, ToolSearchManager};
-use crate::types::Message;
 
 pub struct Agent {
     pub(crate) runtime: Arc<AgentRuntime>,

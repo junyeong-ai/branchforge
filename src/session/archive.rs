@@ -567,8 +567,8 @@ fn graph_with_archive_policy(graph: &SessionGraph, policy: &ArchivePolicy) -> Se
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ir::ContentPart;
     use crate::session::{MemoryPersistence, Persistence, SessionConfig, SessionMessage};
-    use crate::types::ContentBlock;
     use std::sync::Arc;
 
     #[test]
@@ -576,7 +576,7 @@ mod tests {
         let mut session = Session::new(SessionConfig::default());
         session.set_identity(Some("tenant-a".to_string()), Some("user-1".to_string()));
         session
-            .add_message(SessionMessage::user(vec![ContentBlock::text("hello")]))
+            .add_message(SessionMessage::user(vec![ContentPart::text("hello")]))
             .unwrap();
 
         let bundle = SessionArchiveService::export_bundle(
@@ -618,10 +618,10 @@ mod tests {
         let mut session = Session::new(SessionConfig::default());
         session.set_identity(Some("tenant-a".to_string()), Some("user-1".to_string()));
         session
-            .add_message(SessionMessage::user(vec![ContentBlock::text("hello")]))
+            .add_message(SessionMessage::user(vec![ContentPart::text("hello")]))
             .unwrap();
         session
-            .add_message(SessionMessage::assistant(vec![ContentBlock::text("world")]))
+            .add_message(SessionMessage::assistant(vec![ContentPart::text("world")]))
             .unwrap();
 
         let bundle = SessionArchiveService::export_bundle(
@@ -643,7 +643,7 @@ mod tests {
         let mut session = Session::new(SessionConfig::default());
         session.set_identity(Some("tenant-a".to_string()), Some("user-1".to_string()));
         session
-            .add_message(SessionMessage::user(vec![ContentBlock::text("hello")]))
+            .add_message(SessionMessage::user(vec![ContentPart::text("hello")]))
             .unwrap();
 
         let mut bundle = SessionArchiveService::export_bundle(
@@ -673,7 +673,7 @@ mod tests {
         let mut session = Session::new(SessionConfig::default());
         session.set_identity(Some("tenant-a".to_string()), Some("user-1".to_string()));
         session
-            .add_message(SessionMessage::user(vec![ContentBlock::text("hello")]))
+            .add_message(SessionMessage::user(vec![ContentPart::text("hello")]))
             .unwrap();
 
         let node = session
@@ -700,7 +700,7 @@ mod tests {
         let mut session = Session::new(SessionConfig::default());
         session.set_identity(Some("tenant-a".to_string()), Some("user-1".to_string()));
         session
-            .add_message(SessionMessage::user(vec![ContentBlock::text("hello")]))
+            .add_message(SessionMessage::user(vec![ContentPart::text("hello")]))
             .unwrap();
         session
             .graph
@@ -820,7 +820,7 @@ mod tests {
         );
         session.set_identity(Some("tenant-a".to_string()), Some("user-1".to_string()));
         session
-            .add_message(SessionMessage::user(vec![ContentBlock::text("hello")]))
+            .add_message(SessionMessage::user(vec![ContentPart::text("hello")]))
             .unwrap();
 
         let pending = vec![
@@ -857,14 +857,14 @@ mod tests {
         let mut existing = Session::new(SessionConfig::default());
         existing.set_identity(Some("tenant-a".to_string()), Some("user-1".to_string()));
         existing
-            .add_message(SessionMessage::user(vec![ContentBlock::text("original")]))
+            .add_message(SessionMessage::user(vec![ContentPart::text("original")]))
             .unwrap();
         persistence.save(&existing).await.unwrap();
 
         let mut imported = Session::new(SessionConfig::default());
         imported.set_identity(Some("tenant-a".to_string()), Some("user-1".to_string()));
         imported
-            .add_message(SessionMessage::assistant(vec![ContentBlock::text(
+            .add_message(SessionMessage::assistant(vec![ContentPart::text(
                 "replacement",
             )]))
             .unwrap();
@@ -887,7 +887,7 @@ mod tests {
         let messages = stored.current_branch_messages();
         assert_eq!(messages.len(), 1);
         let text = messages[0].content.iter().find_map(|block| match block {
-            ContentBlock::Text { text, .. } => Some(text.as_str()),
+            ContentPart::Text { text } => Some(text.as_str()),
             _ => None,
         });
         assert_eq!(text, Some("original"));
@@ -898,7 +898,7 @@ mod tests {
         let persistence = Arc::new(MemoryPersistence::new());
         let mut session = Session::new(SessionConfig::default());
         session
-            .add_message(SessionMessage::assistant(vec![ContentBlock::text(
+            .add_message(SessionMessage::assistant(vec![ContentPart::text(
                 "restored output",
             )]))
             .unwrap();
