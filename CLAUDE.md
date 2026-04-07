@@ -57,8 +57,9 @@ The migration of the agent runtime / session layer to the new IR is in progress.
 | ε FinishReason cascade | ✅ | `types::StopReason` → `ir::FinishReason` in agent/session. `From<StopReason> for FinishReason` boundary conversion in compat.rs. |
 | ζ-1 LlmCall trait + decorators | ✅ | `LlmCall` trait (`send` + `send_stream`) + `RetryingClient`, `FallingBackClient`, `CircuitBrokenClient`, `LegacyBridgeClient`. Wired into `AgentRuntime.llm`. |
 | ζ-2 execution loop on LlmCall | ✅ | Non-streaming execution loop dispatches through `self.runtime.llm.send()` → `ir::ModelResponse`. Tool dispatch uses `ContentPart::ToolCall`. `accumulate_response_usage`/`emit_tokens_consumed` accept `&ir::Usage`. |
-| ζ-3 streaming + legacy deletion | ⏳ | Streaming agent migration to `LlmCall::send_stream()` + `ModelStreamChunk`. Then delete `src/client/adapter/`, `src/client/messages/`, legacy `Client`/`ClientBuilder`, `streaming.rs`, `batch.rs`, `files.rs`. |
-| η `src/types/*` cleanup + `src/client/` → `src/provider/` rename | ⏳ | Delete `types/{message,response,content,document}.rs`. Keep `types/tool/`. |
+| ζ-3 streaming on LlmCall | ✅ | Streaming agent migrated to `LlmCall::send_stream()` + `ModelStreamChunk`. SSE/binary parser code removed from streaming path. |
+| ζ-4 legacy client deletion | ⏳ | Delete `src/client/adapter/`, `src/client/messages/`, legacy `Client`/`ClientBuilder`, `streaming.rs`, `batch.rs`, `files.rs`. Requires updating `RequestBuilder`, compaction, `lib.rs` public API, and `ir/compat.rs`. |
+| η `src/types/*` cleanup + `src/client/` → `src/provider/` rename | ⏳ | Delete `types/{message,response,content,document}.rs`. Keep `types/tool/`. Blocked on ζ-4. |
 | θ `src/ir/compat.rs` deletion | ⏳ | Final compat bridge removal + grep guards. |
 | ι UX polish | ⏳ | `Agent::quick`, `provider_from_env`, `tracing` span standardisation, `examples/quickstart.rs`. |
 | κ Final verification | ⏳ | `cargo test --lib` ≥ 1396, `codec_contract` ≥ 63, clippy 0 warnings, vertex_gemini live calls. |
