@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use crate::client::{CloudProvider, ProviderConfig};
+use crate::client::CloudProvider;
 use crate::common::Index;
 use crate::common::IndexRegistry;
 use crate::context::{MemoryProvider, PromptOrchestrator, RuleIndex, StaticContext};
@@ -26,7 +26,7 @@ impl AgentBuilder {
         self.initialize_tool_search().await;
 
         let delegation_runtime = self.build_delegation_runtime().await;
-        let client = self.build_client().await?;
+        let llm = self.build_llm().await?;
         let tools = self.build_tools(delegation_runtime).await;
         let orchestrator = self.build_orchestrator().await;
         let identity = self.config.identity.clone();
@@ -44,7 +44,7 @@ impl AgentBuilder {
         });
 
         let mut agent = crate::agent::Agent::from_orchestrator(
-            client,
+            llm,
             self.config,
             tools,
             self.hooks,
@@ -517,116 +517,42 @@ impl AgentBuilder {
         })
     }
 
-    async fn build_client(&mut self) -> crate::Result<crate::Client> {
+    async fn build_llm(&mut self) -> crate::Result<std::sync::Arc<dyn crate::client::LlmCall>> {
+        use crate::client::preset::Preset;
+        use crate::client::{LlmCall, RetryingClient};
+
         let provider = self.cloud_provider.unwrap_or_else(CloudProvider::from_env);
-        let models = self
-            .model_config
-            .take()
-            .unwrap_or_else(|| provider.default_models());
-        let mut config = self
-            .provider_config
-            .take()
-            .unwrap_or_else(|| ProviderConfig::new(models));
-
-        config = config.max_tokens(self.config.model.max_tokens);
-
-        if self.supports_server_tools() {
-            config.beta.add(crate::client::BetaFeature::WebSearch);
-            config.beta.add(crate::client::BetaFeature::WebFetch);
-            tracing::debug!("Enabled server-side web tools");
-        }
-
-        // Enable tool search beta if manager is configured
-        if self.tool_search_manager.is_some() {
-            config.beta.add(crate::client::BetaFeature::AdvancedToolUse);
-            tracing::debug!("Enabled advanced tool use for tool search");
-        }
-
-        // Enable 1M context window beta if extended context is enabled
-        if self.config.model.extended_context {
-            config.beta.add(crate::client::BetaFeature::Context1M);
-            tracing::debug!("Enabled extended context window (1M tokens)");
-        }
-
-        // Enable structured outputs beta if output_schema is configured
-        if self.config.prompt.output_schema.is_some() {
-            config
-                .beta
-                .add(crate::client::BetaFeature::StructuredOutputs);
-            tracing::debug!("Enabled structured outputs beta for JSON schema");
-        }
-
-        let mut builder = crate::Client::builder().config(config);
-
-        match provider {
-            CloudProvider::Anthropic => {
-                builder = builder.anthropic();
-                if let Some(cred) = self.credential.take() {
-                    builder = builder.auth(cred).await?;
-                }
-                if let Some(oauth_config) = self.oauth_config.take() {
-                    builder = builder.oauth_config(oauth_config);
-                }
-            }
+        let preset = match provider {
+            CloudProvider::Anthropic => Preset::Anthropic,
             #[cfg(feature = "aws")]
-            CloudProvider::Bedrock => {
-                let region = self.aws_region.take().unwrap_or_else(|| "us-east-1".into());
-                builder = builder.aws_region(region);
-            }
+            CloudProvider::Bedrock => Preset::Bedrock,
             #[cfg(feature = "gcp")]
-            CloudProvider::Vertex => {
-                let project = self
-                    .gcp_project
-                    .take()
-                    .ok_or_else(|| crate::Error::Config("Vertex requires gcp_project".into()))?;
-                let region = self
-                    .gcp_region
-                    .take()
-                    .unwrap_or_else(|| "us-central1".into());
-                builder = builder.gcp(project, region);
-            }
+            CloudProvider::Vertex => Preset::VertexAnthropic,
             #[cfg(feature = "azure")]
-            CloudProvider::Foundry => {
-                let resource = self.azure_resource.take().ok_or_else(|| {
-                    crate::Error::Config("Foundry requires azure_resource".into())
-                })?;
-                builder = builder.azure_resource(resource);
-            }
+            CloudProvider::Foundry => Preset::FoundryAnthropic,
             #[cfg(feature = "openai")]
-            CloudProvider::OpenAi => {
-                builder = builder.openai();
-                if let Some(cred) = self.credential.take() {
-                    builder = builder.auth(cred).await?;
-                }
-            }
+            CloudProvider::OpenAi => Preset::OpenAi,
             #[cfg(feature = "gemini")]
-            CloudProvider::Gemini => {
-                builder = builder.gemini();
-                if let Some(cred) = self.credential.take() {
-                    builder = builder.auth(cred).await?;
-                }
-            }
-        }
+            CloudProvider::Gemini => Preset::Gemini,
+        };
 
-        if let Some(fallback) = self.fallback_config.take() {
-            builder = builder.fallback(fallback);
-        } else if let Some(ref model) = self.config.budget.fallback_model {
-            builder = builder.fallback_model(model);
-        }
-
-        let mut client = builder.build().await?;
-
-        // Wire in ProviderClient from the new codec/transport stack.
-        if let Some(pc) = self.provider_client.take() {
+        // Build ProviderClient — either from explicit provider_client or from preset
+        let pc: Arc<dyn LlmCall> = if let Some(pc) = self.provider_client.take() {
             tracing::info!(
                 codec = pc.codec_id(),
                 transport = pc.transport_id(),
-                "Agent using new ProviderClient backend"
+                "Agent using explicit ProviderClient"
             );
-            client = client.with_provider_client(pc);
-        }
+            Arc::new(pc)
+        } else {
+            tracing::info!(preset = preset.id(), "Building ProviderClient from preset");
+            Arc::new(preset.build_from_env().await?)
+        };
 
-        Ok(client)
+        // Wrap with retry
+        let llm: Arc<dyn LlmCall> = Arc::new(RetryingClient::wrap(pc));
+
+        Ok(llm)
     }
 }
 

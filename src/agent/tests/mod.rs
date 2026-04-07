@@ -7,25 +7,22 @@ use super::executor::Agent;
 use super::state::AgentMetrics;
 use super::state_formatter::format_todo_summary;
 use super::{AgentConfig, AgentState};
-use crate::Client;
 use crate::authorization::ToolPolicy;
-use crate::client::{DEFAULT_FAST_MODEL, GatewayConfig, ModelConfig, ProviderConfig};
+use crate::client::LlmCall;
 use crate::common::{ContentSource, IndexRegistry};
 use crate::context::{PromptOrchestrator, StaticContext};
 use crate::hooks::{HookContext, HookEvent, HookInput, HookManager, HookOutput};
-use crate::ir::ContentPart;
-use crate::ir::FinishReason;
+use crate::ir::{self, ContentPart, FinishReason};
 use crate::session::types::TodoItem;
 use crate::session::{Session, SessionAccessScope, SessionConfig, SessionId, SessionManager};
 use crate::skills::{SkillIndex, SkillRuntime};
 use crate::tools::{ExecutionContext, ToolOutput, ToolRegistry, ToolResult, ToolSurface};
 use crate::types::{ToolResultBlock, Usage};
 
+use async_trait::async_trait;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use tokio::sync::RwLock;
-use wiremock::matchers::{method, path};
-use wiremock::{Mock, MockServer, ResponseTemplate};
 
 #[test]
 fn test_agent_result() {
@@ -414,49 +411,57 @@ fn test_tool_result_variants() {
     assert_eq!(empty.text(), "");
 }
 
-async fn mock_client_with_message(text: &str) -> (MockServer, Client) {
-    let server = MockServer::start().await;
-    let response = serde_json::json!({
-        "id": "msg_test",
-        "type": "message",
-        "role": "assistant",
-        "content": [
-            {"type": "text", "text": text}
-        ],
-        "model": "claude-sonnet-4-5-20250514",
-        "stop_reason": "end_turn",
-        "stop_sequence": null,
-        "usage": {
-            "input_tokens": 12,
-            "output_tokens": 6
-        }
-    });
-    Mock::given(method("POST"))
-        .and(path("/v1/messages"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(response))
-        .mount(&server)
-        .await;
+#[derive(Debug, Clone)]
+struct MockLlmCall {
+    response: ir::ModelResponse,
+}
 
-    let config = ProviderConfig::new(ModelConfig::new(
-        "claude-sonnet-4-5-20250514",
-        DEFAULT_FAST_MODEL,
-    ))
-    .max_tokens(1024);
-    let client = Client::builder()
-        .auth("test-key")
-        .await
-        .expect("auth should initialize")
-        .config(config)
-        .gateway(GatewayConfig::base_url(server.uri()))
-        .build()
-        .await
-        .expect("client should build");
-    (server, client)
+impl MockLlmCall {
+    fn with_text(text: &str) -> Self {
+        Self {
+            response: ir::ModelResponse {
+                id: "msg_test".to_string(),
+                model: "claude-sonnet-4-5-20250514".to_string(),
+                content: vec![ir::ContentPart::Text {
+                    text: text.to_string(),
+                }],
+                finish_reason: ir::FinishReason::Stop,
+                usage: ir::Usage {
+                    input_tokens: 12,
+                    output_tokens: 6,
+                    ..Default::default()
+                },
+                continuation: None,
+                warnings: Vec::new(),
+                raw: None,
+            },
+        }
+    }
+}
+
+#[async_trait]
+impl LlmCall for MockLlmCall {
+    async fn send(&self, _request: &ir::ModelRequest) -> crate::Result<ir::ModelResponse> {
+        Ok(self.response.clone())
+    }
+
+    async fn send_stream(
+        &self,
+        _request: &ir::ModelRequest,
+    ) -> crate::Result<crate::client::provider_client::ChunkStream> {
+        Err(crate::Error::Config(
+            "streaming not supported in mock".into(),
+        ))
+    }
+}
+
+fn mock_llm_with_message(text: &str) -> Arc<dyn LlmCall> {
+    Arc::new(MockLlmCall::with_text(text))
 }
 
 #[tokio::test]
 async fn test_execute_persists_live_session_when_session_manager_is_configured() {
-    let (_server, client) = mock_client_with_message("persisted reply").await;
+    let llm = mock_llm_with_message("persisted reply");
     let manager = SessionManager::in_memory();
     let scope = SessionAccessScope::default()
         .tenant("tenant-a")
@@ -464,7 +469,7 @@ async fn test_execute_persists_live_session_when_session_manager_is_configured()
     let tools = Arc::new(ToolRegistry::default_tools(ToolSurface::All, None, None));
     let config = Arc::new(AgentConfig::default());
     let hooks = Arc::new(HookManager::new());
-    let agent = Agent::from_parts(Arc::new(client), config, tools, hooks, None)
+    let agent = Agent::from_parts(llm, config, tools, hooks, None)
         .session_persistence(manager.clone(), Some(scope.clone()));
 
     agent
@@ -490,7 +495,7 @@ async fn test_execute_persists_live_session_when_session_manager_is_configured()
 
 #[tokio::test]
 async fn test_execute_routes_explicit_manual_only_skill_before_model_request() {
-    let (_server, client) = mock_client_with_message("model reply").await;
+    let llm = mock_llm_with_message("model reply");
 
     let mut skill_registry = IndexRegistry::new();
     let mut skill = SkillIndex::new("math-helper", "Perform calculations")
@@ -510,7 +515,7 @@ async fn test_execute_routes_explicit_manual_only_skill_before_model_request() {
         .with_skill_registry(skill_registry);
 
     let agent = Agent::from_parts(
-        Arc::new(client),
+        llm,
         Arc::new(AgentConfig::default()),
         tools,
         Arc::new(HookManager::new()),
@@ -550,7 +555,7 @@ async fn test_execute_routes_explicit_manual_only_skill_before_model_request() {
 
 #[tokio::test]
 async fn test_execute_routes_explicit_skill_with_default_authorization_mode() {
-    let (_server, client) = mock_client_with_message("model reply").await;
+    let llm = mock_llm_with_message("model reply");
 
     let mut skill_registry = IndexRegistry::new();
     let mut skill = SkillIndex::new("math-helper", "Perform calculations")
@@ -569,7 +574,7 @@ async fn test_execute_routes_explicit_skill_with_default_authorization_mode() {
         .with_skill_registry(skill_registry);
 
     let agent = Agent::from_parts(
-        Arc::new(client),
+        llm,
         Arc::new(AgentConfig::default()),
         tools,
         Arc::new(HookManager::new()),
@@ -593,7 +598,7 @@ async fn test_execute_routes_explicit_skill_with_default_authorization_mode() {
 
 #[tokio::test]
 async fn test_execute_by_name_skill_respects_deny_rule() {
-    let (_server, client) = mock_client_with_message("model reply").await;
+    let llm = mock_llm_with_message("model reply");
 
     let mut skill_registry = IndexRegistry::new();
     let mut skill = SkillIndex::new("internal", "Internal skill")
@@ -615,7 +620,7 @@ async fn test_execute_by_name_skill_respects_deny_rule() {
         .with_skill_registry(skill_registry);
 
     let agent = Agent::from_parts(
-        Arc::new(client),
+        llm,
         Arc::new(AgentConfig::default()),
         tools,
         Arc::new(HookManager::new()),

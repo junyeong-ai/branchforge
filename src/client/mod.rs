@@ -740,6 +740,7 @@ impl ClientBuilder {
     }
 
     #[cfg(feature = "aws")]
+    #[allow(dead_code)] // Legacy — removed with ClientBuilder in Phase η
     pub(crate) fn aws_region(mut self, region: String) -> Self {
         self.provider = Some(CloudProvider::Bedrock);
         self.aws_region = Some(region);
@@ -747,6 +748,7 @@ impl ClientBuilder {
     }
 
     #[cfg(feature = "gcp")]
+    #[allow(dead_code)] // Legacy — removed with ClientBuilder in Phase η
     pub(crate) fn gcp(mut self, project: String, region: String) -> Self {
         self.provider = Some(CloudProvider::Vertex);
         self.gcp_project = Some(project);
@@ -755,6 +757,7 @@ impl ClientBuilder {
     }
 
     #[cfg(feature = "azure")]
+    #[allow(dead_code)] // Legacy — removed with ClientBuilder in Phase η
     pub(crate) fn azure_resource(mut self, resource: String) -> Self {
         self.provider = Some(CloudProvider::Foundry);
         self.azure_resource = Some(resource);

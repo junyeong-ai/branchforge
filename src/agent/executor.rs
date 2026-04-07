@@ -7,7 +7,6 @@ use tokio_util::sync::CancellationToken;
 
 use super::config::AgentConfig;
 use super::runtime::AgentRuntime;
-use crate::Client;
 use crate::authorization::ExecutionMode;
 use crate::budget::{BudgetTracker, TenantBudget};
 use crate::context::PromptOrchestrator;
@@ -28,24 +27,15 @@ pub struct Agent {
 }
 
 impl Agent {
-    pub fn new(client: Client, mut config: AgentConfig) -> Self {
-        let model_config = &client.config().models;
-        let resolved_primary = model_config.resolve_alias(&config.model.primary);
-        if resolved_primary != config.model.primary {
-            config.model.primary = resolved_primary.to_string();
-        }
-        let resolved_small = model_config.resolve_alias(&config.model.small);
-        if resolved_small != config.model.small {
-            config.model.small = resolved_small.to_string();
-        }
-
+    /// Create an agent with the given LLM backend and configuration.
+    pub fn new(llm: Arc<dyn crate::client::LlmCall>, config: AgentConfig) -> Self {
         let tools = ToolRegistry::default_tools(
             config.security.tool_surface.clone(),
             config.working_dir.clone(),
             Some(config.security.authorization_policy.clone()),
         );
         Self::from_parts(
-            Arc::new(client),
+            llm,
             Arc::new(config),
             Arc::new(tools),
             Arc::new(HookManager::new()),
@@ -54,14 +44,14 @@ impl Agent {
     }
 
     pub(crate) fn from_orchestrator(
-        client: Client,
+        llm: Arc<dyn crate::client::LlmCall>,
         config: AgentConfig,
         tools: Arc<ToolRegistry>,
         hooks: HookManager,
         orchestrator: PromptOrchestrator,
     ) -> Self {
         Self::from_parts(
-            Arc::new(client),
+            llm,
             Arc::new(config),
             tools,
             Arc::new(hooks),
@@ -70,7 +60,7 @@ impl Agent {
     }
 
     pub(crate) fn from_parts(
-        client: Arc<Client>,
+        llm: Arc<dyn crate::client::LlmCall>,
         config: Arc<AgentConfig>,
         tools: Arc<ToolRegistry>,
         hooks: Arc<HookManager>,
@@ -87,10 +77,7 @@ impl Agent {
             .unwrap_or_else(|| ToolState::new(crate::session::SessionId::new()));
         let session_id: Arc<str> = state.session_id().to_string().into();
 
-        let llm: Arc<dyn crate::client::LlmCall> =
-            Arc::new(crate::client::LegacyBridgeClient::new(Arc::clone(&client)));
         let runtime = Arc::new(AgentRuntime {
-            client,
             llm,
             config,
             tools,
@@ -229,9 +216,10 @@ impl Agent {
         &self.session_id
     }
 
+    /// Returns the LLM call surface.
     #[must_use]
-    pub fn client(&self) -> &Arc<Client> {
-        &self.runtime.client
+    pub fn llm(&self) -> &Arc<dyn crate::client::LlmCall> {
+        &self.runtime.llm
     }
 
     pub(crate) async fn persist_session_state(&self) -> crate::Result<()> {
