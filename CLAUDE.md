@@ -54,8 +54,10 @@ The migration of the agent runtime / session layer to the new IR is in progress.
 | γ-3 AgentMetrics widen | ✅ | `AgentMetrics.{input,output,cache_*}_tokens` widened to u64. |
 | δ naming alignment | ✅ | `tool_use_id` → `tool_call_id` rename through `ToolCallRecord`, `ToolResultMeta`, `record_tool` param, graph node JSON payloads, `tool_execute_span`. |
 | δ Message/ContentPart cascade | ✅ | `SessionMessage`, `Session::to_api_messages()`, `AgentResult.messages`, `ReplayInput`, compaction, graph replay all use `ir::Message`/`ir::ContentPart`/`ir::Role`. Legacy→IR conversion at `RequestBuilder::build()` boundary via `ir::compat::ir_message_to_legacy`. 1569 lib + 48 codec_contract pass. |
-| ε FinishReason + ApiResponse | ⏳ | Replace `types::StopReason`, `types::ApiResponse` with IR equivalents. |
-| ζ Client/adapter dismantling + LlmCall trait | ⏳ | Delete `src/client/adapter/`, `src/client/messages/`, `provider_profile.rs`, `recovery.rs`, `streaming.rs`, `batch.rs`, `files.rs`. Delete `Client` / `ClientBuilder`. Introduce `LlmCall` trait + `RetryingClient`/`FallingBackClient`/`CircuitBrokenClient` decorators. Delete `Auth::vertex/bedrock/foundry`. |
+| ε FinishReason cascade | ✅ | `types::StopReason` → `ir::FinishReason` in agent/session. `From<StopReason> for FinishReason` boundary conversion in compat.rs. |
+| ζ-1 LlmCall trait + decorators | ✅ | `LlmCall` trait (`send` + `send_stream`) + `RetryingClient`, `FallingBackClient`, `CircuitBrokenClient`, `LegacyBridgeClient`. Wired into `AgentRuntime.llm`. |
+| ζ-2 execution loop on LlmCall | ✅ | Non-streaming execution loop dispatches through `self.runtime.llm.send()` → `ir::ModelResponse`. Tool dispatch uses `ContentPart::ToolCall`. `accumulate_response_usage`/`emit_tokens_consumed` accept `&ir::Usage`. |
+| ζ-3 streaming + legacy deletion | ⏳ | Streaming agent migration to `LlmCall::send_stream()` + `ModelStreamChunk`. Then delete `src/client/adapter/`, `src/client/messages/`, legacy `Client`/`ClientBuilder`, `streaming.rs`, `batch.rs`, `files.rs`. |
 | η `src/types/*` cleanup + `src/client/` → `src/provider/` rename | ⏳ | Delete `types/{message,response,content,document}.rs`. Keep `types/tool/`. |
 | θ `src/ir/compat.rs` deletion | ⏳ | Final compat bridge removal + grep guards. |
 | ι UX polish | ⏳ | `Agent::quick`, `provider_from_env`, `tracing` span standardisation, `examples/quickstart.rs`. |
