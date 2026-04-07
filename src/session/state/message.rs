@@ -46,7 +46,10 @@ pub struct MessageMetadata {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ToolResultMeta {
-    pub tool_use_id: String,
+    /// Identifier linking back to the original `ContentPart::ToolCall.id`.
+    /// Renamed from `tool_use_id` in Phase 1b-δ to align with the IR's
+    /// `tool_call_id` naming used by every other provider.
+    pub tool_call_id: String,
     pub tool_name: String,
     pub is_error: bool,
     pub duration_ms: Option<u64>,

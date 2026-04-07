@@ -69,7 +69,10 @@ pub struct ToolStats {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolCallRecord {
-    pub tool_use_id: String,
+    /// Identifier linking back to the original `ContentPart::ToolCall.id`.
+    /// Renamed from `tool_use_id` in Phase 1b-δ to align with the IR's
+    /// `tool_call_id` naming used by every other provider.
+    pub tool_call_id: String,
     pub tool_name: String,
     pub duration_ms: u64,
     pub is_error: bool,
@@ -154,7 +157,13 @@ impl AgentMetrics {
         self.total_cost_usd += cost;
     }
 
-    pub fn record_tool(&mut self, tool_use_id: &str, name: &str, duration_ms: u64, is_error: bool) {
+    pub fn record_tool(
+        &mut self,
+        tool_call_id: &str,
+        name: &str,
+        duration_ms: u64,
+        is_error: bool,
+    ) {
         self.tool_calls += 1;
         let stats = self.tool_stats.entry(name.to_string()).or_default();
         stats.calls += 1;
@@ -164,7 +173,7 @@ impl AgentMetrics {
             self.errors += 1;
         }
         self.tool_call_records.push(ToolCallRecord {
-            tool_use_id: tool_use_id.to_string(),
+            tool_call_id: tool_call_id.to_string(),
             tool_name: name.to_string(),
             duration_ms,
             is_error,
@@ -302,7 +311,7 @@ mod tests {
         assert_eq!(metrics.tool_stats.get("Read").unwrap().total_time_ms, 80);
         assert_eq!(metrics.tool_stats.get("Bash").unwrap().errors, 1);
         assert_eq!(metrics.tool_call_records.len(), 3);
-        assert_eq!(metrics.tool_call_records[0].tool_use_id, "tu_1");
+        assert_eq!(metrics.tool_call_records[0].tool_call_id, "tu_1");
         assert!(metrics.tool_call_records[2].is_error);
     }
 
