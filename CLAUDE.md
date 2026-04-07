@@ -37,6 +37,30 @@ cargo build --all-features                      # full + multimedia
 - The internal IR (`src/ir/`) is provider-neutral. Codecs translate between IR and wire format, emitting `ModelWarning` for lossy encodes. The old `src/types/` and `src/client/adapter/` are legacy and will be removed once all consumers migrate to IR.
 - Errors use typed enums (`SessionError`, `McpError`, `GraphError`). `Error::Provider { kind, hint }` carries actionable hints for well-known failures. `Error::Config(String)` is intentional for developer-facing messages.
 - Feature flags gate optional dependencies. Core SDK has zero cloud/DB deps.
+- **Token counts are `u64` end-to-end** (Phase 1b-γ). `ir::Usage`, `AgentMetrics.{input,output,cache_*}_tokens`, `ExecutionMetadata.usage`, `TaskExecutionSummary.usage`, and `pricing::PricingTable::calculate` all operate on `u64` / `ir::Usage`. Legacy `types::Usage` (u32) survives only as the on-the-wire DTO for the legacy adapter response shape and is converted at the boundary via `From<&types::Usage> for ir::Usage` in `src/ir/compat.rs` (deleted with the rest of compat in Phase θ).
+- **Tool call linkage uses `tool_call_id`** (Phase 1b-δ). The legacy `tool_use_id` field name lives only in `src/types/` and on-the-wire Anthropic payloads. New code (`ToolCallRecord`, `ToolResultMeta`, graph node payloads, OTel spans) all use `tool_call_id`.
+
+## Phase 1b migration status
+
+The migration of the agent runtime / session layer to the new IR is in progress.
+
+| Phase | Status | Notes |
+|---|---|---|
+| α Setup | ✅ | baseline 1396 lib + 48 codec_contract pass |
+| β IR defect prepass | ✅ | u64 unification, `Continuation::OpenAiResponses` rename, `idempotency_key`, `Usage::billable_input_tokens`, `Usage::add` invariant guard, `ToolIdSemantics::SynthesizedByName` removed |
+| γ-1 pricing IR-native | ✅ | `pricing.calculate(&ir::Usage)`, `BudgetTracker::record(&ir::Usage)`, `TenantBudget::record(&ir::Usage)` |
+| γ-2 truncation fix | ✅ | `ExecutionMetadata.usage` and `TaskExecutionSummary.usage` migrated to `ir::Usage` (u64). The CRITICAL u64→u32 truncation at the old `task_registry::execution_summary` is gone. |
+| γ-3 AgentMetrics widen | ✅ | `AgentMetrics.{input,output,cache_*}_tokens` widened to u64. |
+| δ naming alignment | ✅ partial | `tool_use_id` → `tool_call_id` rename through `ToolCallRecord`, `ToolResultMeta`, `record_tool` param, graph node JSON payloads, `tool_execute_span`. |
+| δ Message/ContentPart cascade | ⏳ | Largest remaining cascade. Requires a single dedicated session: type-alias swap (`types::Message` → `pub use ir::Message`, etc.) followed by ~150 pattern-match fixes across `agent/`, `session/`, `graph/replay`, `session/compact`, `session/persistence_*`. CacheConfig and ServerToolsConfig deletion belong here. |
+| ε FinishReason + ApiResponse | ⏳ | Replace `types::StopReason`, `types::ApiResponse` with IR equivalents. |
+| ζ Client/adapter dismantling + LlmCall trait | ⏳ | Delete `src/client/adapter/`, `src/client/messages/`, `provider_profile.rs`, `recovery.rs`, `streaming.rs`, `batch.rs`, `files.rs`. Delete `Client` / `ClientBuilder`. Introduce `LlmCall` trait + `RetryingClient`/`FallingBackClient`/`CircuitBrokenClient` decorators. Delete `Auth::vertex/bedrock/foundry`. |
+| η `src/types/*` cleanup + `src/client/` → `src/provider/` rename | ⏳ | Delete `types/{message,response,content,document}.rs`. Keep `types/tool/`. |
+| θ `src/ir/compat.rs` deletion | ⏳ | Final compat bridge removal + grep guards. |
+| ι UX polish | ⏳ | `Agent::quick`, `provider_from_env`, `tracing` span standardisation, `examples/quickstart.rs`. |
+| κ Final verification | ⏳ | `cargo test --lib` ≥ 1396, `codec_contract` ≥ 63, clippy 0 warnings, vertex_gemini live calls. |
+
+The locked plan lives in `/Users/mac/.claude/plans/phase1b-final.md`.
 
 ## Key Areas
 
