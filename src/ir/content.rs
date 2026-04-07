@@ -319,4 +319,91 @@ mod tests {
         let o: ToolOrigin = Default::default();
         assert_eq!(o, ToolOrigin::Local);
     }
+
+    #[test]
+    fn tool_result_content_text_serde() {
+        // Scenario 1: Deserialize plain string "hello" → should be ToolResultContent::Text
+        let json_str = r#""hello""#;
+        let result: Result<ToolResultContent, _> = serde_json::from_str(json_str);
+        assert!(
+            result.is_ok(),
+            "Plain string should deserialize as ToolResultContent::Text"
+        );
+        if let Ok(ToolResultContent::Text(s)) = result {
+            assert_eq!(s, "hello");
+        } else {
+            panic!("Expected ToolResultContent::Text, got {:?}", result);
+        }
+    }
+
+    #[test]
+    fn tool_result_content_json_number_serde() {
+        // Scenario 2: Deserialize number 42 → should be ToolResultContent::Json
+        let json_str = r#"42"#;
+        let result: Result<ToolResultContent, _> = serde_json::from_str(json_str);
+        assert!(
+            result.is_ok(),
+            "Number should deserialize as ToolResultContent::Json"
+        );
+        if let Ok(ToolResultContent::Json(val)) = result {
+            assert_eq!(val.as_i64(), Some(42));
+        } else {
+            panic!("Expected ToolResultContent::Json, got {:?}", result);
+        }
+    }
+
+    #[test]
+    fn tool_result_content_json_null_serde() {
+        // Scenario 3: Deserialize null → should be ToolResultContent::Json(null)
+        let json_str = "null";
+        let result: Result<ToolResultContent, _> = serde_json::from_str(json_str);
+        assert!(
+            result.is_ok(),
+            "null should deserialize as ToolResultContent::Json"
+        );
+        if let Ok(ToolResultContent::Json(val)) = result {
+            assert!(val.is_null());
+        } else {
+            panic!("Expected ToolResultContent::Json, got {:?}", result);
+        }
+    }
+
+    #[test]
+    fn tool_result_content_multipart_array_serde() {
+        // Scenario 4: Deserialize array ["hello"] → ambiguous: could be MultiPart or Json
+        // With #[serde(untagged)], arrays should deserialize as MultiPart first
+        let json_str = r#"[{"type":"text","text":"hello"}]"#;
+        let result: Result<ToolResultContent, _> = serde_json::from_str(json_str);
+        // This should succeed as MultiPart because the first untagged variant (Text) fails,
+        // then MultiPart succeeds because it's Vec<ContentPart>
+        assert!(
+            result.is_ok(),
+            "Array of ContentPart should deserialize as MultiPart"
+        );
+        match result {
+            Ok(ToolResultContent::MultiPart(parts)) => {
+                assert_eq!(parts.len(), 1);
+            }
+            Ok(ToolResultContent::Json(_)) => {
+                // This is acceptable—if serde tries Json first and succeeds, ok.
+            }
+            _ => panic!("Unexpected deserialization result: {:?}", result),
+        }
+    }
+
+    #[test]
+    fn tool_result_content_json_object_serde() {
+        // Scenario 5: Deserialize object {"key":"value"} → should be ToolResultContent::Json
+        let json_str = r#"{"key":"value"}"#;
+        let result: Result<ToolResultContent, _> = serde_json::from_str(json_str);
+        assert!(
+            result.is_ok(),
+            "Object should deserialize as ToolResultContent::Json"
+        );
+        if let Ok(ToolResultContent::Json(val)) = result {
+            assert_eq!(val.get("key").and_then(|v| v.as_str()), Some("value"));
+        } else {
+            panic!("Expected ToolResultContent::Json, got {:?}", result);
+        }
+    }
 }

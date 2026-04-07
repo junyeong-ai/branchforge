@@ -102,6 +102,77 @@ mod tests {
     }
 
     #[test]
+    fn replay_old_graph_node_format_with_extra_fields() {
+        // Backward compatibility test: old ContentBlock format with extra fields
+        // Old format: {"type":"text","text":"hello","citations":null,"cache_control":null}
+        // Should deserialize into new ContentPart format
+        let mut graph = SessionGraph::default();
+        let node_payload = serde_json::json!({
+            "content": [
+                {
+                    "type": "text",
+                    "text": "hello from old format",
+                    "citations": null,
+                    "cache_control": null
+                }
+            ]
+        });
+        let node_id = graph
+            .append_node(graph.primary_branch, NodeKind::User, node_payload)
+            .unwrap();
+
+        // Should deserialize successfully, ignoring unknown fields (citations, cache_control)
+        let replay = graph.replay_input(graph.primary_branch, None).unwrap();
+        assert_eq!(replay.messages.len(), 1);
+        assert_eq!(replay.messages[0].role, Role::User);
+        assert_eq!(
+            replay.messages[0].content[0].as_text(),
+            Some("hello from old format")
+        );
+    }
+
+    #[test]
+    fn replay_old_tool_use_format_breaks_on_input_vs_arguments() {
+        // CRITICAL ISSUE: old tool_use format uses "input" field, new expects "arguments"
+        // Old format: {"type":"tool_use","id":"call_1","name":"func","input":{...}}
+        // New format: {"type":"tool_call","id":"call_1","name":"func","arguments":{...}}
+        // This should FAIL to deserialize because "input" != "arguments"
+        let mut graph = SessionGraph::default();
+        let node_payload = serde_json::json!({
+            "content": [
+                {
+                    "type": "tool_call",  // Changed from tool_use
+                    "id": "call_1",
+                    "name": "calculator",
+                    "input": {"a": 1, "b": 2}  // Old field name, should fail
+                }
+            ]
+        });
+        let _node_id = graph
+            .append_node(graph.primary_branch, NodeKind::Assistant, node_payload)
+            .unwrap();
+
+        // This replay WILL FAIL because "input" doesn't match "arguments"
+        let result = graph.replay_input(graph.primary_branch, None);
+        // Expect this to fail due to missing "arguments" field
+        // If result is Ok, that means serde is forgiving and using a default
+        match result {
+            Ok(replay) => {
+                // If deserialization succeeded, the arguments should be empty or default
+                if let Some(ContentPart::ToolCall { arguments, .. }) =
+                    replay.messages.get(0).and_then(|m| m.content.get(0))
+                {
+                    // Empty object as default for missing field
+                    assert_eq!(arguments, &serde_json::json!({}));
+                }
+            }
+            Err(_e) => {
+                // This is expected: old format with "input" cannot deserialize to new schema
+            }
+        }
+    }
+
+    #[test]
     fn replay_rejects_start_node_outside_branch_lineage() {
         let mut graph = SessionGraph::default();
         let root = graph

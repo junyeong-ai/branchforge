@@ -113,6 +113,41 @@ impl RequestBuilder {
             }
         }
 
+        // Build cache control from config
+        let cache_control = if self.cache_config.strategy.cache_static() {
+            let ttl_str = match self.cache_config.static_ttl {
+                CacheTtl::FiveMinutes => "5m",
+                CacheTtl::OneHour => "1h",
+            };
+            Some(ir::CacheControl {
+                mode: ir::CacheControlMode::SystemAndConversation,
+                ttl: Some(ttl_str.to_string()),
+            })
+        } else {
+            None
+        };
+
+        // Collect beta features for Anthropic
+        let mut beta_features = Vec::new();
+        if self.tool_surface.is_allowed("WebSearch") || self.tool_surface.is_allowed("WebFetch") {
+            beta_features.push("web-search-2025-03-05".to_string());
+        }
+
+        let anthropic = if cache_control.is_some() || !beta_features.is_empty() {
+            Some(ir::AnthropicOptions {
+                cache_control,
+                beta_features,
+                service_tier: None,
+            })
+        } else {
+            None
+        };
+
+        let provider_options = ir::ProviderOptions {
+            anthropic,
+            ..Default::default()
+        };
+
         ModelRequest {
             model: self.model.clone(),
             messages,
@@ -123,7 +158,7 @@ impl RequestBuilder {
                 max_output_tokens: Some(self.max_tokens),
                 ..Default::default()
             },
-            provider_options: ir::ProviderOptions::default(),
+            provider_options,
             continuation: None,
             metadata,
             idempotency_key: None,
