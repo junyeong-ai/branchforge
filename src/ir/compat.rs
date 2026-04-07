@@ -117,6 +117,39 @@ impl From<ir::ModelResponse> for types::ApiResponse {
 }
 
 // =============================================================================
+// types::Usage → ir::Usage
+// =============================================================================
+//
+// One-way bridge used during Phase 1b cascade. The legacy `types::Usage`
+// (u32 fields) is widened into the IR's `Usage` (u64 fields). Server tool
+// counts are folded into `ServerToolInvocations`. Deleted in Phase ε along
+// with `types::Usage` itself.
+
+impl From<&types::Usage> for ir::Usage {
+    fn from(u: &types::Usage) -> Self {
+        let server_tool_invocations =
+            u.server_tool_use
+                .as_ref()
+                .map(|s| ir::ServerToolInvocations {
+                    web_search: (s.web_search_requests > 0).then_some(s.web_search_requests as u64),
+                    web_fetch: (s.web_fetch_requests > 0).then_some(s.web_fetch_requests as u64),
+                    ..Default::default()
+                });
+        Self {
+            input_tokens: u.input_tokens as u64,
+            output_tokens: u.output_tokens as u64,
+            cached_input_tokens: u.cache_read_input_tokens.map(|v| v as u64),
+            cache_creation_tokens: u.cache_creation_input_tokens.map(|v| v as u64),
+            reasoning_tokens: None,
+            audio_input_tokens: None,
+            audio_output_tokens: None,
+            server_tool_invocations,
+            raw: None,
+        }
+    }
+}
+
+// =============================================================================
 // ir::Usage → types::TokenUsage
 // =============================================================================
 

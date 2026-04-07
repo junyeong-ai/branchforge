@@ -178,7 +178,8 @@ impl Usage {
     }
 
     pub fn estimated_cost(&self, model: &str) -> Decimal {
-        crate::budget::pricing::global_pricing_table().calculate(model, self)
+        let ir_usage: crate::ir::Usage = self.into();
+        crate::budget::pricing::global_pricing_table().calculate(model, &ir_usage)
     }
 
     /// Get server-side web search request count.

@@ -33,7 +33,7 @@ impl TenantBudget {
         self
     }
 
-    pub fn record(&self, model: &str, usage: &crate::types::Usage) -> Decimal {
+    pub fn record(&self, model: &str, usage: &crate::ir::Usage) -> Decimal {
         let cost = global_pricing_table().calculate(model, usage);
         let cost_bits: u64 = (cost * COST_SCALE_FACTOR).try_into().unwrap_or(u64::MAX);
         self.used_cost_usd.fetch_add(cost_bits, Ordering::Relaxed);
@@ -107,7 +107,7 @@ impl TenantBudgetManager {
         &self,
         tenant_id: &str,
         model: &str,
-        usage: &crate::types::Usage,
+        usage: &crate::ir::Usage,
     ) -> Option<Decimal> {
         self.budgets
             .get(tenant_id)
@@ -155,7 +155,7 @@ pub struct TenantBudgetSummary {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::Usage;
+    use crate::ir::Usage;
     use rust_decimal_macros::dec;
 
     #[test]

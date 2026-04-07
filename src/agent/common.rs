@@ -96,11 +96,12 @@ pub(crate) fn accumulate_response_usage(
         metrics.update_server_tool_use_from_api(server_usage);
     }
 
-    let cost = budget_tracker.record(model, usage);
+    let ir_usage: crate::ir::Usage = usage.into();
+    let cost = budget_tracker.record(model, &ir_usage);
     metrics.add_cost(cost);
 
     if let Some(tenant_budget) = tenant_budget {
-        tenant_budget.record(model, usage);
+        tenant_budget.record(model, &ir_usage);
     }
 
     cost
@@ -242,7 +243,8 @@ pub(crate) async fn accumulate_inner_usage(
             .unwrap_or(DEFAULT_FALLBACK_MODEL);
         metrics.record_model_usage(inner_model, inner_usage);
 
-        let inner_cost = budget_tracker.record(inner_model, inner_usage);
+        let inner_ir_usage: crate::ir::Usage = inner_usage.into();
+        let inner_cost = budget_tracker.record(inner_model, &inner_ir_usage);
         metrics.add_cost(inner_cost);
 
         debug!(

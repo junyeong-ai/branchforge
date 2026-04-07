@@ -79,7 +79,7 @@ impl BudgetTracker {
         Self::default()
     }
 
-    pub fn record(&self, model: &str, usage: &crate::types::Usage) -> Decimal {
+    pub fn record(&self, model: &str, usage: &crate::ir::Usage) -> Decimal {
         let cost = self.pricing.calculate(model, usage);
         let cost_bits = (cost * COST_SCALE_FACTOR).try_into().unwrap_or(u64::MAX);
         self.used_cost_bits.fetch_add(cost_bits, Ordering::Relaxed);
@@ -168,7 +168,7 @@ impl BudgetStatus {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::Usage;
+    use crate::ir::Usage;
     use rust_decimal_macros::dec;
 
     #[test]
