@@ -17,7 +17,9 @@ mod token_cache;
 
 #[cfg(feature = "aws")]
 pub(crate) mod bedrock;
-#[cfg(feature = "aws")]
+// `bedrock_stream` is a pure binary frame decoder with no aws-crate
+// dependencies; the new client/transport stack uses it unconditionally,
+// so it lives outside the `aws` feature gate.
 pub(crate) mod bedrock_stream;
 #[cfg(feature = "azure")]
 mod foundry;

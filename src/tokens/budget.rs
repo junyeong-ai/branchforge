@@ -35,13 +35,13 @@ impl TokenBudget {
     }
 }
 
-impl From<&crate::types::Usage> for TokenBudget {
-    fn from(usage: &crate::types::Usage) -> Self {
+impl From<&crate::ir::Usage> for TokenBudget {
+    fn from(usage: &crate::ir::Usage) -> Self {
         Self {
-            input_tokens: usage.input_tokens as u64,
-            cache_read_tokens: usage.cache_read_input_tokens.unwrap_or(0) as u64,
-            cache_creation_tokens: usage.cache_creation_input_tokens.unwrap_or(0) as u64,
-            output_tokens: usage.output_tokens as u64,
+            input_tokens: usage.input_tokens,
+            cache_read_tokens: usage.cached_input_tokens.unwrap_or(0),
+            cache_creation_tokens: usage.cache_creation_tokens.unwrap_or(0),
+            output_tokens: usage.output_tokens,
         }
     }
 }

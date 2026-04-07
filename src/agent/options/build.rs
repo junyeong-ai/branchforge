@@ -614,7 +614,19 @@ impl AgentBuilder {
             builder = builder.fallback_model(model);
         }
 
-        builder.build().await
+        let mut client = builder.build().await?;
+
+        // Wire in ProviderClient from the new codec/transport stack.
+        if let Some(pc) = self.provider_client.take() {
+            tracing::info!(
+                codec = pc.codec_id(),
+                transport = pc.transport_id(),
+                "Agent using new ProviderClient backend"
+            );
+            client = client.with_provider_client(pc);
+        }
+
+        Ok(client)
     }
 }
 

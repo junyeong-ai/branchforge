@@ -103,6 +103,10 @@ pub struct AgentBuilder {
 
     #[cfg(feature = "plugins")]
     pub(super) plugin_dirs: Vec<PathBuf>,
+
+    /// Pre-built ProviderClient from the new codec/transport stack. When
+    /// set, the Client dispatches through it instead of the old adapter.
+    pub(super) provider_client: Option<crate::client::provider_client::ProviderClient>,
 }
 
 impl AgentBuilder {
@@ -125,6 +129,27 @@ impl AgentBuilder {
     /// Creates a new builder with default configuration.
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Set a pre-built [`crate::ProviderClient`] from the new
+    /// codec/transport stack. When set, the agent dispatches all LLM calls
+    /// through it instead of the old `ProviderAdapter`. This is the
+    /// recommended way to use the new multi-provider stack.
+    ///
+    /// ```rust,no_run
+    /// # async fn example() -> branchforge::Result<()> {
+    /// let pc = branchforge::Preset::VertexGemini.build_from_env().await?;
+    /// let agent = branchforge::Agent::builder()
+    ///     .provider_client(pc)
+    ///     .model("gemini-2.5-flash")
+    ///     .build()
+    ///     .await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn provider_client(mut self, pc: crate::client::provider_client::ProviderClient) -> Self {
+        self.provider_client = Some(pc);
+        self
     }
 
     // =========================================================================

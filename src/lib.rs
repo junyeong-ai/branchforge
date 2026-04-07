@@ -66,6 +66,7 @@ pub mod context_scope;
 pub mod events;
 pub mod graph;
 pub mod hooks;
+pub mod ir;
 pub mod mcp;
 pub mod models;
 pub mod observability;
@@ -97,6 +98,24 @@ pub use auth::{CredentialKind, CredentialRecord};
 pub use authorization::{ExecutionMode, ToolPolicy};
 pub use client::{CapabilitySupport, ProviderProfile};
 pub use client::{Client, ClientBuilder};
+
+// New codec/transport stack public surface. The old monolithic
+// `Client + ProviderAdapter` is still re-exported above; the new stack
+// lives alongside it during Phase 1b consumer migration. Both are
+// production-quality. New code should prefer the items below.
+pub use client::codec::{
+    AnthropicMessagesCodec, BedrockConverseCodec, EncodedRequest, EndpointShape,
+    GeminiGenerateCodec, InvocationMode, ModelCodec, OpenAiChatCodec, OpenAiResponsesCodec,
+};
+pub use client::preset::{Preset, from_env as preset_from_env};
+pub use client::provider_client::{ChunkStream, ProviderClient};
+#[cfg(feature = "aws")]
+pub use client::transport::BedrockTransport;
+#[cfg(feature = "azure")]
+pub use client::transport::FoundryTransport;
+#[cfg(feature = "gcp")]
+pub use client::transport::VertexTransport;
+pub use client::transport::{DirectAuth, DirectTransport, Endpoint, ModelTransport};
 pub use context::PromptFrame;
 pub use context_scope::{ContextScope, SharedContextScope};
 pub use graph::{
@@ -290,6 +309,53 @@ pub enum Error {
     #[cfg(feature = "plugins")]
     #[error("Plugin error: {0}")]
     Plugin(#[from] plugins::PluginError),
+
+    /// Classified provider error from the new codec/transport stack.
+    /// Carries an actionable hint where the failure mode is well-known.
+    #[error("{provider} {kind:?}: {message}{}", hint.map(|h| format!(" — hint: {h}")).unwrap_or_default())]
+    Provider {
+        provider: &'static str,
+        kind: error::ProviderErrorKind,
+        message: String,
+        hint: Option<&'static str>,
+        retryable: bool,
+        status: Option<u16>,
+    },
+
+    /// A `(codec, transport)` composition is invalid (pin violation,
+    /// unsupported codec on the transport, …). Raised at `ProviderClient`
+    /// construction time.
+    #[error("invalid codec/transport composition: {codec} × {transport}: {reason}")]
+    InvalidComposition {
+        codec: &'static str,
+        transport: &'static str,
+        reason: &'static str,
+    },
+}
+
+/// Error helpers for the new codec/transport stack.
+pub mod error {
+    /// Classified kind of a [`super::Error::Provider`] failure.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub enum ProviderErrorKind {
+        /// Authentication or authorization failure (401/403, expired token).
+        Auth,
+        /// Quota project missing or quota exhausted (Vertex
+        /// `x-goog-user-project`, OpenAI org quotas).
+        Quota,
+        /// 429 — rate limited; should be retried with backoff.
+        RateLimit,
+        /// 4xx other than auth/rate-limit.
+        BadRequest,
+        /// 5xx server error.
+        Server,
+        /// Network / TLS / DNS failure.
+        Network,
+        /// Request was cancelled before completion.
+        Cancelled,
+        /// Output blocked by a content filter / safety policy.
+        ContentFilter,
+    }
 }
 
 /// Error category for unified error handling.
@@ -355,6 +421,19 @@ impl Error {
             | Error::Tool(_)
             | Error::Api { .. }
             | Error::NotSupported { .. } => ErrorCategory::Internal,
+
+            Error::Provider { kind, .. } => match kind {
+                error::ProviderErrorKind::Auth | error::ProviderErrorKind::Quota => {
+                    ErrorCategory::Authorization
+                }
+                error::ProviderErrorKind::RateLimit
+                | error::ProviderErrorKind::Server
+                | error::ProviderErrorKind::Network => ErrorCategory::Transient,
+                error::ProviderErrorKind::BadRequest
+                | error::ProviderErrorKind::ContentFilter
+                | error::ProviderErrorKind::Cancelled => ErrorCategory::Configuration,
+            },
+            Error::InvalidComposition { .. } => ErrorCategory::Configuration,
 
             #[cfg(feature = "plugins")]
             Error::Plugin(_) => ErrorCategory::Configuration,

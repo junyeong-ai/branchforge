@@ -198,6 +198,7 @@ impl VertexConfig {
                 .ok(),
             region: env::var("CLOUD_ML_REGION")
                 .or_else(|_| env::var("GOOGLE_CLOUD_REGION"))
+                .or_else(|_| env::var("GOOGLE_CLOUD_LOCATION"))
                 .ok(),
             model_regions,
             enable_1m_context: is_flag_set("VERTEX_ENABLE_1M_CONTEXT"),

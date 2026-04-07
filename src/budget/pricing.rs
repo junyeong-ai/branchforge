@@ -89,6 +89,20 @@ impl ModelPricing {
             usage.cache_creation_input_tokens.unwrap_or(0) as u64,
         )
     }
+
+    /// Calculate cost from a neutral [`crate::ir::Usage`] value.
+    ///
+    /// Reads the typed `cached_input_tokens` / `cache_creation_tokens` /
+    /// `reasoning_tokens` fields directly. Reasoning tokens are billed at
+    /// the standard output rate (every provider that exposes them follows
+    /// that convention today).
+    pub fn calculate_ir(&self, usage: &crate::ir::Usage) -> Decimal {
+        let cache_read = usage.cached_input_tokens.unwrap_or(0);
+        let cache_write = usage.cache_creation_tokens.unwrap_or(0);
+        let reasoning = usage.reasoning_tokens.unwrap_or(0);
+        let total_output = usage.output_tokens + reasoning;
+        self.calculate_raw(usage.input_tokens, total_output, cache_read, cache_write)
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -111,6 +125,14 @@ impl PricingTable {
         self.get(model).calculate(usage)
     }
 
+    /// IR-native variant of [`Self::calculate`]. Looks up the model and
+    /// charges the call against [`crate::ir::Usage`] using the typed
+    /// `cached_input_tokens` / `cache_creation_tokens` / `reasoning_tokens`
+    /// fields.
+    pub fn calculate_ir(&self, model: &str, usage: &crate::ir::Usage) -> Decimal {
+        self.get(model).calculate_ir(usage)
+    }
+
     /// Calculate cost using provider-aware model normalization.
     ///
     /// This normalizes the model name based on the provider before looking up
@@ -119,11 +141,11 @@ impl PricingTable {
     pub fn calculate_for_provider(
         &self,
         model: &str,
-        usage: &crate::types::Usage,
+        usage: &crate::ir::Usage,
         provider: &UsageProvider,
     ) -> Decimal {
         let normalized = self.normalize_for_provider(model, provider);
-        self.calculate(&normalized, usage)
+        self.calculate_ir(&normalized, usage)
     }
 
     /// Normalize a model name based on the provider.
@@ -380,30 +402,30 @@ pub fn global_pricing_table() -> &'static PricingTable {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::Usage;
+    use crate::ir::Usage;
 
     #[test]
     fn test_pricing_standard_context() {
         let usage = Usage {
             input_tokens: 100_000,
             output_tokens: 100_000,
-            cache_read_input_tokens: None,
-            cache_creation_input_tokens: None,
+            cached_input_tokens: None,
+            cache_creation_tokens: None,
             ..Default::default()
         };
 
         let table = global_pricing_table();
 
         // Sonnet: 0.1M * $3 + 0.1M * $15 = $0.3 + $1.5 = $1.8
-        let cost = table.calculate("claude-sonnet-4-5", &usage);
+        let cost = table.calculate_ir("claude-sonnet-4-5", &usage);
         assert_eq!(cost, dec!(1.8));
 
         // Opus: 0.1M * $15 + 0.1M * $75 = $1.5 + $7.5 = $9
-        let cost = table.calculate("claude-opus-4-6", &usage);
+        let cost = table.calculate_ir("claude-opus-4-6", &usage);
         assert_eq!(cost, dec!(9));
 
         // Haiku: 0.1M * $0.80 + 0.1M * $4 = $0.08 + $0.4 = $0.48
-        let cost = table.calculate("claude-haiku-4-5", &usage);
+        let cost = table.calculate_ir("claude-haiku-4-5", &usage);
         assert_eq!(cost, dec!(0.48));
     }
 
@@ -412,23 +434,23 @@ mod tests {
         let usage = Usage {
             input_tokens: 1_000_000,
             output_tokens: 1_000_000,
-            cache_read_input_tokens: None,
-            cache_creation_input_tokens: None,
+            cached_input_tokens: None,
+            cache_creation_tokens: None,
             ..Default::default()
         };
 
         let table = global_pricing_table();
 
         // Sonnet long context (1M > 200K): input 1M * $3 * 2 = $6, output 1M * $15 = $15
-        let cost = table.calculate("claude-sonnet-4-5", &usage);
+        let cost = table.calculate_ir("claude-sonnet-4-5", &usage);
         assert_eq!(cost, dec!(21));
 
         // Opus long context: input 1M * $15 * 2 = $30, output 1M * $75 = $75
-        let cost = table.calculate("claude-opus-4-6", &usage);
+        let cost = table.calculate_ir("claude-opus-4-6", &usage);
         assert_eq!(cost, dec!(105));
 
         // Haiku long context: input 1M * $0.80 * 2 = $1.60, output 1M * $4 = $4
-        let cost = table.calculate("claude-haiku-4-5", &usage);
+        let cost = table.calculate_ir("claude-haiku-4-5", &usage);
         assert_eq!(cost, dec!(5.60));
     }
 
@@ -437,8 +459,8 @@ mod tests {
         let usage = Usage {
             input_tokens: 50_000,
             output_tokens: 10_000,
-            cache_read_input_tokens: Some(50_000),
-            cache_creation_input_tokens: Some(20_000),
+            cached_input_tokens: Some(50_000),
+            cache_creation_tokens: Some(20_000),
             ..Default::default()
         };
 
@@ -446,7 +468,7 @@ mod tests {
         // Standard context (120K < 200K):
         // input: 0.05M * $3 = $0.15, output: 0.01M * $15 = $0.15
         // cache_read: 0.05M * $0.3 = $0.015, cache_write: 0.02M * $3.75 = $0.075
-        let cost = table.calculate("claude-sonnet-4-5", &usage);
+        let cost = table.calculate_ir("claude-sonnet-4-5", &usage);
         assert_eq!(cost, dec!(0.39));
     }
 
@@ -455,8 +477,8 @@ mod tests {
         let usage = Usage {
             input_tokens: 1_000_000,
             output_tokens: 100_000,
-            cache_read_input_tokens: Some(500_000),
-            cache_creation_input_tokens: Some(200_000),
+            cached_input_tokens: Some(500_000),
+            cache_creation_tokens: Some(200_000),
             ..Default::default()
         };
 
@@ -464,7 +486,7 @@ mod tests {
         // Long context (1.7M > 200K), 2x multiplier on input/cache_read/cache_write:
         // input: 1M * $3 * 2 = $6, output: 0.1M * $15 = $1.5
         // cache_read: 0.5M * $0.3 * 2 = $0.3, cache_write: 0.2M * $3.75 * 2 = $1.5
-        let cost = table.calculate("claude-sonnet-4-5", &usage);
+        let cost = table.calculate_ir("claude-sonnet-4-5", &usage);
         assert_eq!(cost, dec!(9.3));
     }
 
@@ -479,7 +501,7 @@ mod tests {
         };
 
         // Sonnet long context (250K > 200K): input 0.25M * $3 * 2 = $1.5, output 0.05M * $15 = $0.75
-        let cost = table.calculate("claude-sonnet-4-5", &usage);
+        let cost = table.calculate_ir("claude-sonnet-4-5", &usage);
         assert_eq!(cost, dec!(2.25));
     }
 
@@ -496,7 +518,7 @@ mod tests {
             ..Default::default()
         };
 
-        let cost = table.calculate("custom", &usage);
+        let cost = table.calculate_ir("custom", &usage);
         assert_eq!(cost, dec!(6));
     }
 
@@ -520,11 +542,11 @@ mod tests {
 
         // GPT-4o: 1M * $2.50 + 1M * $10.00 = $12.50
         // Long context (1M > 200K): input 1M * $2.50 * 2 = $5.00, output 1M * $10.00 = $10.00
-        let cost = table.calculate("gpt-4o", &usage);
+        let cost = table.calculate_ir("gpt-4o", &usage);
         assert_eq!(cost, dec!(15));
 
         // GPT-4o-mini: 1M * $0.15 * 2 + 1M * $0.60 = $0.90
-        let cost = table.calculate("gpt-4o-mini", &usage);
+        let cost = table.calculate_ir("gpt-4o-mini", &usage);
         assert_eq!(cost, dec!(0.90));
 
         // Standard context for o3
@@ -535,11 +557,11 @@ mod tests {
         };
 
         // o3: 0.1M * $10 + 0.1M * $40 = $1 + $4 = $5
-        let cost = table.calculate("o3", &small_usage);
+        let cost = table.calculate_ir("o3", &small_usage);
         assert_eq!(cost, dec!(5));
 
         // o3-mini: 0.1M * $1.10 + 0.1M * $4.40 = $0.11 + $0.44 = $0.55
-        let cost = table.calculate("o3-mini", &small_usage);
+        let cost = table.calculate_ir("o3-mini", &small_usage);
         assert_eq!(cost, dec!(0.55));
     }
 
@@ -554,15 +576,15 @@ mod tests {
         };
 
         // Gemini 2.0 Flash: 0.1M * $0.10 + 0.1M * $0.40 = $0.01 + $0.04 = $0.05
-        let cost = table.calculate("gemini-2.0-flash", &usage);
+        let cost = table.calculate_ir("gemini-2.0-flash", &usage);
         assert_eq!(cost, dec!(0.05));
 
         // Gemini 2.5 Pro: 0.1M * $1.25 + 0.1M * $10 = $0.125 + $1 = $1.125
-        let cost = table.calculate("gemini-2.5-pro", &usage);
+        let cost = table.calculate_ir("gemini-2.5-pro", &usage);
         assert_eq!(cost, dec!(1.125));
 
         // Gemini 2.0 Flash Lite: 0.1M * $0.075 + 0.1M * $0.30 = $0.0075 + $0.03 = $0.0375
-        let cost = table.calculate("gemini-2.0-flash-lite", &usage);
+        let cost = table.calculate_ir("gemini-2.0-flash-lite", &usage);
         assert_eq!(cost, dec!(0.0375));
     }
 
@@ -579,19 +601,19 @@ mod tests {
         // OpenAI provider with date suffix should normalize
         let cost =
             table.calculate_for_provider("gpt-4o-2024-08-06", &usage, &UsageProvider::OpenAi);
-        let expected = table.calculate("gpt-4o", &usage);
+        let expected = table.calculate_ir("gpt-4o", &usage);
         assert_eq!(cost, expected);
 
         // Gemini provider with models/ prefix should normalize
         let cost =
             table.calculate_for_provider("models/gemini-2.0-flash", &usage, &UsageProvider::Gemini);
-        let expected = table.calculate("gemini-2.0-flash", &usage);
+        let expected = table.calculate_ir("gemini-2.0-flash", &usage);
         assert_eq!(cost, expected);
 
         // Anthropic provider should still work as before
         let cost =
             table.calculate_for_provider("claude-sonnet-4-5", &usage, &UsageProvider::Anthropic);
-        let expected = table.calculate("claude-sonnet-4-5", &usage);
+        let expected = table.calculate_ir("claude-sonnet-4-5", &usage);
         assert_eq!(cost, expected);
     }
 
@@ -607,7 +629,7 @@ mod tests {
 
         // Strip openai/ prefix
         let cost = table.calculate_for_provider("openai/gpt-4o", &usage, &UsageProvider::OpenAi);
-        let expected = table.calculate("gpt-4o", &usage);
+        let expected = table.calculate_ir("gpt-4o", &usage);
         assert_eq!(cost, expected);
     }
 
@@ -635,16 +657,16 @@ mod tests {
         };
 
         // Anthropic models still work
-        let cost = table.calculate("claude-sonnet-4-5", &usage);
+        let cost = table.calculate_ir("claude-sonnet-4-5", &usage);
         assert_eq!(cost, dec!(1.8));
 
         // OpenAI models work
-        let cost = table.calculate("gpt-4o", &usage);
+        let cost = table.calculate_ir("gpt-4o", &usage);
         // 0.1M * $2.50 + 0.1M * $10 = $0.25 + $1 = $1.25
         assert_eq!(cost, dec!(1.25));
 
         // Gemini models work
-        let cost = table.calculate("gemini-2.0-flash", &usage);
+        let cost = table.calculate_ir("gemini-2.0-flash", &usage);
         // 0.1M * $0.10 + 0.1M * $0.40 = $0.01 + $0.04 = $0.05
         assert_eq!(cost, dec!(0.05));
     }
@@ -657,21 +679,21 @@ mod tests {
         let usage = Usage {
             input_tokens: 100_000,
             output_tokens: 100_000,
-            cache_read_input_tokens: None,
-            cache_creation_input_tokens: None,
+            cached_input_tokens: None,
+            cache_creation_tokens: None,
             ..Default::default()
         };
 
         // Sonnet: 0.1M * $3 + 0.1M * $15 = $0.3 + $1.5 = $1.8
-        let cost = table.calculate("claude-sonnet-4-5", &usage);
+        let cost = table.calculate_ir("claude-sonnet-4-5", &usage);
         assert_eq!(cost, dec!(1.8));
 
         // Opus: 0.1M * $15 + 0.1M * $75 = $1.5 + $7.5 = $9
-        let cost = table.calculate("claude-opus-4-6", &usage);
+        let cost = table.calculate_ir("claude-opus-4-6", &usage);
         assert_eq!(cost, dec!(9));
 
         // Haiku: 0.1M * $0.80 + 0.1M * $4 = $0.08 + $0.4 = $0.48
-        let cost = table.calculate("claude-haiku-4-5", &usage);
+        let cost = table.calculate_ir("claude-haiku-4-5", &usage);
         assert_eq!(cost, dec!(0.48));
     }
 
@@ -682,8 +704,8 @@ mod tests {
         let usage = Usage {
             input_tokens: 100_000,
             output_tokens: 100_000,
-            cache_read_input_tokens: Some(50_000),
-            cache_creation_input_tokens: Some(20_000),
+            cached_input_tokens: Some(50_000),
+            cache_creation_tokens: Some(20_000),
             ..Default::default()
         };
 
@@ -692,7 +714,7 @@ mod tests {
         // output: 0.1M * $10 = $1
         // cache_read: 0.05M * $0.25 = $0.0125 (10% of input price)
         // cache_write: 0.02M * $3.125 = $0.0625 (125% of input price)
-        let cost = table.calculate("gpt-4o", &usage);
+        let cost = table.calculate_ir("gpt-4o", &usage);
         assert_eq!(cost, dec!(1.325));
     }
 
@@ -714,5 +736,76 @@ mod tests {
     fn test_usage_provider_default() {
         let provider = UsageProvider::default();
         assert_eq!(provider, UsageProvider::Anthropic);
+    }
+
+    // =========================================================================
+    // IR-native pricing parity tests
+    // =========================================================================
+
+    #[test]
+    fn ir_pricing_matches_raw_pricing_for_equivalent_input() {
+        let pricing = ModelPricing {
+            input_per_mtok: Decimal::from(3),
+            output_per_mtok: Decimal::from(15),
+            cache_read_per_mtok: Decimal::new(3, 1),    // 0.3
+            cache_write_per_mtok: Decimal::new(375, 2), // 3.75
+            long_context_multiplier: Decimal::ONE,
+        };
+        let usage = Usage {
+            input_tokens: 100_000,
+            output_tokens: 5_000,
+            cached_input_tokens: Some(50_000),
+            cache_creation_tokens: Some(20_000),
+            ..Default::default()
+        };
+        assert_eq!(
+            pricing.calculate_ir(&usage),
+            pricing.calculate_raw(100_000, 5_000, 50_000, 20_000),
+        );
+    }
+
+    #[test]
+    fn ir_pricing_charges_reasoning_tokens_at_output_rate() {
+        let pricing = ModelPricing {
+            input_per_mtok: Decimal::ZERO,
+            output_per_mtok: Decimal::from(10),
+            cache_read_per_mtok: Decimal::ZERO,
+            cache_write_per_mtok: Decimal::ZERO,
+            long_context_multiplier: Decimal::ONE,
+        };
+        let usage = Usage {
+            input_tokens: 0,
+            output_tokens: 1_000,
+            reasoning_tokens: Some(2_000),
+            ..Default::default()
+        };
+        // 3000 output-billable tokens × $10/Mtok = $0.03
+        assert_eq!(
+            pricing.calculate_ir(&usage),
+            Decimal::new(3, 2) // 0.03
+        );
+    }
+
+    #[test]
+    fn ir_pricing_table_dispatches_to_model() {
+        let table = PricingTable::builder()
+            .model(
+                "test-model",
+                ModelPricing {
+                    input_per_mtok: Decimal::from(1),
+                    output_per_mtok: Decimal::from(2),
+                    cache_read_per_mtok: Decimal::ZERO,
+                    cache_write_per_mtok: Decimal::ZERO,
+                    long_context_multiplier: Decimal::ONE,
+                },
+            )
+            .build();
+        let usage = Usage {
+            input_tokens: 1_000_000,
+            output_tokens: 1_000_000,
+            ..Default::default()
+        };
+        // 1M × $1 + 1M × $2 = $3
+        assert_eq!(table.calculate_ir("test-model", &usage), Decimal::from(3));
     }
 }

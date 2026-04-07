@@ -106,7 +106,7 @@ impl TokenTracker {
         }
     }
 
-    pub fn record(&mut self, usage: &crate::types::Usage) {
+    pub fn record(&mut self, usage: &crate::ir::Usage) {
         let budget = TokenBudget::from(usage);
         self.last_turn = budget;
         self.cumulative.add(&budget);

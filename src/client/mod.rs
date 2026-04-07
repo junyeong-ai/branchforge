@@ -2,16 +2,20 @@
 
 pub mod adapter;
 pub mod batch;
+pub mod codec;
 pub mod fallback;
 pub mod files;
 pub mod gateway;
 pub mod messages;
 pub mod network;
+pub mod preset;
+pub mod provider_client;
 pub mod provider_profile;
 pub mod recovery;
 pub mod resilience;
 pub mod schema;
 mod streaming;
+pub mod transport;
 
 pub use adapter::{
     AnthropicAdapter, BetaConfig, BetaFeature, CloudProvider, DEFAULT_FAST_MODEL, DEFAULT_MODEL,
@@ -106,6 +110,12 @@ pub struct Client {
     retry_policy: RetryPolicy,
     resilience: Option<Arc<Resilience>>,
     event_bus: Option<Arc<EventBus>>,
+    /// New codec/transport backend. When set, `send_with_auth_retry`
+    /// dispatches through `ProviderClient` (converting legacy ↔ IR types
+    /// via `ir::compat`) instead of through the old `ProviderAdapter`.
+    /// Set by `ClientBuilder::provider_client()` or when
+    /// `BRANCHFORGE_PROVIDER` is set.
+    provider_client: Option<provider_client::ProviderClient>,
 }
 
 impl Client {
@@ -123,6 +133,7 @@ impl Client {
             retry_policy: RetryPolicy::default(),
             resilience: None,
             event_bus: None,
+            provider_client: None,
         })
     }
 
@@ -134,6 +145,7 @@ impl Client {
             retry_policy: RetryPolicy::default(),
             resilience: None,
             event_bus: None,
+            provider_client: None,
         }
     }
 
@@ -150,6 +162,14 @@ impl Client {
 
     pub fn fallback(mut self, config: FallbackConfig) -> Self {
         self.fallback_config = Some(config);
+        self
+    }
+
+    /// Attach a new-stack [`provider_client::ProviderClient`] as the
+    /// execution backend. When set, `send_with_auth_retry` dispatches
+    /// through it instead of through the old `ProviderAdapter`.
+    pub fn with_provider_client(mut self, pc: provider_client::ProviderClient) -> Self {
+        self.provider_client = Some(pc);
         self
     }
 
@@ -517,6 +537,13 @@ impl Client {
         &self,
         request: CreateMessageRequest,
     ) -> Result<crate::types::ApiResponse> {
+        // Dispatch through the new ProviderClient backend if set.
+        // Converts legacy request → IR → new codec/transport → IR → legacy response.
+        if let Some(ref pc) = self.provider_client {
+            let ir_req: crate::ir::ModelRequest = (&request).into();
+            return self.send_via_provider_client_with_retry(pc, ir_req).await;
+        }
+
         let mut last_err = None;
         for attempt in 0..=self.retry_policy.max_retries {
             match self.with_auth_retry(|| self.send(request.clone())).await {
@@ -529,6 +556,37 @@ impl Client {
                         max_retries = self.retry_policy.max_retries,
                         delay_ms = delay.as_millis() as u64,
                         "Retrying after transient error"
+                    );
+                    tokio::time::sleep(delay).await;
+                    last_err = Some(e);
+                }
+                Err(e) => return Err(e),
+            }
+        }
+        Err(last_err.expect("retry loop ended without error"))
+    }
+
+    /// Dispatch through the new ProviderClient backend with retry.
+    /// The retry loop mirrors `send_with_auth_retry`'s exponential backoff
+    /// and matches the same `max_retries` / `base_delay` / `max_delay`
+    /// policy.
+    async fn send_via_provider_client_with_retry(
+        &self,
+        pc: &provider_client::ProviderClient,
+        ir_req: crate::ir::ModelRequest,
+    ) -> Result<crate::types::ApiResponse> {
+        let mut last_err = None;
+        for attempt in 0..=self.retry_policy.max_retries {
+            match pc.send(&ir_req).await {
+                Ok(ir_resp) => return Ok(ir_resp.into()),
+                Err(e) if e.is_retryable() && attempt < self.retry_policy.max_retries => {
+                    let delay = self.retry_policy.delay_for(attempt + 1, e.retry_after());
+                    tracing::warn!(
+                        error = %e,
+                        attempt = attempt + 1,
+                        max_retries = self.retry_policy.max_retries,
+                        delay_ms = delay.as_millis() as u64,
+                        "Retrying via ProviderClient after transient error"
                     );
                     tokio::time::sleep(delay).await;
                     last_err = Some(e);
@@ -920,6 +978,7 @@ impl ClientBuilder {
             retry_policy: self.retry_policy.unwrap_or_default(),
             resilience,
             event_bus: self.event_bus,
+            provider_client: None,
         })
     }
 }

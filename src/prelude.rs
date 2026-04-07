@@ -21,9 +21,12 @@ pub use crate::Result;
 pub use crate::Auth;
 pub use crate::Credential;
 
-// Client
+// Client (legacy)
 pub use crate::Client;
 pub use crate::ClientBuilder;
+
+// Client (new codec/transport stack)
+pub use crate::{ChunkStream, ModelCodec, ModelTransport, Preset, ProviderClient};
 
 // Common - Index pattern types
 pub use crate::common::{ContentSource, Index, IndexRegistry, Named, SourceType, ToolRestricted};
@@ -32,7 +35,14 @@ pub use crate::common::{ContentSource, Index, IndexRegistry, Named, SourceType, 
 pub use crate::tools::{ExecutionContext, SchemaTool, Tool, ToolRegistry, ToolSurface};
 pub use crate::types::ToolResult;
 
-// Types
+// IR (provider-neutral types — preferred for new code)
+pub use crate::ir::{
+    ContentPart, FinishReason, ModelRequest, ModelResponse, ModelSettings, ModelStreamChunk,
+    ModelWarning, ProviderCapabilities, ProviderOptions, Support, Usage as IrUsage,
+};
+pub use crate::ir::{Message as IrMessage, Role as IrRole, SystemPrompt as IrSystemPrompt};
+
+// Types (legacy — kept for existing consumers during migration)
 pub use crate::types::{ApiResponse, ContentBlock, Message, Role, StopReason, Usage};
 
 // Session
