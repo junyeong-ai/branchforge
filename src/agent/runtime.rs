@@ -7,7 +7,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::authorization::ExecutionMode;
 use crate::budget::{BudgetTracker, TenantBudget};
-use crate::client::Client;
+use crate::client::{Client, LlmCall};
 use crate::context::PromptOrchestrator;
 use crate::context_scope::SharedContextScope;
 use crate::events::EventBus;
@@ -26,6 +26,11 @@ use super::config::AgentConfig;
 /// and spawn multiple agents from it for server environments.
 pub struct AgentRuntime {
     pub(crate) client: Arc<Client>,
+    /// New IR-native LLM call surface. Prefer this over `client` for all new
+    /// code paths. During migration both fields coexist; `client` is deleted
+    /// once the streaming agent is fully on `llm`.
+    #[allow(dead_code)] // Used once execution loop is migrated
+    pub(crate) llm: Arc<dyn LlmCall>,
     pub(crate) config: Arc<AgentConfig>,
     pub(crate) tools: Arc<ToolRegistry>,
     pub(crate) hooks: Arc<HookManager>,

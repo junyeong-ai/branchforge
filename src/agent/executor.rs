@@ -87,8 +87,11 @@ impl Agent {
             .unwrap_or_else(|| ToolState::new(crate::session::SessionId::new()));
         let session_id: Arc<str> = state.session_id().to_string().into();
 
+        let llm: Arc<dyn crate::client::LlmCall> =
+            Arc::new(crate::client::LegacyBridgeClient::new(Arc::clone(&client)));
         let runtime = Arc::new(AgentRuntime {
             client,
+            llm,
             config,
             tools,
             hooks,

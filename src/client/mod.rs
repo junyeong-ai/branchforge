@@ -6,6 +6,7 @@ pub mod codec;
 pub mod fallback;
 pub mod files;
 pub mod gateway;
+pub mod llm_call;
 pub mod messages;
 pub mod network;
 pub mod preset;
@@ -27,6 +28,9 @@ pub use batch::{
 pub use fallback::{FallbackConfig, FallbackTrigger};
 pub use files::{File, FileData, FileDownload, FileListResponse, FilesClient, UploadFileRequest};
 pub use gateway::GatewayConfig;
+pub use llm_call::{
+    CircuitBrokenClient, FallingBackClient, LegacyBridgeClient, LlmCall, RetryingClient,
+};
 pub use messages::{
     ClearConfig, ClearTrigger, ContextEdit, ContextManagement, CountTokensContextManagement,
     CountTokensRequest, CountTokensResponse, CreateMessageRequest, DEFAULT_MAX_TOKENS, EffortLevel,
