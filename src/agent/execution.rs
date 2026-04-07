@@ -385,8 +385,8 @@ impl Agent {
                 &*self.session_id,
                 &response.model,
                 stop_reason_str,
-                response.usage.input_tokens as u32,
-                response.usage.output_tokens as u32,
+                response.usage.input_tokens,
+                response.usage.output_tokens,
             );
             let _ = self
                 .runtime
@@ -424,19 +424,11 @@ impl Agent {
                 ..Default::default()
             };
 
-            // Convert ir::Usage → types::Usage for session storage
-            let session_usage = Usage {
-                input_tokens: response.usage.input_tokens as u32,
-                output_tokens: response.usage.output_tokens as u32,
-                cache_read_input_tokens: response.usage.cached_input_tokens.map(|v| v as u32),
-                cache_creation_input_tokens: response.usage.cache_creation_tokens.map(|v| v as u32),
-                server_tool_use: None,
-            };
             self.state
                 .with_session_mut(|session| {
                     session.add_assistant_message_with_metadata(
                         response.content.clone(),
-                        Some(session_usage),
+                        Some(response.usage.clone()),
                         assistant_metadata,
                     )
                 })

@@ -528,7 +528,7 @@ impl Session {
     pub fn add_assistant_message(
         &mut self,
         content: Vec<ContentPart>,
-        usage: Option<Usage>,
+        usage: Option<crate::ir::Usage>,
     ) -> SessionResult<()> {
         self.add_assistant_message_with_metadata(content, usage, MessageMetadata::default())
     }
@@ -536,18 +536,20 @@ impl Session {
     pub fn add_assistant_message_with_metadata(
         &mut self,
         content: Vec<ContentPart>,
-        usage: Option<Usage>,
+        usage: Option<crate::ir::Usage>,
         metadata: MessageMetadata,
     ) -> SessionResult<()> {
         let mut msg = SessionMessage::assistant(content);
         msg.metadata = metadata;
         if let Some(u) = usage {
-            self.current_input_tokens = u.context_usage() as u64;
+            self.current_input_tokens = u.input_tokens
+                + u.cached_input_tokens.unwrap_or(0)
+                + u.cache_creation_tokens.unwrap_or(0);
             msg = msg.usage(TokenUsage {
-                input_tokens: u.input_tokens as u64,
-                output_tokens: u.output_tokens as u64,
-                cache_read_input_tokens: u.cache_read_input_tokens.unwrap_or(0) as u64,
-                cache_creation_input_tokens: u.cache_creation_input_tokens.unwrap_or(0) as u64,
+                input_tokens: u.input_tokens,
+                output_tokens: u.output_tokens,
+                cache_read_input_tokens: u.cached_input_tokens.unwrap_or(0),
+                cache_creation_input_tokens: u.cache_creation_tokens.unwrap_or(0),
                 ..Default::default()
             });
         }

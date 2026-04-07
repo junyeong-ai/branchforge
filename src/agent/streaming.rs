@@ -219,6 +219,9 @@ struct StreamState {
     /// Tuple: (tool_call_id, tool_name, json_buffer).
     accumulating_tool_use: Option<(String, String, String)>,
     final_text: String,
+    final_thinking: String,
+    thinking_signature: Option<crate::ir::ReasoningSignature>,
+    finish_reason: Option<crate::ir::FinishReason>,
     total_usage: Usage,
     phase: Phase,
     all_non_retryable: bool,
@@ -250,6 +253,9 @@ impl StreamState {
             recovery_attempts: 0,
             accumulating_tool_use: None,
             final_text: String::new(),
+            final_thinking: String::new(),
+            thinking_signature: None,
+            finish_reason: None,
             total_usage: Usage::default(),
             phase: Phase::StartRequest,
             all_non_retryable: false,
@@ -813,6 +819,7 @@ impl StreamState {
                 StreamPollResult::Event(Ok(AgentEvent::Text { delta: text }))
             }
             ModelStreamChunk::ReasoningDelta { text, .. } => {
+                self.final_thinking.push_str(&text);
                 self.fire_post_stream_chunk_sync(&text, "thinking");
                 if let Some(ref bus) = self.cfg.runtime.event_bus {
                     bus.emit_simple(
@@ -837,8 +844,18 @@ impl StreamState {
             }
             ModelStreamChunk::ToolCallEnd { .. } => {
                 if let Some((id, name, json_buf)) = self.accumulating_tool_use.take() {
-                    let input: serde_json::Value =
-                        serde_json::from_str(&json_buf).unwrap_or(serde_json::json!({}));
+                    let input: serde_json::Value = match serde_json::from_str(&json_buf) {
+                        Ok(v) => v,
+                        Err(e) => {
+                            tracing::warn!(
+                                tool_name = %name,
+                                error = %e,
+                                json_len = json_buf.len(),
+                                "Malformed tool call arguments JSON, defaulting to {{}}"
+                            );
+                            serde_json::json!({})
+                        }
+                    };
                     let tool_use = ToolUseBlock {
                         id,
                         name: name.clone(),
@@ -855,6 +872,8 @@ impl StreamState {
                         );
                     }
                     self.pending_tool_uses.push(tool_use);
+                } else {
+                    tracing::warn!("ToolCallEnd received without matching ToolCallStart — dropped");
                 }
                 StreamPollResult::Continue
             }
@@ -862,7 +881,8 @@ impl StreamState {
                 partial.apply(accumulated_usage);
                 StreamPollResult::Continue
             }
-            ModelStreamChunk::Finish { usage, .. } => {
+            ModelStreamChunk::Finish { reason, usage } => {
+                self.finish_reason = Some(reason);
                 *accumulated_usage = usage;
                 StreamPollResult::StreamEnded
             }
@@ -870,10 +890,13 @@ impl StreamState {
                 self.phase = Phase::Done;
                 StreamPollResult::Event(Err(crate::Error::Stream(message)))
             }
+            ModelStreamChunk::ReasoningSignature { signature, .. } => {
+                self.thinking_signature = Some(signature);
+                StreamPollResult::Continue
+            }
             ModelStreamChunk::Heartbeat
             | ModelStreamChunk::Warning(_)
             | ModelStreamChunk::Source(_)
-            | ModelStreamChunk::ReasoningSignature { .. }
             | ModelStreamChunk::BuiltinToolEvent { .. } => StreamPollResult::Continue,
         }
     }
@@ -900,12 +923,13 @@ impl StreamState {
         accumulated_usage: crate::ir::Usage,
     ) -> Option<crate::Result<AgentEvent>> {
         // Fire PostMessage hook (observation only, fail-open)
+        let stop_reason_str = self.finish_reason.as_ref().map(|r| format!("{:?}", r));
         let post_msg_input = HookInput::post_message(
             &*self.cfg.session_id,
             self.cfg.request_builder.current_model(),
-            None, // stop_reason is not directly available from stream end
-            accumulated_usage.input_tokens as u32,
-            accumulated_usage.output_tokens as u32,
+            stop_reason_str,
+            accumulated_usage.input_tokens,
+            accumulated_usage.output_tokens,
         );
         let _ = self
             .cfg
@@ -945,8 +969,20 @@ impl StreamState {
             .cfg
             .tool_state
             .with_session_mut(|session| -> crate::session::SessionResult<()> {
+                let has_thinking = !self.final_thinking.is_empty();
                 let text_count = if self.final_text.is_empty() { 0 } else { 1 };
-                let mut content = Vec::with_capacity(text_count + self.pending_tool_uses.len());
+                let thinking_count = if has_thinking { 1 } else { 0 };
+                let mut content =
+                    Vec::with_capacity(thinking_count + text_count + self.pending_tool_uses.len());
+                if has_thinking {
+                    content.push(crate::ir::ContentPart::Reasoning {
+                        content: crate::ir::ReasoningContent::Visible {
+                            text: self.final_thinking.clone(),
+                        },
+                        kind: crate::ir::ReasoningKind::FullTrace,
+                        signature: self.thinking_signature.take(),
+                    });
+                }
                 if !self.final_text.is_empty() {
                     content.push(crate::ir::ContentPart::text(self.final_text.clone()));
                 }
@@ -959,20 +995,9 @@ impl StreamState {
                     });
                 }
                 if !content.is_empty() {
-                    let legacy_usage = Usage {
-                        input_tokens: accumulated_usage.input_tokens as u32,
-                        output_tokens: accumulated_usage.output_tokens as u32,
-                        cache_creation_input_tokens: accumulated_usage
-                            .cache_creation_tokens
-                            .map(|v| v as u32),
-                        cache_read_input_tokens: accumulated_usage
-                            .cached_input_tokens
-                            .map(|v| v as u32),
-                        ..Default::default()
-                    };
                     session.add_assistant_message_with_metadata(
                         content,
-                        Some(legacy_usage),
+                        Some(accumulated_usage.clone()),
                         MessageMetadata {
                             structured_output: structured_output.clone(),
                             ..Default::default()
@@ -1360,6 +1385,9 @@ impl StreamState {
             self.finalize_tool_results().await?;
         }
         self.final_text.clear();
+        self.final_thinking.clear();
+        self.thinking_signature = None;
+        self.finish_reason = None;
 
         Ok(events)
     }

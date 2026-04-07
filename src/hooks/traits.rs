@@ -170,8 +170,8 @@ pub enum HookEventData {
     PostMessage {
         model: String,
         stop_reason: Option<String>,
-        input_tokens: u32,
-        output_tokens: u32,
+        input_tokens: u64,
+        output_tokens: u64,
     },
     SessionFork {
         parent_session_id: String,
@@ -406,8 +406,8 @@ impl HookInput {
         session_id: impl Into<String>,
         model: impl Into<String>,
         stop_reason: Option<String>,
-        input_tokens: u32,
-        output_tokens: u32,
+        input_tokens: u64,
+        output_tokens: u64,
     ) -> Self {
         Self::new(
             session_id,
