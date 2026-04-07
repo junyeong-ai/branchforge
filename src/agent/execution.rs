@@ -18,9 +18,10 @@ use super::request::RequestBuilder;
 use super::run_config::RunConfig;
 use crate::graph::ReplayInput;
 use crate::hooks::{HookContext, HookEvent, HookInput};
+use crate::ir::FinishReason;
 use crate::ir::Message;
 use crate::session::{MessageMetadata, ToolExecution};
-use crate::types::{AuthorizationDenied, StopReason, ToolResultBlock, Usage, context_window};
+use crate::types::{AuthorizationDenied, ToolResultBlock, Usage, context_window};
 
 impl Agent {
     fn check_budget(&self) -> crate::Result<()> {
@@ -186,7 +187,7 @@ impl Agent {
 
         let mut metrics = AgentMetrics::default();
         let mut final_text = String::new();
-        let mut final_stop_reason = StopReason::EndTurn;
+        let mut final_stop_reason = FinishReason::Stop;
         let mut dynamic_rules_context = String::new();
         let mut total_usage = Usage::default();
 
@@ -415,7 +416,10 @@ impl Agent {
             );
 
             final_text = response.text();
-            final_stop_reason = response.stop_reason.unwrap_or(StopReason::EndTurn);
+            final_stop_reason = response
+                .stop_reason
+                .map(FinishReason::from)
+                .unwrap_or(FinishReason::Stop);
             let assistant_metadata = MessageMetadata {
                 model: Some(response.model.clone()),
                 request_id: Some(response.id.clone()),

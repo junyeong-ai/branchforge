@@ -25,8 +25,8 @@ use crate::hooks::{HookContext, HookEvent, HookInput};
 use crate::session::ToolExecution;
 use crate::session::{MessageMetadata, SessionAccessScope, SessionManager, ToolState};
 use crate::types::{
-    AuthorizationDenied, ContentBlock, ContentDelta, StopReason, StreamEvent, ToolResultBlock,
-    ToolUseBlock, Usage, context_window,
+    AuthorizationDenied, ContentBlock, ContentDelta, StreamEvent, ToolResultBlock, ToolUseBlock,
+    Usage, context_window,
 };
 
 type BoxedItemStream = Pin<Box<dyn Stream<Item = crate::Result<StreamItem>> + Send>>;
@@ -275,7 +275,7 @@ impl StreamState {
     fn build_result(
         &self,
         iterations: usize,
-        stop_reason: StopReason,
+        stop_reason: crate::ir::FinishReason,
         messages: Vec<crate::ir::Message>,
     ) -> AgentResult {
         emit_cost_report(
@@ -436,7 +436,7 @@ impl StreamState {
                             .await;
                         let result = self.build_result(
                             self.metrics.iterations,
-                            StopReason::EndTurn,
+                            crate::ir::FinishReason::Stop,
                             messages,
                         );
                         return Some(Ok(AgentEvent::Complete(Box::new(result))));
@@ -599,7 +599,11 @@ impl StreamState {
                 .tool_state
                 .with_session(|session| session.to_api_messages())
                 .await;
-            let result = self.build_result(self.metrics.iterations, StopReason::EndTurn, messages);
+            let result = self.build_result(
+                self.metrics.iterations,
+                crate::ir::FinishReason::Stop,
+                messages,
+            );
             return Some(Ok(AgentEvent::Complete(Box::new(result))));
         }
 
@@ -623,8 +627,11 @@ impl StreamState {
                 .tool_state
                 .with_session(|session| session.to_api_messages())
                 .await;
-            let result =
-                self.build_result(self.metrics.iterations - 1, StopReason::MaxTokens, messages);
+            let result = self.build_result(
+                self.metrics.iterations - 1,
+                crate::ir::FinishReason::Length,
+                messages,
+            );
             return Some(Ok(AgentEvent::Complete(Box::new(result))));
         }
 
@@ -1054,7 +1061,11 @@ impl StreamState {
                 .tool_state
                 .with_session(|session| session.to_api_messages())
                 .await;
-            let result = self.build_result(self.metrics.iterations, StopReason::EndTurn, messages);
+            let result = self.build_result(
+                self.metrics.iterations,
+                crate::ir::FinishReason::Stop,
+                messages,
+            );
             return Some(Ok(AgentEvent::Complete(Box::new(result))));
         }
 

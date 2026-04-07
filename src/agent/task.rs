@@ -304,7 +304,7 @@ fn completed_task_output(agent_id: String, result: &super::AgentResult) -> TaskO
         response_metadata: None,
         execution: Some(TaskExecutionSummary {
             result_uuid: Some(result.uuid.clone()),
-            stop_reason: Some(result.stop_reason),
+            stop_reason: Some(result.stop_reason.clone()),
             iterations: Some(result.iterations),
             tool_calls: Some(result.tool_calls),
             usage: Some((&result.usage).into()),
@@ -584,10 +584,11 @@ impl SchemaTool for TaskTool {
 mod tests {
     use super::*;
     use crate::agent::{AgentMetrics, AgentResult, AgentState};
+    use crate::ir::FinishReason;
     use crate::ir::{ContentPart, Role};
     use crate::session::{MemoryPersistence, SessionConfig, SessionManager};
     use crate::tools::{ExecutionContext, Tool};
-    use crate::types::{StopReason, Usage};
+    use crate::types::Usage;
 
     fn test_context() -> ExecutionContext {
         ExecutionContext::default()
@@ -675,7 +676,7 @@ mod tests {
             },
             tool_calls: 2,
             iterations: 3,
-            stop_reason: StopReason::EndTurn,
+            stop_reason: FinishReason::Stop,
             state: AgentState::Completed,
             metrics: AgentMetrics {
                 execution_time_ms: 99,

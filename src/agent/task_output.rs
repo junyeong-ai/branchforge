@@ -163,9 +163,10 @@ mod tests {
     use super::*;
     use crate::agent::{AgentMetrics, AgentResult, AgentState};
     use crate::ir::ContentPart;
+    use crate::ir::FinishReason;
     use crate::session::MemoryPersistence;
     use crate::tools::Tool;
-    use crate::types::{StopReason, ToolOutput, Usage};
+    use crate::types::{ToolOutput, Usage};
     use std::sync::Arc;
 
     // Use valid UUIDs for tests to ensure consistent session IDs
@@ -183,7 +184,7 @@ mod tests {
             usage: Usage::default(),
             tool_calls: 0,
             iterations: 1,
-            stop_reason: StopReason::EndTurn,
+            stop_reason: FinishReason::Stop,
             state: AgentState::Completed,
             metrics: AgentMetrics::default(),
             session_id: session_id.to_string(),

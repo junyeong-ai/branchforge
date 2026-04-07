@@ -14,11 +14,12 @@ use crate::common::{ContentSource, IndexRegistry};
 use crate::context::{PromptOrchestrator, StaticContext};
 use crate::hooks::{HookContext, HookEvent, HookInput, HookManager, HookOutput};
 use crate::ir::ContentPart;
+use crate::ir::FinishReason;
 use crate::session::types::TodoItem;
 use crate::session::{Session, SessionAccessScope, SessionConfig, SessionId, SessionManager};
 use crate::skills::{SkillIndex, SkillRuntime};
 use crate::tools::{ExecutionContext, ToolOutput, ToolRegistry, ToolResult, ToolSurface};
-use crate::types::{StopReason, ToolResultBlock, Usage};
+use crate::types::{ToolResultBlock, Usage};
 
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
@@ -43,7 +44,7 @@ fn test_agent_result() {
         },
         tool_calls: 2,
         iterations: 3,
-        stop_reason: StopReason::EndTurn,
+        stop_reason: FinishReason::Stop,
         state: AgentState::Completed,
         metrics,
         session_id: "test-session".to_string(),
@@ -65,7 +66,7 @@ fn test_agent_result_session_id() {
         usage: Usage::default(),
         tool_calls: 0,
         iterations: 1,
-        stop_reason: StopReason::EndTurn,
+        stop_reason: FinishReason::Stop,
         state: AgentState::Completed,
         metrics: AgentMetrics::default(),
         session_id: "my-session-123".to_string(),
@@ -89,7 +90,7 @@ fn test_agent_result_extract_success() {
         usage: Usage::default(),
         tool_calls: 0,
         iterations: 1,
-        stop_reason: StopReason::EndTurn,
+        stop_reason: FinishReason::Stop,
         state: AgentState::Completed,
         metrics: AgentMetrics::default(),
         session_id: "test".to_string(),
@@ -109,7 +110,7 @@ fn test_agent_result_extract_no_output() {
         usage: Usage::default(),
         tool_calls: 0,
         iterations: 1,
-        stop_reason: StopReason::EndTurn,
+        stop_reason: FinishReason::Stop,
         state: AgentState::Completed,
         metrics: AgentMetrics::default(),
         session_id: "test".to_string(),
@@ -285,9 +286,9 @@ fn test_agent_metrics_serialization() {
 
 #[test]
 fn test_stop_reason_variants() {
-    assert_eq!(StopReason::EndTurn, StopReason::EndTurn);
-    assert_ne!(StopReason::EndTurn, StopReason::MaxTokens);
-    assert_ne!(StopReason::EndTurn, StopReason::ToolUse);
+    assert_eq!(FinishReason::Stop, FinishReason::Stop);
+    assert_ne!(FinishReason::Stop, FinishReason::Length);
+    assert_ne!(FinishReason::Stop, FinishReason::ToolCalls);
 }
 
 #[test]

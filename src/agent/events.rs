@@ -3,8 +3,9 @@
 use serde::{Deserialize, Serialize};
 
 use super::state::{AgentMetrics, AgentState};
+use crate::ir::FinishReason;
 use crate::ir::Message;
-use crate::types::{StopReason, Usage};
+use crate::types::Usage;
 
 /// Events emitted during agent execution.
 ///
@@ -123,7 +124,7 @@ pub struct AgentResult {
     pub usage: Usage,
     pub tool_calls: usize,
     pub iterations: usize,
-    pub stop_reason: StopReason,
+    pub stop_reason: FinishReason,
     pub state: AgentState,
     pub metrics: AgentMetrics,
     pub session_id: String,
@@ -139,7 +140,7 @@ impl AgentResult {
         text: String,
         usage: Usage,
         iterations: usize,
-        stop_reason: StopReason,
+        stop_reason: FinishReason,
         metrics: AgentMetrics,
         session_id: String,
         structured_output: Option<serde_json::Value>,

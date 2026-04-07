@@ -9,13 +9,13 @@ use tokio::sync::{OnceCell, RwLock, oneshot};
 use tokio::task::JoinHandle;
 use tracing::warn;
 
+use crate::ir::FinishReason;
 use crate::ir::{ContentPart, Message, Role};
 use crate::session::{
     ExecutionMetadata, MessageMetadata, Persistence, Session, SessionConfig, SessionError,
     SessionId, SessionManager, SessionResult, SessionState, SessionType, ThinkingMetadata,
     ToolResultMeta,
 };
-use crate::types::StopReason;
 
 use super::AgentResult;
 
@@ -68,7 +68,7 @@ pub struct TaskExecutionSummary {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub result_uuid: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub stop_reason: Option<StopReason>,
+    pub stop_reason: Option<FinishReason>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub iterations: Option<usize>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -814,7 +814,7 @@ impl TaskRegistry {
 
         (execution.is_some() || usage.is_some()).then(|| TaskExecutionSummary {
             result_uuid: execution.and_then(|metadata| metadata.result_uuid.clone()),
-            stop_reason: execution.and_then(|metadata| metadata.stop_reason),
+            stop_reason: execution.and_then(|metadata| metadata.stop_reason.clone()),
             iterations: execution.and_then(|metadata| metadata.iterations),
             tool_calls: execution.and_then(|metadata| metadata.tool_calls),
             usage,
@@ -841,7 +841,7 @@ impl TaskRegistry {
                 .or_else(|| result.structured_output.clone()),
             execution: Some(ExecutionMetadata {
                 result_uuid: Some(result.uuid.clone()),
-                stop_reason: Some(result.stop_reason),
+                stop_reason: Some(result.stop_reason.clone()),
                 iterations: Some(result.iterations),
                 tool_calls: Some(result.tool_calls),
                 usage: Some((&result.usage).into()),
@@ -953,9 +953,10 @@ impl TaskRegistry {
 mod tests {
     use super::*;
     use crate::agent::AgentState;
+    use crate::ir::FinishReason;
     use crate::ir::Role;
     use crate::session::{MemoryPersistence, QueueItem, SessionMessage};
-    use crate::types::{StopReason, Usage};
+    use crate::types::Usage;
     use std::sync::atomic::{AtomicBool, Ordering};
     use uuid::Uuid;
 
@@ -1074,7 +1075,7 @@ mod tests {
             usage: Usage::default(),
             tool_calls: 0,
             iterations: 1,
-            stop_reason: StopReason::EndTurn,
+            stop_reason: FinishReason::Stop,
             state: AgentState::Completed,
             metrics: Default::default(),
             session_id: session_id.to_string(),

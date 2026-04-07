@@ -5,16 +5,17 @@ use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 
 use super::ids::MessageId;
+use crate::ir::FinishReason;
 use crate::ir::{ContentPart, Message, Role};
 use crate::session::types::EnvironmentContext;
-use crate::types::{StopReason, TokenUsage};
+use crate::types::TokenUsage;
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct ExecutionMetadata {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub result_uuid: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub stop_reason: Option<StopReason>,
+    pub stop_reason: Option<FinishReason>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub iterations: Option<usize>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

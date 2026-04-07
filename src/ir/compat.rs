@@ -76,6 +76,22 @@ impl From<&crate::client::messages::CreateMessageRequest> for ir::ModelRequest {
 }
 
 // =============================================================================
+// StopReason → FinishReason
+// =============================================================================
+
+impl From<types::StopReason> for ir::FinishReason {
+    fn from(sr: types::StopReason) -> Self {
+        match sr {
+            types::StopReason::EndTurn => ir::FinishReason::Stop,
+            types::StopReason::MaxTokens => ir::FinishReason::Length,
+            types::StopReason::StopSequence => ir::FinishReason::StopSequence,
+            types::StopReason::ToolUse => ir::FinishReason::ToolCalls,
+            types::StopReason::Refusal => ir::FinishReason::ContentFilter,
+        }
+    }
+}
+
+// =============================================================================
 // ModelResponse → ApiResponse
 // =============================================================================
 
