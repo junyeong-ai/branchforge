@@ -70,12 +70,12 @@ impl SpanContext {
         ApiCallSpan::new(model)
     }
 
-    pub fn tool_execute_span(&self, tool_name: &str, tool_use_id: &str) -> Span {
+    pub fn tool_execute_span(&self, tool_name: &str, tool_call_id: &str) -> Span {
         span!(
             Level::INFO,
             "tool.execute",
             tool_name = tool_name,
-            tool_use_id = tool_use_id,
+            tool_call_id = tool_call_id,
             session_id = %self.session_id,
             otel.name = format!("tool.{}", tool_name),
             is_error = field::Empty,

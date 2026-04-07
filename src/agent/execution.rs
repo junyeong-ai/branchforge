@@ -487,7 +487,7 @@ impl Agent {
                         .append_graph_node(
                             crate::graph::NodeKind::ToolCall,
                             serde_json::json!({
-                                "tool_use_id": tool_use.id.clone(),
+                                "tool_call_id": tool_use.id.clone(),
                                 "tool_name": tool_use.name.clone(),
                                 "tool_input": input.clone(),
                             }),
