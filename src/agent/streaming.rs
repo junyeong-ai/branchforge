@@ -75,7 +75,7 @@ impl Agent {
         let metadata = self
             .state
             .with_session(|session| {
-                crate::client::messages::RequestMetadata::from_identity(
+                crate::agent::types::RequestMetadata::from_identity(
                     session.tenant_id.as_deref(),
                     session.principal_id.as_deref(),
                     Some(&session.id.to_string()),

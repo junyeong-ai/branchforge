@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use crate::agent::config::{AgentConfig, CacheConfig, SystemPromptMode};
-use crate::client::messages::RequestMetadata;
+use crate::agent::types::RequestMetadata;
 use crate::context::{McpToolMeta, StaticContext};
 use crate::ir::{self, Message, ModelRequest, ModelSettings, SystemPrompt};
 use crate::output_style::{OutputStyle, SystemPromptGenerator};

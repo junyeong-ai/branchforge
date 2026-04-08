@@ -8,8 +8,8 @@ use std::time::Duration;
 
 use rust_decimal::Decimal;
 
+use crate::agent::types::DEFAULT_MAX_TOKENS;
 use crate::authorization::ToolPolicy;
-use crate::client::messages::DEFAULT_MAX_TOKENS;
 use crate::output_style::OutputStyle;
 use crate::tools::ToolSurface;
 

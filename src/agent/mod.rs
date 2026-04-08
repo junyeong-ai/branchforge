@@ -16,6 +16,7 @@ mod streaming;
 mod task;
 mod task_output;
 mod task_registry;
+pub mod types;
 
 #[cfg(test)]
 mod tests;
@@ -36,3 +37,4 @@ pub use task_output::{TaskOutputInput, TaskOutputResult, TaskOutputTool, TaskSta
 pub use task_registry::{
     TaskAssistantMetadata, TaskExecutionSummary, TaskRegistry, TaskResultSnapshot,
 };
+pub use types::{DEFAULT_MAX_TOKENS, RequestMetadata};
