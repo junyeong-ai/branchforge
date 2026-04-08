@@ -126,7 +126,17 @@ pub use graph::{
 pub use tools::{
     ExecutionContext, ProgressBuilder, ProgressStatus, SchemaTool, Tool, ToolRegistry, ToolSurface,
 };
-pub use types::{ContentBlock, Message, Role, ToolDefinition, ToolError, ToolOutput, ToolResult};
+// IR types are the canonical user-facing domain model. Re-export at the
+// crate root for ergonomic access.
+pub use ir::{
+    CacheControl, CacheMarker, ContentPart, FinishReason, Message, ModelRequest, ModelResponse,
+    ModelSettings, ModelStreamChunk, ModelWarning, ProviderCapabilities, ProviderOptions, Role,
+    Support, SystemBlock, SystemPrompt, ToolDefinition, Usage,
+};
+
+// Tool execution types live in `types/tool/` (provider-neutral by design)
+// and are re-exported here for convenience.
+pub use types::{ToolError, ToolOutput, ToolResult};
 
 // =========================================================================
 // Commonly used configuration re-exports
