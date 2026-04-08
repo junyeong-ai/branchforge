@@ -766,6 +766,14 @@ fn normalize_cache_ttl_ordering(body: &mut Value) -> usize {
 /// `d`) so future-added TTL values automatically work without code
 /// changes here. Missing or malformed values fall back to the API
 /// default of 5 minutes (300 seconds).
+///
+/// The function is **panic-free for any UTF-8 input**. It uses
+/// `char_indices().next_back()` rather than `str::split_at(len-1)`
+/// because the latter panics when the trailing byte is in the middle
+/// of a multi-byte char (e.g. `"5분"`, `"5🕐"`). Although the cache_ttl
+/// is conventionally an ASCII string from `cache_config.static_ttl`,
+/// nothing in the IR or builder API enforces that — a defensive
+/// codec must not panic on any user-supplied string.
 fn ttl_to_seconds(ttl: Option<&str>) -> u64 {
     const DEFAULT_SECONDS: u64 = 300;
     let Some(s) = ttl else {
@@ -774,18 +782,26 @@ fn ttl_to_seconds(ttl: Option<&str>) -> u64 {
     if s.is_empty() {
         return DEFAULT_SECONDS;
     }
-    // Split off the trailing unit character. Anthropic-supported units:
-    //   s = seconds, m = minutes, h = hours, d = days
-    let (num_str, unit) = s.split_at(s.len() - 1);
+
+    // Take the LAST char (any UTF-8 byte width) and split on its
+    // byte index. `char_indices().next_back()` is char-boundary-safe.
+    let Some((unit_byte_idx, unit_char)) = s.char_indices().next_back() else {
+        return DEFAULT_SECONDS;
+    };
+    let num_str = &s[..unit_byte_idx];
+    if num_str.is_empty() {
+        return DEFAULT_SECONDS;
+    }
+
     let n: u64 = match num_str.parse() {
         Ok(n) => n,
         Err(_) => return DEFAULT_SECONDS,
     };
-    match unit {
-        "s" => n,
-        "m" => n * 60,
-        "h" => n * 3600,
-        "d" => n * 86_400,
+    match unit_char {
+        's' => n,
+        'm' => n * 60,
+        'h' => n * 3600,
+        'd' => n * 86_400,
         // Unknown unit — fall back. The API will reject unknown TTLs
         // with a clearer error than anything we could produce locally.
         _ => DEFAULT_SECONDS,
@@ -1308,6 +1324,115 @@ mod tests {
         });
         let enc = c.encode_request(&r, InvocationMode::Unary).unwrap();
         assert_eq!(enc.body["system"][0]["cache_control"]["type"], "ephemeral");
+    }
+
+    /// R14 — End-to-end integration test for the cache_control pipeline.
+    /// Builds a `ModelRequest` with **mixed per-block TTLs** that would
+    /// trigger the live-API ordering rule, then asserts the final encoded
+    /// body has been auto-normalised by `normalize_cache_ttl_ordering`
+    /// (NOT capped/dropped). This locks in the contract that the codec
+    /// post-processing pipeline runs end-to-end on a realistic input
+    /// shape, not just on synthetic JSON fixtures.
+    #[test]
+    fn encode_request_normalizes_mixed_per_block_ttls_end_to_end() {
+        use crate::ir::provider_options::CacheMarker;
+
+        let c = AnthropicMessagesCodec::new();
+        let mut r = req(vec![Message::user("hi")]);
+        // Two system blocks, the FIRST is cached at 5m and the SECOND at 1h.
+        // In wire stream order this is `system[0]=5m → system[1]=1h`,
+        // which violates the "longer TTL must not come after shorter TTL"
+        // rule. The R13 normalizer should auto-upgrade system[0] to 1h.
+        r.system = Some(SystemPrompt::Blocks(vec![
+            crate::ir::SystemBlock {
+                text: "stable header".into(),
+                cache_marker: Some(CacheMarker::with_ttl("5m")),
+            },
+            crate::ir::SystemBlock {
+                text: "stable footer".into(),
+                cache_marker: Some(CacheMarker::with_ttl("1h")),
+            },
+        ]));
+
+        let enc = c.encode_request(&r, InvocationMode::Unary).unwrap();
+
+        // Both system blocks must still have cache_control (no markers
+        // dropped) and BOTH must now use the longer TTL ("1h") so the
+        // wire stream is monotonically non-increasing.
+        assert_eq!(enc.body["system"][0]["cache_control"]["ttl"], "1h");
+        assert_eq!(enc.body["system"][1]["cache_control"]["ttl"], "1h");
+
+        // The codec should also surface a `lossy` warning so observers
+        // know a TTL was upgraded — this is the audit trail for the
+        // semantic change.
+        assert!(
+            enc.warnings.iter().any(|w| matches!(
+                w,
+                crate::ir::ModelWarning::LossyEncode { field, .. } if field == "cache_control_ttl"
+            )),
+            "expected cache_control_ttl lossy warning, got: {:?}",
+            enc.warnings
+        );
+    }
+
+    /// R14 — Same pipeline integration test for the cap path. Builds a
+    /// request with > 4 markers to verify `enforce_cache_breakpoint_cap`
+    /// runs end-to-end and emits the corresponding warning. The cap drops
+    /// the EARLIEST markers in wire stream order (`tools → system →
+    /// messages`), preserving the more valuable later markers.
+    #[test]
+    fn encode_request_caps_cache_markers_end_to_end() {
+        use crate::ir::provider_options::CacheMarker;
+
+        let c = AnthropicMessagesCodec::new();
+        let mut r = req(vec![Message::user("hi")]);
+        // 5 cached system blocks → 5 cache_control markers, exceeds the
+        // cap of 4. Note the API stream order is `tools → system →
+        // messages`, so since this request has no tools, system[0] is
+        // the earliest marker — that's the one that should be dropped.
+        r.system = Some(SystemPrompt::Blocks(vec![
+            crate::ir::SystemBlock {
+                text: "s0".into(),
+                cache_marker: Some(CacheMarker::with_ttl("1h")),
+            },
+            crate::ir::SystemBlock {
+                text: "s1".into(),
+                cache_marker: Some(CacheMarker::with_ttl("1h")),
+            },
+            crate::ir::SystemBlock {
+                text: "s2".into(),
+                cache_marker: Some(CacheMarker::with_ttl("1h")),
+            },
+            crate::ir::SystemBlock {
+                text: "s3".into(),
+                cache_marker: Some(CacheMarker::with_ttl("1h")),
+            },
+            crate::ir::SystemBlock {
+                text: "s4".into(),
+                cache_marker: Some(CacheMarker::with_ttl("1h")),
+            },
+        ]));
+
+        let enc = c.encode_request(&r, InvocationMode::Unary).unwrap();
+
+        // 5 markers → cap drops 1. The earliest (system[0]) is dropped.
+        let marker_count = (0..5)
+            .filter(|i| enc.body["system"][*i].get("cache_control").is_some())
+            .count();
+        assert_eq!(marker_count, 4, "must be capped at 4 markers");
+        assert!(enc.body["system"][0].get("cache_control").is_none());
+        assert!(enc.body["system"][1].get("cache_control").is_some());
+        assert!(enc.body["system"][4].get("cache_control").is_some());
+
+        // Cap warning surfaced.
+        assert!(
+            enc.warnings.iter().any(|w| matches!(
+                w,
+                crate::ir::ModelWarning::LossyEncode { field, .. } if field == "cache_control"
+            )),
+            "expected cache_control lossy warning, got: {:?}",
+            enc.warnings
+        );
     }
 
     #[test]
@@ -1835,6 +1960,33 @@ mod tests {
         assert_eq!(ttl_to_seconds(Some("")), 300);
         assert_eq!(ttl_to_seconds(Some("h")), 300); // no number
         assert_eq!(ttl_to_seconds(Some("5")), 300); // no unit
+    }
+
+    /// R14 — `ttl_to_seconds` must be **panic-free for any UTF-8 input**,
+    /// not just ASCII. The R13 implementation used
+    /// `s.split_at(s.len() - 1)`, which panics when the trailing byte
+    /// falls in the middle of a multi-byte char. Defensive codecs must
+    /// never panic on user-supplied strings — even unconventional ones.
+    #[test]
+    fn ttl_to_seconds_does_not_panic_on_non_ascii_input() {
+        // Korean "5분" — '분' is U+BD84, encoded as 3 UTF-8 bytes.
+        // Pre-fix `split_at(s.len()-1)` would split mid-byte → panic.
+        // Post-fix returns the default since '분' isn't a recognised unit.
+        assert_eq!(ttl_to_seconds(Some("5분")), 300);
+
+        // Emoji clock — U+1F550 is 4 UTF-8 bytes. Same pre-fix panic.
+        assert_eq!(ttl_to_seconds(Some("5🕐")), 300);
+
+        // Multi-byte char alone (no leading number).
+        assert_eq!(ttl_to_seconds(Some("분")), 300);
+        assert_eq!(ttl_to_seconds(Some("🕐")), 300);
+
+        // Mixed: number + multi-byte non-unit. Still no panic.
+        assert_eq!(ttl_to_seconds(Some("123🕐")), 300);
+
+        // Sanity: the ASCII path still works after the rewrite.
+        assert_eq!(ttl_to_seconds(Some("1h")), 3600);
+        assert_eq!(ttl_to_seconds(Some("30s")), 30);
     }
 
     /// R10-fix-4 — `apply_cache_control` propagates `cc.ttl` to all marker
