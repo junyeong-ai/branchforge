@@ -87,7 +87,7 @@ impl LlmCall for RetryingClient {
                 Err(e) => return Err(e),
             }
         }
-        Err(last_err.expect("retry loop ended without error"))
+        Err(last_err.expect("retry loop exhausted; last_err must be Some when max_retries reached"))
     }
 
     async fn send_stream(&self, request: &ModelRequest) -> Result<ChunkStream> {
@@ -110,7 +110,7 @@ impl LlmCall for RetryingClient {
                 Err(e) => return Err(e),
             }
         }
-        Err(last_err.expect("retry loop ended without error"))
+        Err(last_err.expect("retry loop exhausted; last_err must be Some when max_retries reached"))
     }
 }
 

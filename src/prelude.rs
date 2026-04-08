@@ -9,69 +9,87 @@
 //! use branchforge::prelude::*;
 //! ```
 
-// Core types
+// =============================================================================
+// Agent runtime — primary user surface
+// =============================================================================
 pub use crate::Agent;
 pub use crate::AgentBuilder;
 pub use crate::AgentEvent;
 pub use crate::AgentResult;
+pub use crate::AgentRuntime;
 pub use crate::Error;
+pub use crate::ExecutionMode;
 pub use crate::Result;
+pub use crate::RunConfig;
+pub use crate::agent::{DEFAULT_MAX_TOKENS, RequestMetadata};
 
+// =============================================================================
+// LLM call surface — IR-native trait + decorators
+// =============================================================================
+pub use crate::client::codec::ModelCodec;
+pub use crate::client::preset::Preset;
+pub use crate::client::provider_client::{ChunkStream, ProviderClient};
+pub use crate::client::transport::ModelTransport;
+pub use crate::client::{CircuitBrokenClient, FallingBackClient, LlmCall, RetryingClient};
+
+// =============================================================================
+// IR types — the canonical domain model
+// =============================================================================
+pub use crate::ir::{
+    CacheControl, CacheMarker, ContentPart, FinishReason, Message, ModelRequest, ModelResponse,
+    ModelSettings, ModelStreamChunk, ModelWarning, ProviderCapabilities, ProviderOptions, Role,
+    Support, SystemBlock, SystemPrompt, ToolDefinition as IrToolDefinition, Usage,
+};
+
+// =============================================================================
 // Authentication
+// =============================================================================
 pub use crate::Auth;
 pub use crate::Credential;
 
-// Client (legacy)
-pub use crate::Client;
-pub use crate::ClientBuilder;
-
-// Client (new codec/transport stack)
-pub use crate::{ChunkStream, ModelCodec, ModelTransport, Preset, ProviderClient};
-
-// Common - Index pattern types
-pub use crate::common::{ContentSource, Index, IndexRegistry, Named, SourceType, ToolRestricted};
-
+// =============================================================================
 // Tools
+// =============================================================================
 pub use crate::tools::{ExecutionContext, SchemaTool, Tool, ToolRegistry, ToolSurface};
 pub use crate::types::ToolResult;
 
-// IR (provider-neutral types — preferred for new code)
-pub use crate::ir::{
-    ContentPart, FinishReason, ModelRequest, ModelResponse, ModelSettings, ModelStreamChunk,
-    ModelWarning, ProviderCapabilities, ProviderOptions, Support, Usage as IrUsage,
-};
-pub use crate::ir::{Message as IrMessage, Role as IrRole, SystemPrompt as IrSystemPrompt};
+// =============================================================================
+// Common patterns
+// =============================================================================
+pub use crate::common::{ContentSource, Index, IndexRegistry, Named, SourceType, ToolRestricted};
 
-// Types (legacy — kept for existing consumers during migration)
-pub use crate::types::{ApiResponse, ContentBlock, Message, Role, StopReason, Usage};
-
+// =============================================================================
 // Session
+// =============================================================================
 pub use crate::session::{Session, SessionConfig, SessionId};
 
+// =============================================================================
 // Context
+// =============================================================================
 pub use crate::ContextBuilder;
 pub use crate::PromptOrchestrator;
 pub use crate::StaticContext;
 
-// Skills
+// =============================================================================
+// Skills + Subagents
+// =============================================================================
+pub use crate::SubagentIndex;
 pub use crate::skills::{SkillIndex, SkillResult, SkillRuntime};
 
-// Subagents
-pub use crate::SubagentIndex;
-
+// =============================================================================
 // Hooks
+// =============================================================================
 pub use crate::Hook;
 pub use crate::HookContext;
 pub use crate::HookEvent;
 pub use crate::HookManager;
 
+// =============================================================================
 // Authorization
-pub use crate::ExecutionMode;
+// =============================================================================
 pub use crate::ToolPolicy;
 
-// Agent runtime
-pub use crate::AgentRuntime;
-pub use crate::RunConfig;
-
-// Output
+// =============================================================================
+// Output style
+// =============================================================================
 pub use crate::OutputStyle;
