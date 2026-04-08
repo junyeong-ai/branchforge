@@ -117,7 +117,7 @@ mod tests {
                 }
             ]
         });
-        let node_id = graph
+        let _node_id = graph
             .append_node(graph.primary_branch, NodeKind::User, node_payload)
             .unwrap();
 
@@ -160,7 +160,7 @@ mod tests {
             Ok(replay) => {
                 // If deserialization succeeded, the arguments should be empty or default
                 if let Some(ContentPart::ToolCall { arguments, .. }) =
-                    replay.messages.get(0).and_then(|m| m.content.get(0))
+                    replay.messages.first().and_then(|m| m.content.first())
                 {
                     // Empty object as default for missing field
                     assert_eq!(arguments, &serde_json::json!({}));

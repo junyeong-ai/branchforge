@@ -16,6 +16,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use branchforge::ir::ContentPart;
 use branchforge::orchestration::{
     AgentDirectory, AgentHandle, AgentId, Coordination, Coordinator, MessageChannel,
 };
@@ -26,7 +27,6 @@ use branchforge::session::compact::{
 };
 use branchforge::session::persistence::SessionFilter;
 use branchforge::session::{MemoryPersistence, Persistence, Session, SessionConfig};
-use branchforge::types::ContentBlock;
 use branchforge::{CircuitBreaker, CircuitConfig, CircuitState};
 use branchforge::{OutputStyle, SystemPromptGenerator};
 
@@ -192,21 +192,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let mut session = Session::new(SessionConfig::default());
         check(
             "session starts with empty overrides",
-            session.content_overrides.is_empty(),
+            session.content_overrides().is_empty(),
         );
 
         let node_id = uuid::Uuid::new_v4();
-        session
-            .content_overrides
-            .set(node_id, vec![ContentBlock::text("truncated")]);
-        check("override added", session.content_overrides.len() == 1);
+        session.set_content_override(node_id, vec![ContentPart::text("truncated")]);
+        check("override added", session.content_overrides().len() == 1);
         check(
             "override retrievable",
-            session.content_overrides.get(&node_id).is_some(),
+            session.content_overrides().get(&node_id).is_some(),
         );
 
-        session.content_overrides.clear();
-        check("overrides cleared", session.content_overrides.is_empty());
+        session.clear_content_overrides();
+        check("overrides cleared", session.content_overrides().is_empty());
     }
 
     // =====================================================================
@@ -273,11 +271,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let persistence = Arc::new(MemoryPersistence::new());
 
         let mut s1 = Session::new(SessionConfig::default());
-        s1.tenant_id = Some("team-a".into());
+        s1.set_identity(Some("team-a".into()), None);
         persistence.save(&s1).await?;
 
         let mut s2 = Session::new(SessionConfig::default());
-        s2.tenant_id = Some("team-b".into());
+        s2.set_identity(Some("team-b".into()), None);
         persistence.save(&s2).await?;
 
         let filter = SessionFilter::new().tenant("team-a");
@@ -358,33 +356,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // =====================================================================
     // Test 10: Live LLM query via CLI auth
     // =====================================================================
-    println!("\n[Test 10] Live LLM query via CLI OAuth");
+    println!("\n[Test 10] Live LLM query via Preset");
     {
-        use branchforge::{Auth, Client};
-
-        match Client::builder().auth(Auth::ClaudeCli).await {
-            Ok(builder) => {
-                let client = builder.build().await?;
-                let response = client.query("Reply with exactly: BRANCHFORGE_OK").await;
-                match response {
-                    Ok(text) => {
-                        check("LLM responded", !text.is_empty());
-                        check(
-                            "response contains expected text",
-                            text.contains("BRANCHFORGE_OK"),
-                        );
-                        println!("    Response: {}", text.trim());
-                    }
-                    Err(e) => {
-                        println!(
-                            "  [SKIP] LLM query failed (expected without credentials): {}",
-                            e
-                        );
-                    }
-                }
+        match branchforge::query("Reply with exactly: BRANCHFORGE_OK").await {
+            Ok(text) => {
+                check("LLM responded", !text.is_empty());
+                check(
+                    "response contains expected text",
+                    text.contains("BRANCHFORGE_OK"),
+                );
+                println!("    Response: {}", text.trim());
             }
             Err(e) => {
-                println!("  [SKIP] CLI auth not available: {}", e);
+                println!("  [SKIP] LLM query failed (expected without credentials): {e}");
             }
         }
     }

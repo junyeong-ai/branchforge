@@ -12,6 +12,7 @@
 use branchforge::ToolOutput;
 use branchforge::agent::{AgentMetrics, AgentState, TaskOutputTool, TaskRegistry};
 use branchforge::common::{ContentSource, IndexRegistry};
+use branchforge::ir::{FinishReason, Usage};
 use branchforge::security::SecurityContext;
 use branchforge::session::{MemoryPersistence, SessionId, SessionState, ToolState};
 use branchforge::skills::{SkillIndex, SkillRuntime};
@@ -19,7 +20,6 @@ use branchforge::tools::{
     BashTool, EditTool, ExecutionContext, GlobTool, GrepTool, KillShellTool, PlanTool,
     ProcessManager, ReadTool, TodoWriteTool, Tool, WriteTool,
 };
-use branchforge::types::{StopReason, Usage};
 use std::sync::Arc;
 
 struct TestRunner {
@@ -435,7 +435,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         messages: vec![],
         tool_calls: 0,
         iterations: 1,
-        stop_reason: StopReason::EndTurn,
+        stop_reason: FinishReason::Stop,
         usage: Usage::default(),
         metrics: AgentMetrics::default(),
         state: AgentState::Completed,

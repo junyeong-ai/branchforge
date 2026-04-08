@@ -14,9 +14,9 @@ use branchforge::{
     authorization::ToolPolicy,
     common::ContentSource,
     hooks::{HookContext, HookEvent, HookInput, HookManager, HookOutput},
+    ir::ContentPart,
     session::{SessionAccessScope, SessionConfig, SessionManager, SessionState},
     subagents::{SubagentIndex, builtin_subagents},
-    types::ContentBlock,
 };
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -344,10 +344,10 @@ async fn test_session_create() -> Result<(), String> {
         .await
         .map_err(|e| e.to_string())?;
 
-    if session.state != SessionState::Created {
+    if session.state() != SessionState::Created {
         return Err("State should be Created".into());
     }
-    if !session.messages.is_empty() {
+    if !session.current_branch_messages().is_empty() {
         return Err("Should have no messages".into());
     }
 
@@ -363,11 +363,11 @@ async fn test_session_update() -> Result<(), String> {
         .map_err(|e| e.to_string())?;
     let id = session.id;
 
-    session.summary = Some("Updated summary".into());
+    session.update_summary("Updated summary").map_err(|e| e.to_string())?;
     scoped.update(&session).await.map_err(|e| e.to_string())?;
 
     let restored = scoped.get(&id).await.map_err(|e| e.to_string())?;
-    if restored.summary != Some("Updated summary".into()) {
+    if restored.summary() != Some("Updated summary") {
         return Err("Summary not updated".into());
     }
 
@@ -386,23 +386,21 @@ async fn test_session_messages() -> Result<(), String> {
     let id = session.id;
 
     scoped
-        .add_message(&id, SessionMessage::user(vec![ContentBlock::text("Hello")]))
+        .add_message(&id, SessionMessage::user(vec![ContentPart::text("Hello")]))
         .await
         .map_err(|e| e.to_string())?;
     scoped
         .add_message(
             &id,
-            SessionMessage::assistant(vec![ContentBlock::text("Hi!")]),
+            SessionMessage::assistant(vec![ContentPart::text("Hi!")]),
         )
         .await
         .map_err(|e| e.to_string())?;
 
     let restored = scoped.get(&id).await.map_err(|e| e.to_string())?;
-    if restored.messages.len() != 2 {
-        return Err(format!(
-            "Expected 2 messages, got {}",
-            restored.messages.len()
-        ));
+    let messages = restored.current_branch_messages();
+    if messages.len() != 2 {
+        return Err(format!("Expected 2 messages, got {}", messages.len()));
     }
 
     Ok(())
@@ -420,21 +418,21 @@ async fn test_session_fork() -> Result<(), String> {
     let id = session.id;
 
     scoped
-        .add_message(&id, SessionMessage::user(vec![ContentBlock::text("Hello")]))
+        .add_message(&id, SessionMessage::user(vec![ContentPart::text("Hello")]))
         .await
         .map_err(|e| e.to_string())?;
     scoped
         .add_message(
             &id,
-            SessionMessage::assistant(vec![ContentBlock::text("Hi!")]),
+            SessionMessage::assistant(vec![ContentPart::text("Hi!")]),
         )
         .await
         .map_err(|e| e.to_string())?;
 
     let original = scoped.get(&id).await.map_err(|e| e.to_string())?;
     let head = original
-        .graph
-        .branch_head(original.graph.primary_branch)
+        .graph()
+        .branch_head(original.graph().primary_branch)
         .ok_or_else(|| "Missing head".to_string())?;
     let forked = scoped
         .fork_from_node(&id, head)
@@ -445,10 +443,11 @@ async fn test_session_fork() -> Result<(), String> {
         return Err("Forked should have different ID".into());
     }
     // Forking from the head node replays from that node onward (1 message).
-    if forked.messages.is_empty() {
+    let forked_messages = forked.current_branch_messages();
+    if forked_messages.is_empty() {
         return Err("Forked should have messages".into());
     }
-    if !forked.messages.iter().all(|m| m.is_sidechain) {
+    if !forked_messages.iter().all(|m| m.is_sidechain) {
         return Err("Messages should be sidechain".into());
     }
 
@@ -464,13 +463,13 @@ async fn test_session_lifecycle() -> Result<(), String> {
         .map_err(|e| e.to_string())?;
     let id = session.id;
 
-    if session.state != SessionState::Created {
+    if session.state() != SessionState::Created {
         return Err("Initial state wrong".into());
     }
 
     scoped.complete(&id).await.map_err(|e| e.to_string())?;
     let completed = scoped.get(&id).await.map_err(|e| e.to_string())?;
-    if completed.state != SessionState::Completed {
+    if completed.state() != SessionState::Completed {
         return Err("Should be Completed".into());
     }
 
@@ -482,7 +481,7 @@ async fn test_session_lifecycle() -> Result<(), String> {
 
     scoped.set_error(&id2).await.map_err(|e| e.to_string())?;
     let errored = scoped.get(&id2).await.map_err(|e| e.to_string())?;
-    if errored.state != SessionState::Failed {
+    if errored.state() != SessionState::Failed {
         return Err("Should be Failed".into());
     }
 
@@ -618,7 +617,7 @@ fn test_subagent_tools() -> Result<(), String> {
 }
 
 fn test_subagent_model() -> Result<(), String> {
-    use branchforge::client::{ModelConfig, ModelType};
+    use branchforge::agent::{ModelConfig, ModelType};
 
     let config = ModelConfig::default();
 

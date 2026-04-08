@@ -23,7 +23,7 @@ pub use provenance::{ProvenanceDigest, ProvenanceSummaryService};
 pub use query::{GraphFilter, GraphQuery};
 pub use reference::{GraphReference, GraphReferenceResolver};
 pub use replay::ReplayInput;
-pub use search::{GraphSearchQuery, GraphSearchService, GraphSessionStats};
+pub use search::{GraphSearchQuery, GraphSearcher, GraphSessionStats};
 pub use session_graph::SessionGraph;
 pub use types::{
     Bookmark, Branch, BranchId, Checkpoint, GraphNode, NodeId, NodeKind, NodeProvenance,

@@ -10,9 +10,9 @@
 //!
 //! Run: cargo run --example deep_integration_test --features "cli-auth,coding-tools,scheduling"
 
+use branchforge::ir::ContentPart;
 use branchforge::session::compact::{CompactionContext, CompactionStrategy, MicroCompaction};
 use branchforge::session::{Session, SessionConfig};
-use branchforge::types::ContentBlock;
 use branchforge::{Agent, Auth, OutputStyle};
 
 fn check(name: &str, ok: bool) {
@@ -143,7 +143,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let mut session = Session::new(SessionConfig::default());
 
         // Add a message to the session
-        let msg = branchforge::session::SessionMessage::user(vec![ContentBlock::text(
+        let msg = branchforge::session::SessionMessage::user(vec![ContentPart::text(
             "Hello, this is a very long message that we want to truncate. ".repeat(100),
         )]);
         let msg_id_str = msg.id.0.clone();
@@ -161,9 +161,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         // Apply content override
         if let Ok(node_id) = msg_id_str.parse::<uuid::Uuid>() {
-            session.content_overrides.set(
+            session.set_content_override(
                 node_id,
-                vec![ContentBlock::text("[truncated for token savings]")],
+                vec![ContentPart::text("[truncated for token savings]")],
             );
 
             let msgs_after = session.to_api_messages();
@@ -184,7 +184,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             );
 
             // Clear overrides — original restored
-            session.content_overrides.clear();
+            session.clear_content_overrides();
             let msgs_restored = session.to_api_messages();
             let restored_len: usize = msgs_restored
                 .iter()
@@ -210,13 +210,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         // Simulate a conversation with large tool results
         let user_msg =
-            branchforge::session::SessionMessage::user(vec![ContentBlock::text("Find files")]);
+            branchforge::session::SessionMessage::user(vec![ContentPart::text("Find files")]);
         session.add_message(user_msg).unwrap();
 
         // Large assistant response (simulating tool result content)
         let large_content = "x".repeat(20_000);
         let assistant_msg =
-            branchforge::session::SessionMessage::assistant(vec![ContentBlock::text(
+            branchforge::session::SessionMessage::assistant(vec![ContentPart::text(
                 &large_content,
             )]);
         session.add_message(assistant_msg).unwrap();
@@ -225,7 +225,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let ctx = CompactionContext {
             current_tokens: 70_000,
             max_tokens: 100_000,
-            message_count: session.messages.len(),
+            message_count: session.current_branch_messages().len(),
             idle_duration: None,
             last_compact_at: None,
             consecutive_failures: 0,

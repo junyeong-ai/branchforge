@@ -32,9 +32,9 @@ pub struct GraphSessionStats {
     pub principal_authored_node_count: usize,
 }
 
-pub struct GraphSearchService;
+pub struct GraphSearcher;
 
-impl GraphSearchService {
+impl GraphSearcher {
     pub fn search(graph: &SessionGraph, query: &GraphSearchQuery) -> Vec<NodeSummary> {
         let mut nodes: Vec<_> = graph
             .nodes
@@ -185,14 +185,14 @@ mod tests {
             )
             .unwrap();
 
-        let results = GraphSearchService::search(
+        let results = GraphSearcher::search(
             &graph,
             &GraphSearchQuery {
                 text: Some("alpha".to_string()),
                 ..Default::default()
             },
         );
-        let stats = GraphSearchService::stats(&graph);
+        let stats = GraphSearcher::stats(&graph);
 
         assert_eq!(results.len(), 1);
         assert_eq!(stats.tool_call_count, 1);

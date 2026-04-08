@@ -67,11 +67,14 @@ async fn test_web_search() -> Result<(), String> {
         .await
         .map_err(|e| format!("Execute: {}", e))?;
 
-    if result.usage.server_web_search_requests() > 0 {
-        println!(
-            "    WebSearch used {} time(s)",
-            result.usage.server_web_search_requests()
-        );
+    let web_search_count = result
+        .usage
+        .server_tool_invocations
+        .as_ref()
+        .and_then(|s| s.web_search)
+        .unwrap_or(0);
+    if web_search_count > 0 {
+        println!("    WebSearch used {web_search_count} time(s)");
         Ok(())
     } else {
         Err("WebSearch not invoked".into())
@@ -95,11 +98,14 @@ async fn test_web_fetch() -> Result<(), String> {
         .await
         .map_err(|e| format!("Execute: {}", e))?;
 
-    if result.usage.server_web_fetch_requests() > 0 {
-        println!(
-            "    WebFetch used {} time(s)",
-            result.usage.server_web_fetch_requests()
-        );
+    let web_fetch_count = result
+        .usage
+        .server_tool_invocations
+        .as_ref()
+        .and_then(|s| s.web_fetch)
+        .unwrap_or(0);
+    if web_fetch_count > 0 {
+        println!("    WebFetch used {web_fetch_count} time(s)");
         Ok(())
     } else {
         Err("WebFetch not invoked".into())
