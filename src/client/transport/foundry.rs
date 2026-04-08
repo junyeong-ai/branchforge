@@ -206,7 +206,7 @@ impl ModelTransport for FoundryTransport {
                 Some("Azure Entra requires interactive consent — run `az login`"),
             );
         }
-        if status == 429 || body.contains("RateLimitReached") || body.contains("429") {
+        if status == 429 || body.contains("RateLimitReached") {
             return (
                 ProviderErrorKind::RateLimit,
                 Some("Azure AI Foundry rate limit — back off and retry"),

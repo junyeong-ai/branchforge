@@ -483,4 +483,41 @@ mod tests {
         assert!(!t.supports_codec("openai-chat"));
         assert!(!t.supports_codec("bedrock-converse"));
     }
+
+    #[test]
+    fn classify_error_quota_project_hint() {
+        let t = fake_transport("us-central1");
+        let (kind, hint) = t.classify_error(
+            403,
+            r#"{"error":{"message":"user-project not set","status":"PERMISSION_DENIED"}}"#,
+        );
+        assert!(matches!(kind, crate::error::ProviderErrorKind::Quota));
+        assert!(hint.unwrap().contains("GOOGLE_CLOUD_QUOTA_PROJECT"));
+    }
+
+    #[test]
+    fn classify_error_auth_without_quota_body() {
+        let t = fake_transport("us-central1");
+        let (kind, hint) = t.classify_error(401, "unauthorized");
+        assert!(matches!(kind, crate::error::ProviderErrorKind::Auth));
+        assert!(hint.unwrap().contains("gcloud auth"));
+    }
+
+    #[test]
+    fn classify_error_publisher_model_404() {
+        let t = fake_transport("us-central1");
+        let (kind, hint) = t.classify_error(
+            404,
+            r#"Publisher Model projects/foo/locations/bar/publishers/google/models/gemini not found"#,
+        );
+        assert!(matches!(kind, crate::error::ProviderErrorKind::BadRequest));
+        assert!(hint.unwrap().contains("Model Garden"));
+    }
+
+    #[test]
+    fn classify_error_generic_429() {
+        let t = fake_transport("us-central1");
+        let (kind, _) = t.classify_error(429, "quota exceeded");
+        assert!(matches!(kind, crate::error::ProviderErrorKind::RateLimit));
+    }
 }

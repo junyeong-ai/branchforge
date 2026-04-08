@@ -499,4 +499,25 @@ mod tests {
             .unwrap();
         assert_eq!(ep.url, "https://api.anthropic.com/v1/messages");
     }
+
+    #[test]
+    fn classify_error_401_gives_api_key_hint() {
+        let t = DirectTransport::new(
+            "https://api.anthropic.com",
+            DirectAuth::XApiKey(SecretString::from("k")),
+        );
+        let (kind, hint) = t.classify_error(401, "invalid api key");
+        assert!(matches!(kind, crate::error::ProviderErrorKind::Auth));
+        assert!(hint.is_some());
+    }
+
+    #[test]
+    fn classify_error_429_falls_through_to_default() {
+        let t = DirectTransport::new(
+            "https://api.anthropic.com",
+            DirectAuth::XApiKey(SecretString::from("k")),
+        );
+        let (kind, _) = t.classify_error(429, "rate limited");
+        assert!(matches!(kind, crate::error::ProviderErrorKind::RateLimit));
+    }
 }
