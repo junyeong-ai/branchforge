@@ -490,6 +490,78 @@ mod tool_call_parallel {
         assert_ne!(ids[0], ids[1]);
         assert!(ids[0].starts_with("call_"));
     }
+
+    #[test]
+    fn openai_chat() {
+        let codec = OpenAiChatCodec::new();
+        let resp = codec
+            .decode_response(
+                json!({
+                    "id": "x",
+                    "model": "x",
+                    "choices": [{
+                        "message": {
+                            "role": "assistant",
+                            "content": null,
+                            "tool_calls": [
+                                {"id": "call_a", "type": "function", "function": {"name": "first", "arguments": "{}"}},
+                                {"id": "call_b", "type": "function", "function": {"name": "second", "arguments": "{}"}}
+                            ]
+                        },
+                        "finish_reason": "tool_calls"
+                    }],
+                    "usage": {"prompt_tokens": 1, "completion_tokens": 1}
+                }),
+                InvocationMode::Unary,
+            )
+            .unwrap();
+        assert_two_calls_in_order(&resp, &["first", "second"]);
+    }
+
+    #[test]
+    fn openai_responses() {
+        let codec = OpenAiResponsesCodec::new();
+        let resp = codec
+            .decode_response(
+                json!({
+                    "id": "resp_1",
+                    "model": "x",
+                    "status": "completed",
+                    "output": [
+                        {"type": "function_call", "call_id": "call_a", "name": "first", "arguments": "{}"},
+                        {"type": "function_call", "call_id": "call_b", "name": "second", "arguments": "{}"}
+                    ],
+                    "usage": {"input_tokens": 1, "output_tokens": 1}
+                }),
+                InvocationMode::Unary,
+            )
+            .unwrap();
+        assert_two_calls_in_order(&resp, &["first", "second"]);
+    }
+
+    #[test]
+    fn bedrock_converse() {
+        let codec = BedrockConverseCodec::new();
+        let resp = codec
+            .decode_response(
+                json!({
+                    "output": {
+                        "message": {
+                            "role": "assistant",
+                            "content": [
+                                {"toolUse": {"toolUseId": "call_a", "name": "first", "input": {}}},
+                                {"toolUse": {"toolUseId": "call_b", "name": "second", "input": {}}}
+                            ]
+                        }
+                    },
+                    "stopReason": "tool_use",
+                    "usage": {"inputTokens": 1, "outputTokens": 1}
+                }),
+                InvocationMode::Unary,
+            )
+            .unwrap();
+        assert_two_calls_in_order(&resp, &["first", "second"]);
+    }
 }
 
 // =============================================================================
@@ -523,10 +595,17 @@ mod usage_extraction {
                 InvocationMode::Unary,
             )
             .unwrap();
-        assert_eq!(resp.usage.input_tokens, 10);
+        // IR contract: input_tokens is the TOTAL input (fresh + cache).
+        // Anthropic reports `input_tokens` as the *non-cached* portion
+        // only (10), so the decoder reconstructs the total: 10 + 8 + 2.
+        // Without this, `cached_input_tokens (8) > input_tokens (10)`
+        // would trip the `Usage::add` invariant under heavy caching
+        // (live API regularly returns cached=5253, input=2).
+        assert_eq!(resp.usage.input_tokens, 20);
         assert_eq!(resp.usage.output_tokens, 5);
         assert_eq!(resp.usage.cached_input_tokens, Some(8));
         assert_eq!(resp.usage.cache_creation_tokens, Some(2));
+        assert_eq!(resp.usage.billable_input_tokens(), 12);
     }
 
     #[test]
@@ -618,9 +697,13 @@ mod usage_extraction {
                 InvocationMode::Unary,
             )
             .unwrap();
-        assert_eq!(resp.usage.input_tokens, 100);
+        // Same total-input reconstruction as Anthropic — Bedrock Converse
+        // routes to Anthropic Claude with the same accounting model.
+        // input_tokens = fresh (100) + cache_read (60) + cache_write (5).
+        assert_eq!(resp.usage.input_tokens, 165);
         assert_eq!(resp.usage.cached_input_tokens, Some(60));
         assert_eq!(resp.usage.cache_creation_tokens, Some(5));
+        assert_eq!(resp.usage.billable_input_tokens(), 105);
     }
 }
 
@@ -1111,6 +1194,24 @@ mod tool_result_encode {
         assert!(s.contains("toolResult"));
         assert!(s.contains("toolUseId"));
         assert!(s.contains("call_xyz"));
+    }
+
+    #[test]
+    fn gemini_function_response_uses_tool_name() {
+        // Gemini's functionResponse requires the tool *name*, not the id —
+        // ToolResult must carry the tool_name across turns. The R8 fix
+        // added ContentPart::ToolResult.tool_name; this test pins the
+        // wire-format encode path so the round trip stays correct.
+        let s = body_str(&GeminiGenerateCodec::new());
+        assert!(
+            s.contains("functionResponse"),
+            "expected functionResponse in body: {s}"
+        );
+        assert!(
+            s.contains("\"name\":\"calc\""),
+            "expected tool name 'calc' in functionResponse: {s}"
+        );
+        assert!(s.contains("42"), "expected result '42' in body: {s}");
     }
 }
 

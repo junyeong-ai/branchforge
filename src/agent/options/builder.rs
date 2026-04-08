@@ -212,6 +212,88 @@ impl AgentBuilder {
     // Authentication
     // =========================================================================
 
+    /// `true` if `auth` should map to the direct Anthropic Messages API
+    /// (i.e. not a cloud-provider variant). Used by [`Self::auth`] to
+    /// decide whether to wire a `ProviderClient` from the resolved
+    /// credential rather than fall back to the env-var preset path.
+    fn auth_targets_direct_anthropic(auth: &crate::auth::Auth) -> bool {
+        #[allow(unreachable_patterns)]
+        match auth {
+            crate::auth::Auth::ApiKey(_)
+            | crate::auth::Auth::FromEnv
+            | crate::auth::Auth::OAuth { .. }
+            | crate::auth::Auth::Resolved(_) => true,
+            #[cfg(feature = "cli-auth")]
+            crate::auth::Auth::ClaudeCli => true,
+            // Cloud-provider variants are routed via their own preset
+            // paths (Bedrock SigV4, Vertex ADC, Foundry Entra) and never
+            // resolve to a credential here.
+            _ => false,
+        }
+    }
+
+    /// Build a `ProviderClient` for the direct Anthropic Messages API
+    /// from a resolved credential. The transport is wired to the optional
+    /// refresh provider so 401s after token expiry can recover without
+    /// rebuilding the agent.
+    ///
+    /// When the credential is an `OAuth` variant (Claude Code CLI), the
+    /// transport additionally injects the OAuth-specific headers
+    /// (`user-agent`, `x-app`, `anthropic-dangerous-direct-browser-access`,
+    /// `anthropic-beta: oauth-2025-04-20,claude-code-20250219`) and the
+    /// `?beta=true` URL parameter that the Anthropic API requires to
+    /// accept Bearer tokens. Without this, the API rejects OAuth requests
+    /// with `"OAuth authentication is currently not supported."`.
+    fn build_anthropic_direct_client(
+        credential: &Credential,
+        refresh_provider: Option<Arc<dyn crate::auth::CredentialProvider>>,
+    ) -> crate::Result<crate::client::provider_client::ProviderClient> {
+        use crate::auth::{CLAUDE_CODE_BETA, OAuthConfig};
+        use crate::client::codec::AnthropicMessagesCodec;
+        use crate::client::provider_client::ProviderClient;
+        use crate::client::transport::{DirectAuth, DirectTransport};
+
+        let is_oauth = matches!(credential, Credential::OAuth(_));
+        let direct_auth = match credential {
+            // Anthropic Direct accepts API keys via the `x-api-key` header.
+            Credential::ApiKey(secret) => DirectAuth::XApiKey(secret.clone()),
+            // OAuth tokens (Claude CLI) ride on `Authorization: Bearer ...`.
+            Credential::OAuth(oauth) => DirectAuth::Bearer(oauth.access_token.clone()),
+        };
+
+        let base = std::env::var("ANTHROPIC_BASE_URL")
+            .unwrap_or_else(|_| "https://api.anthropic.com".into());
+        let mut transport =
+            DirectTransport::new(base, direct_auth).with_allowed_codecs(&["anthropic-messages"]);
+
+        if is_oauth {
+            // The Anthropic API only accepts Bearer tokens when these
+            // headers + URL flag are present together. The `BetaFeature::OAuth`
+            // header value is the same `oauth-2025-04-20` constant used by
+            // `OAuthConfig::build_beta_header`.
+            let cfg = OAuthConfig::default();
+            let oauth_beta = crate::agent::BetaFeature::OAuth.header_value();
+            let beta_header = format!("{},{}", oauth_beta, CLAUDE_CODE_BETA);
+            let mut extra_headers: std::collections::HashMap<String, String> =
+                cfg.extra_headers.clone();
+            extra_headers.insert("user-agent".to_string(), cfg.user_agent.clone());
+            extra_headers.insert("x-app".to_string(), cfg.app_identifier.clone());
+            extra_headers.insert("anthropic-beta".to_string(), beta_header);
+            transport = transport
+                .with_extra_headers(extra_headers)
+                .with_extra_url_params(cfg.url_params.clone());
+        }
+
+        if let Some(provider) = refresh_provider {
+            transport = transport.with_credential_provider(provider);
+        }
+
+        let codec =
+            Arc::new(AnthropicMessagesCodec::new()) as Arc<dyn crate::client::codec::ModelCodec>;
+        let transport = Arc::new(transport) as Arc<dyn crate::client::transport::ModelTransport>;
+        ProviderClient::new(codec, transport)
+    }
+
     /// Configures authentication for the API.
     ///
     /// # Supported Methods
@@ -273,9 +355,32 @@ impl AgentBuilder {
             _ => {}
         }
 
-        let credential = auth.resolve().await?;
+        // `resolve_with_provider` returns both the resolved credential and
+        // the refresh-capable provider (if any). For OAuth-style auth
+        // (Claude CLI), the provider is what wires `DirectTransport::refresh`
+        // so 401s recover from token expiry without rebuilding the client.
+        let (credential, refresh_provider) = auth.resolve_with_provider().await?;
         if !credential.is_placeholder() {
-            self.credential = Some(credential);
+            self.credential = Some(credential.clone());
+        }
+
+        // If the user picked a direct-API auth that resolved to a real
+        // credential AND didn't already supply an explicit `provider_client`,
+        // build the matching ProviderClient now so `build()` doesn't fall
+        // back to the env-var preset path (which would ignore the resolved
+        // credential and fail with "ANTHROPIC_API_KEY not set"). Cloud
+        // providers (Bedrock/Vertex/Foundry) keep their existing path —
+        // they don't resolve through this credential, only the cloud
+        // provider routing handled above.
+        if self.provider_client.is_none()
+            && !credential.is_placeholder()
+            && Self::auth_targets_direct_anthropic(&auth)
+        {
+            self.cloud_provider = Some(CloudProvider::Anthropic);
+            self.provider_client = Some(Self::build_anthropic_direct_client(
+                &credential,
+                refresh_provider,
+            )?);
         }
 
         self.auth_type = Some(auth);

@@ -691,11 +691,21 @@ fn decode_stop_reason(raw: &str, has_tool_calls: bool) -> FinishReason {
 }
 
 fn decode_usage(v: &Value) -> Usage {
+    // Bedrock Converse routes to the same Anthropic Claude models that
+    // bill `inputTokens` as the *non-cached* portion. The IR contract
+    // (see `ir::Usage::add` debug_assert) requires `input_tokens` to be
+    // the TOTAL input. Reconstruct the total here so cache reads stay a
+    // subset of input_tokens and pricing math is consistent with the
+    // direct Anthropic codec.
+    let fresh_input = v.get("inputTokens").and_then(Value::as_u64).unwrap_or(0);
+    let cache_read = v.get("cacheReadInputTokens").and_then(Value::as_u64);
+    let cache_create = v.get("cacheWriteInputTokens").and_then(Value::as_u64);
+    let total_input = fresh_input + cache_read.unwrap_or(0) + cache_create.unwrap_or(0);
     Usage {
-        input_tokens: v.get("inputTokens").and_then(Value::as_u64).unwrap_or(0),
+        input_tokens: total_input,
         output_tokens: v.get("outputTokens").and_then(Value::as_u64).unwrap_or(0),
-        cached_input_tokens: v.get("cacheReadInputTokens").and_then(Value::as_u64),
-        cache_creation_tokens: v.get("cacheWriteInputTokens").and_then(Value::as_u64),
+        cached_input_tokens: cache_read,
+        cache_creation_tokens: cache_create,
         reasoning_tokens: None,
         audio_input_tokens: None,
         audio_output_tokens: None,
@@ -1124,8 +1134,13 @@ mod tests {
         let resp = c.decode_response(raw, InvocationMode::Unary).unwrap();
         assert_eq!(resp.text(), "hi");
         assert_eq!(resp.finish_reason, FinishReason::Stop);
-        assert_eq!(resp.usage.input_tokens, 5);
+        // IR contract: input_tokens is the TOTAL input. Bedrock Converse
+        // routes to Anthropic Claude with the same accounting model:
+        // `inputTokens` is the *non-cached* portion (5), and the decoder
+        // reconstructs 5 + 2 = 7.
+        assert_eq!(resp.usage.input_tokens, 7);
         assert_eq!(resp.usage.cached_input_tokens, Some(2));
+        assert_eq!(resp.usage.billable_input_tokens(), 5);
     }
 
     #[test]

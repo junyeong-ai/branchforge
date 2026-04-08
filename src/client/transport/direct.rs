@@ -73,6 +73,13 @@ pub struct DirectTransport {
     /// underlying provider supports `refresh()` — for static API keys this
     /// stays `None`.
     credential_provider: Option<Arc<dyn crate::auth::CredentialProvider>>,
+    /// Static headers added to every request. Used by Claude Code OAuth
+    /// to inject `user-agent`, `x-app`, `anthropic-beta`, and the
+    /// `anthropic-dangerous-direct-browser-access` flag.
+    extra_headers: HashMap<String, String>,
+    /// Static URL query parameters appended to every request. Used by
+    /// Claude Code OAuth (`?beta=true`).
+    extra_url_params: HashMap<String, String>,
 }
 
 impl std::fmt::Debug for DirectTransport {
@@ -96,6 +103,8 @@ impl DirectTransport {
             context: HashMap::new(),
             allowed_codecs: Arc::from([] as [&'static str; 0]),
             credential_provider: None,
+            extra_headers: HashMap::new(),
+            extra_url_params: HashMap::new(),
         }
     }
 
@@ -123,6 +132,23 @@ impl DirectTransport {
         provider: Arc<dyn crate::auth::CredentialProvider>,
     ) -> Self {
         self.credential_provider = Some(provider);
+        self
+    }
+
+    /// Attach static headers added to every request. Existing context
+    /// headers and the `Authorization` header are merged on top — the
+    /// `extra_headers` map is best used for vendor-specific OAuth flags
+    /// like `user-agent`, `x-app`, and `anthropic-beta` (Claude Code).
+    pub fn with_extra_headers(mut self, headers: HashMap<String, String>) -> Self {
+        self.extra_headers = headers;
+        self
+    }
+
+    /// Attach static URL query parameters appended to every request URL.
+    /// Used by Claude Code OAuth (`?beta=true`); the QueryParam auth path
+    /// is unaffected (it appends its own `?key=` separately).
+    pub fn with_extra_url_params(mut self, params: HashMap<String, String>) -> Self {
+        self.extra_url_params = params;
         self
     }
 
@@ -195,6 +221,21 @@ impl ModelTransport for DirectTransport {
         let mut url = format!("{}/{}", self.base_url, path.trim_start_matches('/'));
         append_stream_query(&mut url, shape, mode);
 
+        // Append static `extra_url_params` (Claude Code OAuth uses
+        // `?beta=true` to enable the OAuth-aware code path on the
+        // Anthropic API). Sorted for stable ordering across calls.
+        if !self.extra_url_params.is_empty() {
+            let mut entries: Vec<(&String, &String)> = self.extra_url_params.iter().collect();
+            entries.sort_by(|a, b| a.0.cmp(b.0));
+            for (k, v) in entries {
+                let separator = if url.contains('?') { '&' } else { '?' };
+                url.push(separator);
+                url.push_str(k);
+                url.push('=');
+                url.push_str(v);
+            }
+        }
+
         // Append `?key=` query for QueryParam auth (Gemini direct).
         {
             let auth = self.auth.read().await;
@@ -208,7 +249,8 @@ impl ModelTransport for DirectTransport {
         }
 
         // Resolve required headers.
-        let mut headers = Vec::with_capacity(shape.required_headers.len());
+        let mut headers =
+            Vec::with_capacity(shape.required_headers.len() + self.extra_headers.len() + 1);
         for h in shape.required_headers {
             let value = match h.source {
                 HeaderSource::Literal(s) => s.to_string(),
@@ -224,6 +266,9 @@ impl ModelTransport for DirectTransport {
                     })?,
             };
             headers.push((h.name.to_string(), value));
+        }
+        for (k, v) in &self.extra_headers {
+            headers.push((k.clone(), v.clone()));
         }
         headers.push(("content-type".to_string(), "application/json".to_string()));
 

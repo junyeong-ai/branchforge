@@ -218,6 +218,23 @@ impl ModelCodec for AnthropicMessagesCodec {
             ));
         }
 
+        // Anthropic Messages caps prompt-caching at MAX_CACHE_BREAKPOINTS
+        // markers per request. Multiple sources contribute markers
+        // (per-block `cache_marker` on system blocks, `apply_cache_control`
+        // on system/tools/conversation), and the agent runtime can easily
+        // exceed the cap when several static-context blocks are cached.
+        // Enforce the cap here as the single chokepoint, dropping the
+        // EARLIEST markers (later markers cache more content per Anthropic
+        // semantics, so keeping them maximises cache effectiveness).
+        let removed = enforce_cache_breakpoint_cap(&mut body);
+        if removed > 0 {
+            warnings.push(ModelWarning::lossy(
+                "cache_control",
+                "anthropic-messages caps cache_control at 4 markers per request; \
+                 dropped earliest markers",
+            ));
+        }
+
         Ok(EncodedRequest { body, warnings })
     }
 
@@ -478,8 +495,137 @@ fn encode_tool_choice(choice: &crate::ir::ToolChoice) -> Value {
     }
 }
 
+/// Anthropic Messages API caps prompt-caching at this many `cache_control`
+/// markers per request. Exceeding the limit returns
+/// `400 invalid_request_error: A maximum of 4 blocks with cache_control may
+/// be provided.`.
+const MAX_CACHE_BREAKPOINTS: usize = 4;
+
+/// Walk the encoded body and ensure at most [`MAX_CACHE_BREAKPOINTS`]
+/// `cache_control` markers remain. Markers later in the request stream
+/// cache more content (Anthropic incremental caching includes everything
+/// before the marker), so we drop the EARLIEST markers when over the cap.
+///
+/// Returns the number of markers removed so the caller can surface a
+/// `ModelWarning::lossy` for observability.
+///
+/// Order in which markers are visited (request stream order):
+/// 1. `system` array blocks (top-down)
+/// 2. `tools` array (top-down)
+/// 3. `messages` array, each message's `content` array (top-down)
+fn enforce_cache_breakpoint_cap(body: &mut Value) -> usize {
+    // Count helper: walk all marker positions in stream order.
+    fn count_markers(body: &Value) -> usize {
+        let mut n = 0;
+        if let Some(arr) = body.get("system").and_then(Value::as_array) {
+            for block in arr {
+                if block.get("cache_control").is_some() {
+                    n += 1;
+                }
+            }
+        }
+        if let Some(arr) = body.get("tools").and_then(Value::as_array) {
+            for tool in arr {
+                if tool.get("cache_control").is_some() {
+                    n += 1;
+                }
+            }
+        }
+        if let Some(arr) = body.get("messages").and_then(Value::as_array) {
+            for msg in arr {
+                if let Some(content) = msg.get("content").and_then(Value::as_array) {
+                    for block in content {
+                        if block.get("cache_control").is_some() {
+                            n += 1;
+                        }
+                    }
+                }
+            }
+        }
+        n
+    }
+
+    let total = count_markers(body);
+    if total <= MAX_CACHE_BREAKPOINTS {
+        return 0;
+    }
+
+    let mut to_drop = total - MAX_CACHE_BREAKPOINTS;
+    let removed = to_drop;
+
+    // Pass 2 — drop the earliest `to_drop` markers in stream order.
+    // System blocks come first, then tools, then messages content.
+    if to_drop > 0
+        && let Some(arr) = body.get_mut("system").and_then(Value::as_array_mut)
+    {
+        for block in arr.iter_mut() {
+            if to_drop == 0 {
+                break;
+            }
+            if let Some(obj) = block.as_object_mut()
+                && obj.remove("cache_control").is_some()
+            {
+                to_drop -= 1;
+            }
+        }
+    }
+    if to_drop > 0
+        && let Some(arr) = body.get_mut("tools").and_then(Value::as_array_mut)
+    {
+        for tool in arr.iter_mut() {
+            if to_drop == 0 {
+                break;
+            }
+            if let Some(obj) = tool.as_object_mut()
+                && obj.remove("cache_control").is_some()
+            {
+                to_drop -= 1;
+            }
+        }
+    }
+    if to_drop > 0
+        && let Some(arr) = body.get_mut("messages").and_then(Value::as_array_mut)
+    {
+        for msg in arr.iter_mut() {
+            if to_drop == 0 {
+                break;
+            }
+            if let Some(content) = msg.get_mut("content").and_then(Value::as_array_mut) {
+                for block in content.iter_mut() {
+                    if to_drop == 0 {
+                        break;
+                    }
+                    if let Some(obj) = block.as_object_mut()
+                        && obj.remove("cache_control").is_some()
+                    {
+                        to_drop -= 1;
+                    }
+                }
+            }
+        }
+    }
+
+    debug_assert_eq!(
+        to_drop, 0,
+        "enforce_cache_breakpoint_cap: failed to remove all excess markers"
+    );
+    removed
+}
+
 fn apply_cache_control(body: &mut Value, cc: &crate::ir::CacheControl) {
-    let marker = json!({"type": "ephemeral"});
+    // Anthropic enforces TTL ordering across the request stream (`tools`
+    // → `system` → `messages`): a longer-TTL marker must NOT come after
+    // a shorter-TTL marker. Per-block cache markers carry their TTL via
+    // `SystemBlock::cache_marker.ttl`; the markers added here from
+    // `CacheControl` flags must use the SAME TTL so the stream stays
+    // monotonically non-increasing. Defaulting to no-ttl (5m) while the
+    // per-block markers run at 1h triggers
+    // `system.N.cache_control.ttl: a ttl='1h' must not come after a
+    // ttl='5m' cache_control block` from the live API.
+    let mut marker = json!({"type": "ephemeral"});
+    if let Some(ttl) = &cc.ttl {
+        marker["ttl"] = json!(ttl);
+    }
 
     if cc.system
         && let Some(system) = body.get_mut("system")
@@ -618,11 +764,21 @@ fn decode_stop_reason(s: &str) -> FinishReason {
 }
 
 fn decode_usage(v: &Value) -> Usage {
+    // Anthropic Messages reports `input_tokens` as the *non-cached* input
+    // (the portion billed at the standard input rate). The IR contract
+    // (see `ir::Usage::add` debug_assert) requires `input_tokens` to be
+    // the TOTAL input — i.e. cached_input_tokens must be a subset of
+    // input_tokens. Reconstruct the total here so accumulation across
+    // turns and pricing math (`billable_input_tokens()`) stay correct.
+    let fresh_input = v.get("input_tokens").and_then(Value::as_u64).unwrap_or(0);
+    let cache_read = v.get("cache_read_input_tokens").and_then(Value::as_u64);
+    let cache_create = v.get("cache_creation_input_tokens").and_then(Value::as_u64);
+    let total_input = fresh_input + cache_read.unwrap_or(0) + cache_create.unwrap_or(0);
     Usage {
-        input_tokens: v.get("input_tokens").and_then(Value::as_u64).unwrap_or(0),
+        input_tokens: total_input,
         output_tokens: v.get("output_tokens").and_then(Value::as_u64).unwrap_or(0),
-        cached_input_tokens: v.get("cache_read_input_tokens").and_then(Value::as_u64),
-        cache_creation_tokens: v.get("cache_creation_input_tokens").and_then(Value::as_u64),
+        cached_input_tokens: cache_read,
+        cache_creation_tokens: cache_create,
         reasoning_tokens: None,
         audio_input_tokens: None,
         audio_output_tokens: None,
@@ -755,10 +911,25 @@ fn decode_content_block_stop(v: &Value) -> Vec<ModelStreamChunk> {
 fn decode_message_delta(v: &Value) -> Vec<ModelStreamChunk> {
     let mut out = Vec::new();
     if let Some(usage) = v.get("usage") {
+        // Same total-input reconstruction as `decode_usage` — the IR
+        // contract requires `cached_input_tokens` to be a subset of
+        // `input_tokens`, but Anthropic reports `input_tokens` as the
+        // non-cached portion only.
+        let fresh_input = usage.get("input_tokens").and_then(Value::as_u64);
+        let cache_read = usage.get("cache_read_input_tokens").and_then(Value::as_u64);
+        let cache_create = usage
+            .get("cache_creation_input_tokens")
+            .and_then(Value::as_u64);
+        let total_input = match (fresh_input, cache_read, cache_create) {
+            (None, None, None) => None,
+            _ => {
+                Some(fresh_input.unwrap_or(0) + cache_read.unwrap_or(0) + cache_create.unwrap_or(0))
+            }
+        };
         let pu = crate::ir::PartialUsage {
             output_tokens: usage.get("output_tokens").and_then(Value::as_u64),
-            input_tokens: usage.get("input_tokens").and_then(Value::as_u64),
-            cached_input_tokens: usage.get("cache_read_input_tokens").and_then(Value::as_u64),
+            input_tokens: total_input,
+            cached_input_tokens: cache_read,
             reasoning_tokens: None,
         };
         out.push(ModelStreamChunk::UsageDelta(pu));
@@ -1026,9 +1197,13 @@ mod tests {
         assert_eq!(resp.id, "msg_1");
         assert_eq!(resp.text(), "hi there");
         assert_eq!(resp.finish_reason, FinishReason::Stop);
-        assert_eq!(resp.usage.input_tokens, 10);
+        // IR contract: input_tokens is the TOTAL input. Anthropic reports
+        // it as the *non-cached* portion (10), so the decoder reconstructs
+        // 10 + 3 (cache_read) = 13. cached_input_tokens stays 3 (subset).
+        assert_eq!(resp.usage.input_tokens, 13);
         assert_eq!(resp.usage.output_tokens, 5);
         assert_eq!(resp.usage.cached_input_tokens, Some(3));
+        assert_eq!(resp.usage.billable_input_tokens(), 10);
     }
 
     #[test]
