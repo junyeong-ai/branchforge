@@ -26,18 +26,20 @@
 use serde_json::{Value, json};
 
 use super::{ApiVersionHint, EncodedRequest, EndpointShape, InvocationMode, ModelCodec};
+use crate::client::schema::transform_for_strict;
 use crate::ir::{
     CacheGranularity, CacheSupport, ContentPart, Continuation, FinishReason, MediaSource, Message,
     ModelRequest, ModelResponse, ModelStreamChunk, ModelWarning, ProviderCapabilities,
-    ReasoningContent, ReasoningKind, ReasoningSignature, ReasoningSupport, Role, StreamDecodeState,
-    StructuredOutputSupport, Support, SystemPromptShape, ToolCallSupport, ToolDefinition,
-    ToolIdSemantics, ToolOrigin, ToolResultContent, Usage, VisionSupport,
+    ReasoningContent, ReasoningKind, ReasoningSignature, ReasoningSupport, ResponseFormat, Role,
+    StreamDecodeState, StructuredOutputSupport, Support, SystemPromptShape, ToolCallSupport,
+    ToolDefinition, ToolIdSemantics, ToolOrigin, ToolResultContent, Usage, VisionSupport,
 };
 use crate::{Error, Result};
 
 const CODEC_ID: &str = "openai-responses";
 
 const SHAPE: EndpointShape = EndpointShape {
+    codec_id: CODEC_ID,
     path_template: "v1/responses",
     verb_unary: "",
     verb_stream: "",
@@ -141,6 +143,41 @@ impl ModelCodec for OpenAiResponsesCodec {
         }
         if let Some(choice) = &request.tool_choice {
             body["tool_choice"] = encode_tool_choice(choice);
+        }
+
+        // Structured output. The Responses API takes the schema under
+        // `text.format` (not the legacy `response_format`). For
+        // `JsonSchema` we run `transform_for_strict` so the schema satisfies
+        // OpenAI's strict-mode validator (no missing `additionalProperties`
+        // gates, all properties listed in `required`).
+        if let Some(format) = &request.response_format {
+            match format {
+                ResponseFormat::Text => {
+                    body["text"] = json!({"format": {"type": "text"}});
+                }
+                ResponseFormat::JsonObject => {
+                    body["text"] = json!({"format": {"type": "json_object"}});
+                }
+                ResponseFormat::JsonSchema {
+                    name,
+                    schema,
+                    strict,
+                } => {
+                    let prepared = if *strict {
+                        transform_for_strict(schema.clone())
+                    } else {
+                        schema.clone()
+                    };
+                    body["text"] = json!({
+                        "format": {
+                            "type": "json_schema",
+                            "name": name,
+                            "schema": prepared,
+                            "strict": strict,
+                        }
+                    });
+                }
+            }
         }
 
         // Settings.
@@ -854,6 +891,46 @@ mod tests {
         assert_eq!(item["role"], "user");
         assert_eq!(item["content"][0]["type"], "input_text");
         assert_eq!(item["content"][0]["text"], "hello");
+    }
+
+    #[test]
+    fn encode_json_schema_response_format_uses_text_format_envelope() {
+        let c = OpenAiResponsesCodec::new();
+        let mut r = req(vec![Message::user("emit json")]);
+        r.response_format = Some(ResponseFormat::JsonSchema {
+            name: "Person".into(),
+            schema: json!({
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string"}
+                }
+            }),
+            strict: true,
+        });
+        let enc = c.encode_request(&r, InvocationMode::Unary).unwrap();
+        assert_eq!(enc.body["text"]["format"]["type"], "json_schema");
+        assert_eq!(enc.body["text"]["format"]["name"], "Person");
+        assert_eq!(enc.body["text"]["format"]["strict"], true);
+        // The strict transform must populate `additionalProperties: false`
+        // and auto-generate the `required` array because the input did not
+        // declare one.
+        assert_eq!(
+            enc.body["text"]["format"]["schema"]["additionalProperties"],
+            false
+        );
+        let req_arr = enc.body["text"]["format"]["schema"]["required"]
+            .as_array()
+            .unwrap();
+        assert!(req_arr.iter().any(|v| v == "name"));
+    }
+
+    #[test]
+    fn encode_json_object_response_format() {
+        let c = OpenAiResponsesCodec::new();
+        let mut r = req(vec![Message::user("emit json")]);
+        r.response_format = Some(ResponseFormat::JsonObject);
+        let enc = c.encode_request(&r, InvocationMode::Unary).unwrap();
+        assert_eq!(enc.body["text"]["format"]["type"], "json_object");
     }
 
     #[test]

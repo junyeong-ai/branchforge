@@ -37,6 +37,7 @@ use crate::{Error, Result};
 const CODEC_ID: &str = "bedrock-converse";
 
 const SHAPE: EndpointShape = EndpointShape {
+    codec_id: CODEC_ID,
     // Bedrock URL is fully built by the transport because it includes the
     // model id in the path. The codec just declares the verb names so the
     // transport can switch between unary and streaming.
@@ -69,11 +70,11 @@ const CAPABILITIES: ProviderCapabilities = ProviderCapabilities {
         accepts_url: false,
     },
     prompt_caching: CacheSupport {
-        // Bedrock supports prompt caching for some models via cachePoint
-        // checkpoints inside the messages array. We map AnthropicOptions::cache_control
-        // through additionalModelRequestFields rather than using the Bedrock
-        // cachePoint feature directly — degraded support.
-        mode: Support::Emulated,
+        // Bedrock Converse supports prompt caching natively via inline
+        // `cachePoint` blocks. The codec translates the IR's
+        // `provider_options.anthropic.cache_control` flag set into
+        // cachePoint blocks via `apply_cache_points`.
+        mode: Support::Native,
         granularity: CacheGranularity::Conversation,
     },
     reasoning: ReasoningSupport {
@@ -189,6 +190,18 @@ impl ModelCodec for BedrockConverseCodec {
             }
         }
 
+        // Structured output. Bedrock Converse delegates structured output
+        // to the underlying model and does not expose a portable
+        // `response_format` field — Anthropic models on Bedrock follow the
+        // same tool-emulation pattern as the direct Anthropic API. Surface
+        // a CapabilityEmulated warning so callers know the IR field is
+        // honoured by emulation rather than a native parameter.
+        if request.response_format.is_some() {
+            warnings.push(ModelWarning::CapabilityEmulated {
+                capability: "response_format".to_string(),
+            });
+        }
+
         // additionalModelRequestFields collects model-specific knobs that
         // Converse passes through to the underlying model.
         let mut additional = serde_json::Map::new();
@@ -239,6 +252,16 @@ impl ModelCodec for BedrockConverseCodec {
         }
         if !additional.is_empty() {
             body["additionalModelRequestFields"] = Value::Object(additional);
+        }
+
+        // Bedrock Converse cachePoint translation. The Anthropic-style
+        // `cache_control` flag set picks which positions get a cachePoint
+        // block, mirroring the Anthropic Messages codec but using Converse's
+        // inline-block syntax instead of `cache_control` annotations.
+        if let Some(opts) = &request.provider_options.anthropic
+            && let Some(cc) = &opts.cache_control
+        {
+            apply_cache_points(&mut body, cc);
         }
 
         warn_dropped_provider_options(&request.provider_options, &mut warnings);
@@ -453,6 +476,7 @@ fn encode_content_part(part: &ContentPart) -> Result<Option<Value>> {
         })),
         ContentPart::ToolResult {
             tool_call_id,
+            tool_name: _, // Bedrock Converse echoes only toolUseId
             content,
             is_error,
         } => {
@@ -521,6 +545,44 @@ fn encode_tool_choice(choice: &crate::ir::ToolChoice) -> Option<Value> {
         // Bedrock Converse has no explicit "none"; the caller can omit
         // the toolConfig instead.
         crate::ir::ToolChoice::None => None,
+    }
+}
+
+/// Inject Bedrock Converse `cachePoint` blocks into the encoded body
+/// based on the IR [`crate::ir::CacheControl`] flag set.
+///
+/// Mirrors the role of `apply_cache_control` in the Anthropic Messages
+/// codec, but uses Converse's inline-block syntax (`{"cachePoint": {"type":
+/// "default"}}`) inserted as a sibling of `text`/`image`/`toolResult`
+/// content blocks instead of an annotation on a single block.
+fn apply_cache_points(body: &mut Value, cc: &crate::ir::CacheControl) {
+    let cp = json!({"cachePoint": {"type": "default"}});
+
+    // System cache point — appended to the system array.
+    if cc.system
+        && let Some(system) = body.get_mut("system").and_then(Value::as_array_mut)
+    {
+        system.push(cp.clone());
+    }
+
+    // Tool catalogue cache point — appended to toolConfig.tools.
+    if cc.tools
+        && let Some(tools) = body
+            .get_mut("toolConfig")
+            .and_then(|tc| tc.get_mut("tools"))
+            .and_then(Value::as_array_mut)
+    {
+        tools.push(cp.clone());
+    }
+
+    // Conversation cache point — appended to the last message's content
+    // array. Bedrock interprets this as "cache the prefix up to here".
+    if cc.conversation
+        && let Some(messages) = body.get_mut("messages").and_then(Value::as_array_mut)
+        && let Some(last) = messages.last_mut()
+        && let Some(content) = last.get_mut("content").and_then(Value::as_array_mut)
+    {
+        content.push(cp);
     }
 }
 
@@ -836,6 +898,144 @@ mod tests {
     }
 
     #[test]
+    fn cache_control_only_system_emits_cache_point_in_system_only() {
+        use crate::ir::{AnthropicOptions, CacheControl, SystemPrompt};
+        let c = BedrockConverseCodec::new();
+        let mut r = req(vec![Message::user("hello")]);
+        r.system = Some(SystemPrompt::from("you are helpful"));
+        r.tools = vec![ToolDefinition::new("calc", json!({"type": "object"}))];
+        r.provider_options.anthropic = Some(AnthropicOptions {
+            cache_control: Some(CacheControl {
+                system: true,
+                tools: false,
+                conversation: false,
+                ttl: None,
+            }),
+            ..Default::default()
+        });
+        let enc = c.encode_request(&r, InvocationMode::Unary).unwrap();
+        let system = enc.body["system"].as_array().unwrap();
+        assert!(system.iter().any(|i| i.get("cachePoint").is_some()));
+        let tools = enc.body["toolConfig"]["tools"].as_array().unwrap();
+        assert!(!tools.iter().any(|i| i.get("cachePoint").is_some()));
+        let last = enc.body["messages"].as_array().unwrap().last().unwrap();
+        let content = last["content"].as_array().unwrap();
+        assert!(!content.iter().any(|i| i.get("cachePoint").is_some()));
+    }
+
+    #[test]
+    fn cache_control_only_tools_emits_cache_point_in_tools_only() {
+        use crate::ir::{AnthropicOptions, CacheControl, SystemPrompt};
+        let c = BedrockConverseCodec::new();
+        let mut r = req(vec![Message::user("hello")]);
+        r.system = Some(SystemPrompt::from("you are helpful"));
+        r.tools = vec![ToolDefinition::new("calc", json!({"type": "object"}))];
+        r.provider_options.anthropic = Some(AnthropicOptions {
+            cache_control: Some(CacheControl {
+                system: false,
+                tools: true,
+                conversation: false,
+                ttl: None,
+            }),
+            ..Default::default()
+        });
+        let enc = c.encode_request(&r, InvocationMode::Unary).unwrap();
+        let system = enc.body["system"].as_array().unwrap();
+        assert!(!system.iter().any(|i| i.get("cachePoint").is_some()));
+        let tools = enc.body["toolConfig"]["tools"].as_array().unwrap();
+        assert!(tools.iter().any(|i| i.get("cachePoint").is_some()));
+    }
+
+    #[test]
+    fn cache_control_only_conversation_emits_cache_point_in_last_message_only() {
+        use crate::ir::{AnthropicOptions, CacheControl, SystemPrompt};
+        let c = BedrockConverseCodec::new();
+        let mut r = req(vec![Message::user("hello")]);
+        r.system = Some(SystemPrompt::from("you are helpful"));
+        r.tools = vec![ToolDefinition::new("calc", json!({"type": "object"}))];
+        r.provider_options.anthropic = Some(AnthropicOptions {
+            cache_control: Some(CacheControl {
+                system: false,
+                tools: false,
+                conversation: true,
+                ttl: None,
+            }),
+            ..Default::default()
+        });
+        let enc = c.encode_request(&r, InvocationMode::Unary).unwrap();
+        let system = enc.body["system"].as_array().unwrap();
+        assert!(!system.iter().any(|i| i.get("cachePoint").is_some()));
+        let tools = enc.body["toolConfig"]["tools"].as_array().unwrap();
+        assert!(!tools.iter().any(|i| i.get("cachePoint").is_some()));
+        let last = enc.body["messages"].as_array().unwrap().last().unwrap();
+        let content = last["content"].as_array().unwrap();
+        assert!(content.iter().any(|i| i.get("cachePoint").is_some()));
+    }
+
+    #[test]
+    fn cache_control_all_false_emits_no_cache_points() {
+        use crate::ir::{AnthropicOptions, CacheControl, SystemPrompt};
+        let c = BedrockConverseCodec::new();
+        let mut r = req(vec![Message::user("hello")]);
+        r.system = Some(SystemPrompt::from("you are helpful"));
+        r.tools = vec![ToolDefinition::new("calc", json!({"type": "object"}))];
+        r.provider_options.anthropic = Some(AnthropicOptions {
+            cache_control: Some(CacheControl::default()),
+            ..Default::default()
+        });
+        let enc = c.encode_request(&r, InvocationMode::Unary).unwrap();
+        for path in [&enc.body["system"], &enc.body["toolConfig"]["tools"]] {
+            if let Some(arr) = path.as_array() {
+                assert!(!arr.iter().any(|i| i.get("cachePoint").is_some()));
+            }
+        }
+    }
+
+    #[test]
+    fn cache_control_translates_to_inline_cache_points() {
+        use crate::ir::{AnthropicOptions, CacheControl, SystemPrompt};
+        let c = BedrockConverseCodec::new();
+        let mut r = req(vec![Message::user("hello")]);
+        r.system = Some(SystemPrompt::from("you are helpful"));
+        r.tools = vec![ToolDefinition::new("calc", json!({"type": "object"}))];
+        r.provider_options.anthropic = Some(AnthropicOptions {
+            cache_control: Some(CacheControl {
+                system: true,
+                tools: true,
+                conversation: true,
+                ttl: None,
+            }),
+            ..Default::default()
+        });
+
+        let enc = c.encode_request(&r, InvocationMode::Unary).unwrap();
+
+        // System cache point appended to the system array.
+        let system = enc.body["system"].as_array().unwrap();
+        assert!(
+            system
+                .iter()
+                .any(|item| item.get("cachePoint").is_some()),
+            "system array missing cachePoint"
+        );
+
+        // Tools cache point appended to toolConfig.tools.
+        let tools = enc.body["toolConfig"]["tools"].as_array().unwrap();
+        assert!(
+            tools.iter().any(|item| item.get("cachePoint").is_some()),
+            "toolConfig.tools missing cachePoint"
+        );
+
+        // Conversation cache point appended to the last message's content.
+        let last_msg = enc.body["messages"].as_array().unwrap().last().unwrap();
+        let content = last_msg["content"].as_array().unwrap();
+        assert!(
+            content.iter().any(|item| item.get("cachePoint").is_some()),
+            "last message content missing cachePoint"
+        );
+    }
+
+    #[test]
     fn encode_drops_sibling_provider_options() {
         let c = BedrockConverseCodec::new();
         let mut r = req(vec![Message::user("hi")]);
@@ -852,6 +1052,26 @@ mod tests {
             .collect();
         assert!(providers.contains(&"openai"));
         assert!(providers.contains(&"gemini"));
+    }
+
+    #[test]
+    fn response_format_emits_capability_emulated_warning() {
+        // Bedrock Converse delegates structured output to the underlying
+        // model. The codec surfaces the gap as a CapabilityEmulated warning
+        // so the caller knows the request was honoured by emulation rather
+        // than a native parameter.
+        let c = BedrockConverseCodec::new();
+        let mut r = req(vec![Message::user("emit json")]);
+        r.response_format = Some(crate::ir::ResponseFormat::JsonObject);
+        let enc = c.encode_request(&r, InvocationMode::Unary).unwrap();
+        assert!(
+            enc.warnings.iter().any(|w| matches!(
+                w,
+                ModelWarning::CapabilityEmulated { capability } if capability == "response_format"
+            )),
+            "expected CapabilityEmulated warning, got {:?}",
+            enc.warnings
+        );
     }
 
     #[test]

@@ -3,7 +3,7 @@
 use std::sync::Arc;
 
 use super::directory::AgentDirectory;
-use crate::client::ModelConfig;
+use crate::agent::ModelConfig;
 use crate::tools::Tool;
 
 /// Context provided to [`Coordination`] methods.

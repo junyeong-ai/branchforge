@@ -7,7 +7,7 @@
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
-use crate::client::{ModelConfig, ModelType};
+use crate::agent::{ModelConfig, ModelType};
 use crate::common::{ContentSource, Index, Named, SourceType, ToolRestricted};
 
 /// Subagent index entry - minimal metadata always available in context.

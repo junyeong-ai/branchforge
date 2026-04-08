@@ -2,7 +2,7 @@
 
 use std::collections::HashMap;
 
-use crate::client::BetaConfig;
+use crate::agent::BetaConfig;
 
 pub const DEFAULT_USER_AGENT: &str = "claude-cli/2.0.76 (external, cli)";
 pub const DEFAULT_APP_IDENTIFIER: &str = "cli";
@@ -54,7 +54,7 @@ impl OAuthConfig {
 
     pub fn build_beta_header(&self, base: &BetaConfig) -> String {
         let mut beta = base.clone();
-        beta.add(crate::client::BetaFeature::OAuth);
+        beta.add(crate::agent::BetaFeature::OAuth);
         beta.add_custom(CLAUDE_CODE_BETA);
         beta.header_value().unwrap_or_default()
     }

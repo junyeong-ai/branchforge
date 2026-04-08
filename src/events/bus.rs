@@ -3,9 +3,15 @@
 //! Unlike [`HookManager`](crate::hooks::HookManager) which is fail-closed and blocking
 //! (security-critical hooks that can reject operations), [`EventBus`] is fire-and-forget:
 //!
-//! - Events are dispatched asynchronously via `tokio::spawn`
-//! - Subscriber failures are silently ignored
-//! - No event can block or cancel execution
+//! - Each subscriber owns a single drainer task that consumes events from a
+//!   bounded mpsc channel — never one task per event, so high-frequency
+//!   emissions cannot trigger task explosion.
+//! - When a subscriber's channel is full the bus applies a configurable
+//!   [`OverflowPolicy`] (drop silently or drop with a tracing warning) so
+//!   operators can see when subscribers fall behind.
+//! - [`EventBus::emit`] returns [`EmitStats`] reporting how many subscribers
+//!   accepted vs. dropped each event, which makes lag visible to callers.
+//! - No event can block or cancel execution.
 //!
 //! This makes `EventBus` suitable for metrics, logging, and other observability concerns
 //! that should never interfere with the agent's operation.
@@ -16,7 +22,8 @@ use std::sync::Weak;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use dashmap::DashMap;
-use tokio::sync::broadcast;
+use tokio::sync::{broadcast, mpsc};
+use tokio::task::JoinHandle;
 
 /// Unique identifier for a subscription registered with [`EventBus`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -134,58 +141,150 @@ impl Event {
 
 /// Subscriber callback type.
 ///
-/// Callbacks are invoked via `tokio::spawn`, so they must be `Send + Sync + 'static`.
-/// Panics inside a callback are caught by the tokio task and do not propagate.
+/// Callbacks run on a per-subscriber drainer task, so they must be
+/// `Send + Sync + 'static`. Panics inside a callback are caught by the
+/// drainer (tokio::spawn already catches panics) and do not propagate.
 pub type SubscriberFn = Arc<dyn Fn(Event) + Send + Sync>;
+
+/// Default mpsc buffer size for new subscribers.
+///
+/// 256 is large enough to absorb short bursts of high-frequency events
+/// (e.g. `StreamChunk`) without blocking emitters, but small enough that a
+/// stuck subscriber surfaces as a `dropped` count quickly instead of
+/// silently consuming memory.
+pub const DEFAULT_SUBSCRIBER_BUFFER: usize = 256;
+
+/// What the bus does when a subscriber's channel is full at emit time.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum OverflowPolicy {
+    /// Silently drop the event for that subscriber (preserves the historic
+    /// fire-and-forget contract). This is the default.
+    #[default]
+    Drop,
+    /// Drop the event and emit a `tracing::warn!` so operators can detect
+    /// lagging subscribers in production.
+    WarnAndDrop,
+}
+
+/// Result of a single [`EventBus::emit`] call.
+///
+/// `delivered` is the number of subscribers whose mpsc channel accepted
+/// the event; `dropped` is the number whose channel was full and the
+/// event was discarded according to their [`OverflowPolicy`]. Together
+/// they equal the number of per-kind subscribers registered for the
+/// event's kind at the moment of dispatch.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct EmitStats {
+    pub delivered: usize,
+    pub dropped: usize,
+}
+
+impl EmitStats {
+    /// Total number of per-kind subscribers the event reached.
+    pub fn total(&self) -> usize {
+        self.delivered + self.dropped
+    }
+}
+
+/// Internal state for a single registered subscriber.
+struct SubscriberSlot {
+    id: SubscriptionId,
+    tx: mpsc::Sender<Event>,
+    policy: OverflowPolicy,
+    drainer: JoinHandle<()>,
+}
+
+impl Drop for SubscriberSlot {
+    fn drop(&mut self) {
+        // Aborting closes the channel, which causes the drainer's
+        // `recv().await` to return `None` and exit cleanly.
+        self.drainer.abort();
+    }
+}
 
 /// Non-blocking event bus for observability.
 ///
-/// Unlike [`HookManager`](crate::hooks::HookManager) (fail-closed, blocking), `EventBus`
-/// is fire-and-forget:
-/// - Events are dispatched asynchronously
-/// - Subscriber failures are silently ignored
-/// - No event can block or cancel execution
+/// See the [module docs](crate::events::bus) for the dispatch model and
+/// rationale for the per-subscriber bounded mpsc design.
 pub struct EventBus {
-    subscribers: DashMap<EventKind, Vec<(SubscriptionId, SubscriberFn)>>,
+    subscribers: DashMap<EventKind, Vec<SubscriberSlot>>,
     broadcast: broadcast::Sender<Event>,
     next_id: AtomicU64,
+    default_buffer_size: usize,
 }
 
 impl EventBus {
     /// Create a new `EventBus` with the given broadcast channel capacity.
     ///
-    /// The capacity determines how many un-consumed events can be buffered
-    /// in the broadcast channel before older events are dropped for slow
-    /// receivers (lagged).
-    pub fn new(capacity: usize) -> Self {
-        let (tx, _rx) = broadcast::channel(capacity);
+    /// `broadcast_capacity` controls the all-events broadcast channel
+    /// returned by [`Self::subscribe_all`]; lagged receivers there miss
+    /// events. Per-kind subscribers use their own bounded mpsc channels
+    /// of [`DEFAULT_SUBSCRIBER_BUFFER`] events each (override per
+    /// subscription with [`Self::subscribe_with`]).
+    pub fn new(broadcast_capacity: usize) -> Self {
+        let (tx, _rx) = broadcast::channel(broadcast_capacity);
         Self {
             subscribers: DashMap::new(),
             broadcast: tx,
             next_id: AtomicU64::new(0),
+            default_buffer_size: DEFAULT_SUBSCRIBER_BUFFER,
         }
+    }
+
+    /// Override the default per-subscriber mpsc buffer size used by future
+    /// [`Self::subscribe`] calls.
+    pub fn with_default_buffer(mut self, buffer_size: usize) -> Self {
+        self.default_buffer_size = buffer_size.max(1);
+        self
     }
 
     /// Subscribe to a specific event kind with a callback.
     ///
-    /// The callback will be spawned as a tokio task each time a matching
-    /// event is emitted, so it must not block.
-    ///
-    /// Returns a [`SubscriptionId`] that can be passed to [`unsubscribe`](Self::unsubscribe)
-    /// to remove this subscription.
+    /// The bus spawns one drainer task per subscriber that pulls events
+    /// from a bounded mpsc channel and invokes the callback. Uses the
+    /// default buffer size and [`OverflowPolicy::Drop`].
     pub fn subscribe(&self, kind: EventKind, callback: SubscriberFn) -> SubscriptionId {
+        self.subscribe_with(
+            kind,
+            callback,
+            self.default_buffer_size,
+            OverflowPolicy::Drop,
+        )
+    }
+
+    /// Subscribe with explicit buffer size and overflow policy.
+    pub fn subscribe_with(
+        &self,
+        kind: EventKind,
+        callback: SubscriberFn,
+        buffer_size: usize,
+        policy: OverflowPolicy,
+    ) -> SubscriptionId {
         let id = SubscriptionId(self.next_id.fetch_add(1, Ordering::Relaxed));
+        let (tx, mut rx) = mpsc::channel::<Event>(buffer_size.max(1));
+        let cb = Arc::clone(&callback);
+        let drainer = tokio::spawn(async move {
+            while let Some(event) = rx.recv().await {
+                cb(event);
+            }
+        });
         self.subscribers
             .entry(kind)
             .or_default()
-            .push((id, callback));
+            .push(SubscriberSlot {
+                id,
+                tx,
+                policy,
+                drainer,
+            });
         id
     }
 
-    /// Remove a previously registered subscription.
+    /// Remove a previously registered subscription. The subscriber's
+    /// drainer task is aborted via `Drop` on the slot.
     pub fn unsubscribe(&self, kind: EventKind, id: SubscriptionId) {
         if let Some(mut subs) = self.subscribers.get_mut(&kind) {
-            subs.retain(|(sub_id, _)| *sub_id != id);
+            subs.retain(|slot| slot.id != id);
         }
     }
 
@@ -207,50 +306,64 @@ impl EventBus {
     /// Subscribe to all events via a broadcast channel.
     ///
     /// Returns a receiver that will get a clone of every emitted event.
-    /// If the receiver falls behind by more than `capacity` events it will
-    /// experience lag (missed events).
+    /// If the receiver falls behind by more than the broadcast capacity
+    /// it will experience lag (missed events).
     pub fn subscribe_all(&self) -> broadcast::Receiver<Event> {
         self.broadcast.subscribe()
     }
 
-    /// Emit an event (non-blocking, fire-and-forget).
+    /// Emit an event (non-blocking).
     ///
-    /// 1. Sends to the broadcast channel (ignored if no receivers).
-    /// 2. Looks up per-kind subscribers and spawns each callback in a
-    ///    tokio task so the caller never blocks.
-    pub fn emit(&self, event: Event) {
+    /// 1. Broadcasts to all-event subscribers (errors silently ignored).
+    /// 2. Hands the event to each per-kind subscriber's mpsc channel via
+    ///    `try_send`. On `Full`, applies the subscriber's
+    ///    [`OverflowPolicy`] and counts the drop.
+    ///
+    /// Returns [`EmitStats`] so callers can detect lag in production.
+    pub fn emit(&self, event: Event) -> EmitStats {
         // Broadcast to all-event subscribers. Ignore errors (no active
         // receivers is not an error condition for fire-and-forget).
         let _ = self.broadcast.send(event.clone());
 
-        // Dispatch to per-kind subscribers.
+        let mut stats = EmitStats::default();
         if let Some(subs) = self.subscribers.get(&event.kind) {
-            for (_, callback) in subs.value().iter() {
-                let cb = Arc::clone(callback);
-                let ev = event.clone();
-                tokio::spawn(async move {
-                    // Subscriber failures are silently ignored.
-                    // std::panic::catch_unwind is not needed here because
-                    // tokio::spawn already catches panics within the task.
-                    cb(ev);
-                });
+            for slot in subs.value().iter() {
+                match slot.tx.try_send(event.clone()) {
+                    Ok(()) => stats.delivered += 1,
+                    Err(mpsc::error::TrySendError::Full(_)) => {
+                        stats.dropped += 1;
+                        if matches!(slot.policy, OverflowPolicy::WarnAndDrop) {
+                            tracing::warn!(
+                                event_kind = ?event.kind,
+                                subscription_id = ?slot.id,
+                                "EventBus: subscriber channel full, dropping event"
+                            );
+                        }
+                    }
+                    Err(mpsc::error::TrySendError::Closed(_)) => {
+                        // Drainer has exited (e.g. callback panicked).
+                        // Count as dropped; the subscriber is effectively
+                        // dead and will be cleaned up at unsubscribe.
+                        stats.dropped += 1;
+                    }
+                }
             }
         }
+        stats
     }
 
-    /// Convenience: emit with just a kind and data.
+    /// Convenience: emit with just a kind and data. Discards [`EmitStats`].
     pub fn emit_simple(&self, kind: EventKind, data: serde_json::Value) {
-        self.emit(Event::new(kind, data));
+        let _ = self.emit(Event::new(kind, data));
     }
 
-    /// Remove all subscribers for a specific event kind.
+    /// Remove all subscribers for a specific event kind. Their drainer
+    /// tasks are aborted via `Drop` on the slots.
     pub fn clear_subscribers(&self, kind: EventKind) {
         self.subscribers.remove(&kind);
     }
 
     /// Get the count of subscribers registered for a specific event kind.
-    ///
-    /// Useful for debugging and testing.
     pub fn subscriber_count(&self, kind: EventKind) -> usize {
         self.subscribers
             .get(&kind)
@@ -377,8 +490,8 @@ mod tests {
         assert_eq!(counter.load(Ordering::SeqCst), 0);
     }
 
-    #[test]
-    fn subscriber_count_and_clear() {
+    #[tokio::test]
+    async fn subscriber_count_and_clear() {
         let bus = EventBus::default();
 
         assert_eq!(bus.subscriber_count(EventKind::Error), 0);
@@ -425,8 +538,8 @@ mod tests {
         bus.emit_simple(EventKind::StreamChunk, serde_json::json!({"chunk": 1}));
     }
 
-    #[test]
-    fn subscribe_returns_unique_ids() {
+    #[tokio::test]
+    async fn subscribe_returns_unique_ids() {
         let bus = EventBus::default();
         let id1 = bus.subscribe(EventKind::Error, Arc::new(|_| {}));
         let id2 = bus.subscribe(EventKind::Error, Arc::new(|_| {}));
@@ -454,6 +567,78 @@ mod tests {
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 
         assert_eq!(counter.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn emit_returns_delivered_stats() {
+        let bus = EventBus::default();
+        let _id = bus.subscribe(EventKind::Error, Arc::new(|_| {}));
+        let _id2 = bus.subscribe(EventKind::Error, Arc::new(|_| {}));
+
+        let stats = bus.emit(Event::new(EventKind::Error, serde_json::json!({})));
+        assert_eq!(stats.delivered, 2);
+        assert_eq!(stats.dropped, 0);
+        assert_eq!(stats.total(), 2);
+    }
+
+    #[tokio::test]
+    async fn emit_no_subscribers_returns_zero_stats() {
+        let bus = EventBus::default();
+        let stats = bus.emit(Event::new(EventKind::StreamChunk, serde_json::json!({})));
+        assert_eq!(stats.delivered, 0);
+        assert_eq!(stats.dropped, 0);
+    }
+
+    /// Helper: a callback that blocks the drainer for `dur` on each call.
+    /// This lets tests deterministically fill the bounded channel.
+    fn blocking_callback(dur: std::time::Duration) -> SubscriberFn {
+        Arc::new(move |_event| {
+            std::thread::sleep(dur);
+        })
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn full_channel_drops_events_under_drop_policy() {
+        let bus = EventBus::default();
+        let _id = bus.subscribe_with(
+            EventKind::StreamChunk,
+            blocking_callback(std::time::Duration::from_secs(2)),
+            2,
+            OverflowPolicy::Drop,
+        );
+
+        // Emit faster than the (very slow) callback can drain. With buffer
+        // size 2, we expect drops within a small number of emits.
+        let mut total_dropped = 0;
+        for i in 0..20 {
+            let stats = bus.emit(Event::new(
+                EventKind::StreamChunk,
+                serde_json::json!({"i": i}),
+            ));
+            total_dropped += stats.dropped;
+        }
+        assert!(
+            total_dropped > 0,
+            "expected at least one drop with full bounded channel, got {total_dropped}"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn warn_and_drop_policy_records_drops() {
+        let bus = EventBus::default();
+        let _id = bus.subscribe_with(
+            EventKind::Error,
+            blocking_callback(std::time::Duration::from_secs(2)),
+            1,
+            OverflowPolicy::WarnAndDrop,
+        );
+
+        let mut dropped = 0;
+        for _ in 0..10 {
+            let stats = bus.emit(Event::new(EventKind::Error, serde_json::json!({})));
+            dropped += stats.dropped;
+        }
+        assert!(dropped >= 1, "expected at least one drop, got {dropped}");
     }
 
     #[tokio::test]

@@ -77,6 +77,12 @@ pub struct AwsEventStreamDecoder {
     buf: BytesMut,
 }
 
+impl Default for AwsEventStreamDecoder {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl AwsEventStreamDecoder {
     pub fn new() -> Self {
         Self {

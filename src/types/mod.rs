@@ -1,33 +1,19 @@
-//! Core types for the Branchforge SDK.
+//! Domain types for the BranchForge SDK.
+//!
+//! Provider-neutral LLM protocol types live in [`crate::ir`]. This module
+//! contains agent-domain types that aren't part of the wire protocol:
+//! tool execution results, authorization records, server-tool aggregation,
+//! per-model metrics, and compaction outcomes.
 
-pub mod citations;
-pub mod content;
-pub mod document;
-mod message;
-mod response;
-pub mod search;
-mod tool;
+mod metrics;
+pub mod provider;
+mod server_tool;
+pub mod tool;
 
 pub use crate::models::context_window;
-pub use citations::{
-    CharLocationCitation, Citation, CitationsConfig, ContentBlockLocationCitation,
-    PageLocationCitation, SearchResultLocationCitation,
-};
-pub use content::{
-    ContentBlock, ImageSource, ServerToolError, ServerToolUseBlock, ThinkingBlock, ToolResultBlock,
-    ToolResultContent, ToolResultContentBlock, ToolUseBlock, WebFetchResultItem,
-    WebFetchToolResultBlock, WebFetchToolResultContent, WebSearchResultItem,
-    WebSearchToolResultBlock, WebSearchToolResultContent,
-};
-pub use document::{DocumentBlock, DocumentContentBlock, DocumentSource};
-pub use message::{CacheControl, CacheTtl, CacheType, Message, Role, SystemBlock, SystemPrompt};
-pub use response::{
-    ApiResponse, AuthorizationDenied, CompactResult, ContentDelta, MessageDeltaData,
-    MessageStartData, ModelUsage, ServerToolUse, ServerToolUseUsage, StopReason, StreamError,
-    StreamEvent, TokenUsage, Usage, UsageProvider,
-};
-pub use search::{SearchResultBlock, SearchResultContentBlock};
+pub use metrics::ModelUsage;
+pub use provider::UsageProvider;
+pub use server_tool::ServerToolUse;
 pub use tool::{
-    ServerTool, ToolDefinition, ToolError, ToolInput, ToolOutput, ToolOutputBlock, ToolResult,
-    ToolSearchTool, UserLocation, WebFetchTool, WebSearchTool, estimate_tool_tokens,
+    ToolError, ToolInput, ToolOutput, ToolOutputBlock, ToolResult, ToolSpec, estimate_tool_tokens,
 };

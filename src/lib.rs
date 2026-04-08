@@ -96,17 +96,16 @@ pub use agent::{
 pub use auth::{Auth, Credential};
 pub use auth::{CredentialKind, CredentialRecord};
 pub use authorization::{ExecutionMode, ToolPolicy};
-pub use client::{CapabilitySupport, ProviderProfile};
-pub use client::{Client, ClientBuilder};
 
-// New codec/transport stack public surface. The old monolithic
-// `Client + ProviderAdapter` is still re-exported above; the new stack
-// lives alongside it during Phase 1b consumer migration. Both are
-// production-quality. New code should prefer the items below.
+// Provider client stack — the only LLM call surface. There is no longer
+// a monolithic `Client` type; applications either compose a
+// `ProviderClient` directly or pick an opinionated [`Preset`] and let
+// the agent runtime resolve the right (codec, transport) pair.
 pub use client::codec::{
     AnthropicMessagesCodec, BedrockConverseCodec, EncodedRequest, EndpointShape,
     GeminiGenerateCodec, InvocationMode, ModelCodec, OpenAiChatCodec, OpenAiResponsesCodec,
 };
+pub use client::llm_call::{CircuitBrokenClient, FallingBackClient, LlmCall, RetryingClient};
 pub use client::preset::{Preset, from_env as preset_from_env};
 pub use client::provider_client::{ChunkStream, ProviderClient};
 #[cfg(feature = "aws")]
@@ -148,10 +147,7 @@ pub use agent::{
 };
 pub use auth::{CredentialProvider, OAuthConfig};
 pub use budget::report::{CostSummary, ModelCostEntry};
-pub use client::{
-    BetaConfig, BetaFeature, CloudProvider, EffortLevel, FallbackConfig, ModelConfig, ModelType,
-    OutputConfig, ProviderConfig, RetryPolicy,
-};
+pub use client::{FallbackConfig, RetryPolicy};
 pub use common::circuit::{CircuitBreaker, CircuitConfig, CircuitState};
 pub use common::{ContentSource, Index, IndexRegistry, Named, SourceType, ToolRestricted};
 pub use context::{
@@ -168,16 +164,6 @@ pub use subagents::{SubagentIndex, builtin_subagents};
 
 #[cfg(feature = "cli-auth")]
 pub use auth::ClaudeCliProvider;
-#[cfg(feature = "aws")]
-pub use client::BedrockAdapter;
-#[cfg(feature = "azure")]
-pub use client::FoundryAdapter;
-#[cfg(feature = "gemini")]
-pub use client::GeminiAdapter;
-#[cfg(feature = "openai")]
-pub use client::OpenAiAdapter;
-#[cfg(feature = "gcp")]
-pub use client::VertexAdapter;
 #[cfg(feature = "file-resources")]
 pub use output_style::OutputStyleLoader;
 pub use output_style::SystemPromptGenerator;
@@ -252,10 +238,6 @@ pub enum Error {
     /// Operation exceeded timeout.
     #[error("Operation timed out after {:.1}s", .0.as_secs_f64())]
     Timeout(std::time::Duration),
-
-    /// Token configuration validation failed.
-    #[error("Token validation failed: {0}")]
-    TokenValidation(#[from] client::messages::TokenValidationError),
 
     /// Request parameters are invalid.
     #[error("Invalid request: {0}")]
@@ -403,11 +385,9 @@ impl Error {
                 ErrorCategory::Authorization
             }
 
-            Error::Config(_)
-            | Error::Parse(_)
-            | Error::Env(_)
-            | Error::InvalidRequest(_)
-            | Error::TokenValidation(_) => ErrorCategory::Configuration,
+            Error::Config(_) | Error::Parse(_) | Error::Env(_) | Error::InvalidRequest(_) => {
+                ErrorCategory::Configuration
+            }
 
             Error::Network(_)
             | Error::RateLimit { .. }
@@ -622,28 +602,33 @@ impl From<mcp::McpError> for Error {
 
 pub type Result<T> = std::result::Result<T, Error>;
 
-/// Simple query function for one-shot requests
+/// Simple one-shot query helper.
+///
+/// Resolves a [`Preset`] from `BRANCHFORGE_PROVIDER` (and the vendor's
+/// usual env vars), sends a single user message via [`ProviderClient`],
+/// and returns the joined text content. The model is taken from
+/// `BRANCHFORGE_MODEL` if set.
 pub async fn query(prompt: &str) -> Result<String> {
-    let client = Client::builder().auth(Auth::FromEnv).await?.build().await?;
-    client.query(prompt).await
+    let pc = client::preset::from_env().await?;
+    let model = std::env::var("BRANCHFORGE_MODEL").ok();
+    query_with_provider(&pc, model.as_deref(), prompt).await
 }
 
-/// Query with a specific model
+/// Query with a specific model id, resolving the preset from env vars.
 pub async fn query_with_model(model: &str, prompt: &str) -> Result<String> {
-    use client::CreateMessageRequest;
-    let client = Client::builder().auth(Auth::FromEnv).await?.build().await?;
-    let request =
-        CreateMessageRequest::new(model, vec![types::Message::user(prompt)]).max_tokens(8192);
-    let response = client.send(request).await?;
-    Ok(response.text())
+    let pc = client::preset::from_env().await?;
+    query_with_provider(&pc, Some(model), prompt).await
 }
 
-/// Stream a response for one-shot requests
-pub async fn stream(
+async fn query_with_provider(
+    pc: &client::ProviderClient,
+    model: Option<&str>,
     prompt: &str,
-) -> Result<impl futures::Stream<Item = Result<String>> + Send + 'static + use<>> {
-    let client = Client::builder().auth(Auth::FromEnv).await?.build().await?;
-    client.stream(prompt).await
+) -> Result<String> {
+    let model = model.unwrap_or(crate::agent::DEFAULT_MODEL);
+    let req = ir::ModelRequest::new(model, vec![ir::Message::user(prompt)]);
+    let resp = pc.send(&req).await?;
+    Ok(resp.text())
 }
 
 #[cfg(test)]

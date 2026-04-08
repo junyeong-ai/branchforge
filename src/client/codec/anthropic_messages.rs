@@ -29,6 +29,7 @@ const CODEC_ID: &str = "anthropic-messages";
 const ANTHROPIC_VERSION: &str = "2023-06-01";
 
 const SHAPE: EndpointShape = EndpointShape {
+    codec_id: "anthropic-messages",
     path_template: "v1/messages",
     verb_unary: "",
     verb_stream: "",
@@ -129,6 +130,19 @@ impl ModelCodec for AnthropicMessagesCodec {
 
         if let Some(choice) = &request.tool_choice {
             body["tool_choice"] = encode_tool_choice(choice);
+        }
+
+        // Structured output. The Anthropic Messages API does not have a
+        // first-class `response_format` field; the idiomatic pattern is
+        // to register a single tool whose `input_schema` is the desired
+        // shape and to set `tool_choice` to that tool. Doing that
+        // automatically here would surprise users who already configured
+        // tools, so we surface a warning instead and let the caller make
+        // the choice explicitly.
+        if request.response_format.is_some() {
+            warnings.push(ModelWarning::CapabilityEmulated {
+                capability: "response_format".to_string(),
+            });
         }
 
         // Portable settings.
@@ -340,6 +354,7 @@ fn encode_content_part(part: &ContentPart) -> Result<Value> {
         }),
         ContentPart::ToolResult {
             tool_call_id,
+            tool_name: _, // Anthropic echoes only the id
             content,
             is_error,
         } => {
@@ -937,6 +952,29 @@ mod tests {
         });
         let enc = c.encode_request(&r, InvocationMode::Unary).unwrap();
         assert_eq!(enc.body["system"][0]["cache_control"]["type"], "ephemeral");
+    }
+
+    #[test]
+    fn response_format_emits_capability_emulated_warning() {
+        // Anthropic Messages has no first-class response_format. The codec
+        // surfaces the gap as a CapabilityEmulated warning so the caller
+        // knows to either accept tool-emulation or pick another provider.
+        let c = AnthropicMessagesCodec::new();
+        let mut r = req(vec![Message::user("emit json")]);
+        r.response_format = Some(crate::ir::ResponseFormat::JsonSchema {
+            name: "Person".into(),
+            schema: json!({"type": "object"}),
+            strict: true,
+        });
+        let enc = c.encode_request(&r, InvocationMode::Unary).unwrap();
+        assert!(
+            enc.warnings.iter().any(|w| matches!(
+                w,
+                crate::ir::ModelWarning::CapabilityEmulated { capability } if capability == "response_format"
+            )),
+            "expected CapabilityEmulated warning for response_format, got {:?}",
+            enc.warnings
+        );
     }
 
     #[test]

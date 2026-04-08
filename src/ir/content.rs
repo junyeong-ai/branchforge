@@ -71,6 +71,14 @@ pub enum ContentPart {
     ToolResult {
         /// Must equal the `id` of a previous [`ContentPart::ToolCall`].
         tool_call_id: String,
+        /// Name of the tool whose result this is. Optional because not every
+        /// codec carries the name on the wire — Anthropic and OpenAI echo
+        /// only the id, but **Gemini's `functionResponse` requires the
+        /// name** to be present. The agent runtime should populate this
+        /// from the matching [`ContentPart::ToolCall::name`] whenever
+        /// possible so that round-trips through Gemini do not lose data.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tool_name: Option<String>,
         content: ToolResultContent,
         /// `true` if the tool execution failed; the model will see this as
         /// an error result and may retry.
@@ -105,9 +113,13 @@ impl ContentPart {
     }
 
     /// Convenience constructor for a tool result with text content.
+    ///
+    /// `tool_name` defaults to `None`. Use [`Self::with_tool_name`] to
+    /// attach a name when the agent layer knows it (Gemini requires it).
     pub fn tool_result_text(call_id: impl Into<String>, text: impl Into<String>) -> Self {
         ContentPart::ToolResult {
             tool_call_id: call_id.into(),
+            tool_name: None,
             content: ToolResultContent::Text(text.into()),
             is_error: false,
         }
@@ -117,6 +129,7 @@ impl ContentPart {
     pub fn tool_error(call_id: impl Into<String>, message: impl Into<String>) -> Self {
         ContentPart::ToolResult {
             tool_call_id: call_id.into(),
+            tool_name: None,
             content: ToolResultContent::Text(message.into()),
             is_error: true,
         }
@@ -128,19 +141,23 @@ impl ContentPart {
     /// Multi-block results (text + images + search results) are preserved
     /// via [`ToolResultContent::MultiPart`]; pure text/error/empty results
     /// use [`ToolResultContent::Text`].
+    ///
+    /// `tool_name` defaults to `None`. Chain [`Self::with_tool_name`] when
+    /// the agent layer has the name (it almost always does because the
+    /// matching [`ContentPart::ToolCall`] carries it).
     pub fn from_tool_result(call_id: impl Into<String>, result: &crate::types::ToolResult) -> Self {
         use crate::types::{ToolOutput, ToolOutputBlock};
         let call_id = call_id.into();
         match &result.output {
             ToolOutput::Success(text) => ContentPart::ToolResult {
                 tool_call_id: call_id,
+                tool_name: None,
                 content: ToolResultContent::Text(text.clone()),
                 is_error: false,
             },
             ToolOutput::SuccessBlocks(blocks) => {
-                // Preserve all block types (text, image, search result) as
-                // a MultiPart so downstream consumers and the codec layer
-                // can render them faithfully.
+                // Preserve text/image blocks as a MultiPart so downstream
+                // consumers and the codec layer can render them faithfully.
                 let parts: Vec<ContentPart> = blocks
                     .iter()
                     .map(|b| match b {
@@ -149,30 +166,41 @@ impl ContentPart {
                             source: MediaSource::Base64 { data: data.clone() },
                             mime: media_type.clone(),
                         },
-                        ToolOutputBlock::SearchResult(sr) => ContentPart::Source {
-                            url: sr.source.clone(),
-                            title: Some(sr.title.clone()),
-                            snippet: None,
-                        },
                     })
                     .collect();
                 ContentPart::ToolResult {
                     tool_call_id: call_id,
+                    tool_name: None,
                     content: ToolResultContent::MultiPart(parts),
                     is_error: false,
                 }
             }
             ToolOutput::Error(e) => ContentPart::ToolResult {
                 tool_call_id: call_id,
+                tool_name: None,
                 content: ToolResultContent::Text(e.to_string()),
                 is_error: true,
             },
             ToolOutput::Empty => ContentPart::ToolResult {
                 tool_call_id: call_id,
+                tool_name: None,
                 content: ToolResultContent::Text(String::new()),
                 is_error: false,
             },
         }
+    }
+
+    /// Builder: attach a tool name to a `ContentPart::ToolResult`. No-op
+    /// for any other variant. The name is required by Gemini and ignored
+    /// by codecs that echo only the id.
+    pub fn with_tool_name(mut self, name: impl Into<String>) -> Self {
+        if let ContentPart::ToolResult {
+            ref mut tool_name, ..
+        } = self
+        {
+            *tool_name = Some(name.into());
+        }
+        self
     }
 
     /// Extract the text content if this is a `Text` part.
@@ -317,10 +345,12 @@ mod tests {
         match p {
             ContentPart::ToolResult {
                 tool_call_id,
+                tool_name,
                 content,
                 is_error,
             } => {
                 assert_eq!(tool_call_id, "call_1");
+                assert!(tool_name.is_none());
                 assert!(!is_error);
                 match content {
                     ToolResultContent::Text(s) => assert_eq!(s, "result"),
@@ -329,6 +359,42 @@ mod tests {
             }
             _ => panic!("wrong part variant"),
         }
+    }
+
+    #[test]
+    fn with_tool_name_attaches_name_to_tool_result() {
+        let p = ContentPart::tool_result_text("call_1", "result").with_tool_name("calculator");
+        match p {
+            ContentPart::ToolResult {
+                tool_name: Some(name),
+                ..
+            } => assert_eq!(name, "calculator"),
+            _ => panic!("expected ToolResult with tool_name set"),
+        }
+    }
+
+    #[test]
+    fn with_tool_name_is_noop_on_non_tool_result() {
+        let p = ContentPart::text("hello").with_tool_name("calculator");
+        assert!(matches!(p, ContentPart::Text { .. }));
+    }
+
+    #[test]
+    fn tool_name_round_trips_through_serde() {
+        let p = ContentPart::tool_result_text("call_1", "ok").with_tool_name("calc");
+        let j = serde_json::to_string(&p).unwrap();
+        assert!(j.contains("\"tool_name\":\"calc\""));
+        let back: ContentPart = serde_json::from_str(&j).unwrap();
+        assert_eq!(p, back);
+    }
+
+    #[test]
+    fn missing_tool_name_serializes_as_absent_field() {
+        let p = ContentPart::tool_result_text("call_1", "ok");
+        let j = serde_json::to_string(&p).unwrap();
+        assert!(!j.contains("tool_name"));
+        let back: ContentPart = serde_json::from_str(&j).unwrap();
+        assert_eq!(p, back);
     }
 
     #[test]

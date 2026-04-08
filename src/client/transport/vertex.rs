@@ -222,24 +222,12 @@ impl ModelTransport for VertexTransport {
         model: &str,
         mode: InvocationMode,
     ) -> Result<Endpoint> {
-        // Identify the codec from `shape` indirectly: the path template
-        // tells us. We must know the codec id to pick the publisher; we
-        // recover it from the shape's path template heuristically (the
-        // public API is supposed to set the right pair).
-        //
-        // For Anthropic Messages: `path_template = "v1/messages"` →
-        // codec_id = "anthropic-messages"; verb is empty.
-        // For Gemini Generate: `path_template = "v1beta/models/{model}:{verb}"` →
-        // codec_id = "gemini-generate"; verb is non-empty.
-        //
-        // The mapping is unambiguous because publisher_for_codec is a
-        // closed set; the preset layer wires the right (codec, transport)
-        // pair upstream.
-        let codec_id = if shape.path_template.contains("{model}") {
-            "gemini-generate"
-        } else {
-            "anthropic-messages"
-        };
+        // The codec id is now declared explicitly on the `EndpointShape`,
+        // so the transport routes directly without inspecting the path
+        // template. This removes the historical fragile heuristic that
+        // would silently misroute any future codec whose path template
+        // happened to contain `{model}`.
+        let codec_id = shape.codec_id;
 
         let verb = match (codec_id, mode) {
             // Anthropic-on-Vertex always uses rawPredict / streamRawPredict
@@ -296,6 +284,40 @@ impl ModelTransport for VertexTransport {
         // Force a re-fetch on the next request.
         *self.cached_token.write().await = None;
         Ok(())
+    }
+
+    fn classify_error(
+        &self,
+        status: u16,
+        body: &str,
+    ) -> (
+        crate::error::ProviderErrorKind,
+        Option<&'static str>,
+    ) {
+        use crate::error::ProviderErrorKind;
+        match status {
+            401 | 403 if body.contains("quota") || body.contains("user-project") => (
+                ProviderErrorKind::Quota,
+                Some(
+                    "Set GOOGLE_CLOUD_QUOTA_PROJECT or pass VertexTransport::with_quota_project(...). \
+                     If using gcloud creds, run: gcloud auth application-default set-quota-project <project>",
+                ),
+            ),
+            401 | 403 => (
+                ProviderErrorKind::Auth,
+                Some("Vertex authentication failed. Run: gcloud auth application-default login"),
+            ),
+            404 if body.contains("Publisher Model") || body.contains("publisher") => (
+                ProviderErrorKind::BadRequest,
+                Some(
+                    "Model not enabled in this project. Enable it in the Vertex AI Model Garden for the publisher.",
+                ),
+            ),
+            429 => (ProviderErrorKind::RateLimit, None),
+            500..=599 => (ProviderErrorKind::Server, None),
+            400..=499 => (ProviderErrorKind::BadRequest, None),
+            _ => (ProviderErrorKind::Server, None),
+        }
     }
 }
 

@@ -145,6 +145,63 @@ impl Histogram {
     pub fn sum_ms(&self) -> f64 {
         self.sum.load(Ordering::Relaxed) as f64 / 1000.0
     }
+
+    /// Estimate the value at the given percentile in [0.0, 1.0] using
+    /// bucket upper bounds. Returns `None` if the histogram is empty.
+    ///
+    /// The estimate is the upper bound of the bucket that contains the
+    /// `ceil(p * count)`-th observation. This is the standard "upper bound"
+    /// estimator used by Prometheus-style histograms — it never under-
+    /// estimates a true percentile and is precise within a bucket width.
+    pub fn percentile(&self, p: f64) -> Option<f64> {
+        debug_assert!(
+            (0.0..=1.0).contains(&p),
+            "percentile must be in [0.0, 1.0], got {p}"
+        );
+        let total = self.count();
+        if total == 0 {
+            return None;
+        }
+        let target = ((total as f64) * p).ceil() as u64;
+        let target = target.max(1);
+        let mut cumulative = 0u64;
+        for (i, bucket) in self.buckets.iter().enumerate() {
+            cumulative += bucket.load(Ordering::Relaxed);
+            if cumulative >= target {
+                return self
+                    .bucket_bounds
+                    .get(i)
+                    .copied()
+                    .or_else(|| self.bucket_bounds.last().copied());
+            }
+        }
+        self.bucket_bounds.last().copied()
+    }
+
+    /// 50th-percentile (median) estimate.
+    pub fn p50(&self) -> Option<f64> {
+        self.percentile(0.50)
+    }
+
+    /// 95th-percentile estimate.
+    pub fn p95(&self) -> Option<f64> {
+        self.percentile(0.95)
+    }
+
+    /// 99th-percentile estimate.
+    pub fn p99(&self) -> Option<f64> {
+        self.percentile(0.99)
+    }
+
+    /// Mean of all observations, in the original unit (ms).
+    pub fn mean(&self) -> Option<f64> {
+        let count = self.count();
+        if count == 0 {
+            None
+        } else {
+            Some(self.sum_ms() / count as f64)
+        }
+    }
 }
 
 /// Agent-specific metrics registry.
@@ -236,23 +293,23 @@ impl MetricsRegistry {
         }
     }
 
-    pub fn record_tokens(&self, input: u32, output: u32) {
-        self.tokens_input.add(input as u64);
-        self.tokens_output.add(output as u64);
+    pub fn record_tokens(&self, input: u64, output: u64) {
+        self.tokens_input.add(input);
+        self.tokens_output.add(output);
 
         #[cfg(feature = "otel")]
         if let Some(ref bridge) = self.otel_bridge {
-            bridge.record_tokens(input as u64, output as u64);
+            bridge.record_tokens(input, output);
         }
     }
 
-    pub fn record_cache(&self, read: u32, creation: u32) {
-        self.cache_read_tokens.add(read as u64);
-        self.cache_creation_tokens.add(creation as u64);
+    pub fn record_cache(&self, read: u64, creation: u64) {
+        self.cache_read_tokens.add(read);
+        self.cache_creation_tokens.add(creation);
 
         #[cfg(feature = "otel")]
         if let Some(ref bridge) = self.otel_bridge {
-            bridge.record_cache(read as u64, creation as u64);
+            bridge.record_cache(read, creation);
         }
     }
 
@@ -309,18 +366,19 @@ pub struct MetricsSummary {
     pub total_tool_calls: u64,
     pub failed_tool_calls: u64,
     pub total_cost_usd: Decimal,
-    pub avg_latency_ms: f64,
+    /// Mean request latency in milliseconds (`None` if no observations).
+    pub avg_latency_ms: Option<f64>,
+    /// 50th-percentile request latency in milliseconds.
+    pub p50_latency_ms: Option<f64>,
+    /// 95th-percentile request latency in milliseconds.
+    pub p95_latency_ms: Option<f64>,
+    /// 99th-percentile request latency in milliseconds.
+    pub p99_latency_ms: Option<f64>,
 }
 
 impl MetricsSummary {
     pub fn from_registry(registry: &MetricsRegistry) -> Self {
-        let count = registry.request_latency_ms.count();
-        let avg_latency = if count > 0 {
-            registry.request_latency_ms.sum_ms() / count as f64
-        } else {
-            0.0
-        };
-
+        let hist = &registry.request_latency_ms;
         Self {
             total_requests: registry.requests_total.get(),
             successful_requests: registry.requests_success.get(),
@@ -332,7 +390,10 @@ impl MetricsSummary {
             total_tool_calls: registry.tool_calls_total.get(),
             failed_tool_calls: registry.tool_errors.get(),
             total_cost_usd: registry.total_cost_usd(),
-            avg_latency_ms: avg_latency,
+            avg_latency_ms: hist.mean(),
+            p50_latency_ms: hist.p50(),
+            p95_latency_ms: hist.p95(),
+            p99_latency_ms: hist.p99(),
         }
     }
 }
@@ -375,6 +436,51 @@ mod tests {
         hist.observe(75.0);
         hist.observe(150.0);
         assert_eq!(hist.count(), 4);
+    }
+
+    #[test]
+    fn test_histogram_percentile_empty() {
+        let hist = Histogram::new(vec![10.0, 50.0]);
+        assert_eq!(hist.percentile(0.5), None);
+        assert_eq!(hist.p50(), None);
+        assert_eq!(hist.mean(), None);
+    }
+
+    #[test]
+    fn test_histogram_percentile_single_value() {
+        let hist = Histogram::new(vec![10.0, 50.0, 100.0]);
+        hist.observe(25.0);
+        // Single observation in bucket [10, 50] → p50/p95/p99 all return 50.
+        assert_eq!(hist.p50(), Some(50.0));
+        assert_eq!(hist.p95(), Some(50.0));
+        assert_eq!(hist.p99(), Some(50.0));
+        assert_eq!(hist.mean(), Some(25.0));
+    }
+
+    #[test]
+    fn test_histogram_percentile_distribution() {
+        let hist = Histogram::new(vec![10.0, 50.0, 100.0, 500.0]);
+        // 100 observations evenly spread: 25 each in (0..=10), (10..=50),
+        // (50..=100), (100..=500).
+        for _ in 0..25 {
+            hist.observe(5.0);
+        }
+        for _ in 0..25 {
+            hist.observe(30.0);
+        }
+        for _ in 0..25 {
+            hist.observe(75.0);
+        }
+        for _ in 0..25 {
+            hist.observe(300.0);
+        }
+        assert_eq!(hist.count(), 100);
+        // p50: 50th observation lands in bucket [10, 50] → upper bound 50
+        assert_eq!(hist.p50(), Some(50.0));
+        // p95: 95th observation lands in bucket [100, 500] → upper bound 500
+        assert_eq!(hist.p95(), Some(500.0));
+        // p99: same bucket
+        assert_eq!(hist.p99(), Some(500.0));
     }
 
     #[test]

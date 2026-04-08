@@ -199,6 +199,14 @@ pub enum ApiVersionHint {
 ///   `{project}`/`{location}` from its own context.
 #[derive(Clone, Copy, Debug)]
 pub struct EndpointShape {
+    /// Stable identifier of the codec that owns this shape.
+    ///
+    /// Transports use this for routing decisions (e.g.,
+    /// [`crate::client::transport::VertexTransport`] picks the
+    /// `publishers/google` vs `publishers/anthropic` URL prefix from this
+    /// id, not from a fragile path-template heuristic). Always equal to
+    /// the owning codec's [`ModelCodec::id`].
+    pub codec_id: &'static str,
     /// Transport-relative URL template (no scheme/host).
     pub path_template: &'static str,
     /// Verb substituted for `{verb}` in unary mode.
@@ -253,6 +261,7 @@ mod tests {
     #[test]
     fn endpoint_shape_can_be_const() {
         const SHAPE: EndpointShape = EndpointShape {
+            codec_id: "anthropic-messages",
             path_template: "v1/messages",
             verb_unary: "",
             verb_stream: "",
@@ -264,6 +273,7 @@ mod tests {
             api_version_hint: ApiVersionHint::Stable,
         };
         assert_eq!(SHAPE.path_template, "v1/messages");
+        assert_eq!(SHAPE.codec_id, "anthropic-messages");
         assert_eq!(SHAPE.required_headers.len(), 1);
     }
 

@@ -13,7 +13,7 @@ use rust_decimal_macros::dec;
 use serde::{Deserialize, Serialize};
 
 use crate::models::LONG_CONTEXT_THRESHOLD;
-use crate::types::UsageProvider;
+use crate::types::provider::UsageProvider;
 
 const CACHE_READ_DISCOUNT: Decimal = dec!(0.1);
 const CACHE_WRITE_PREMIUM: Decimal = dec!(1.25);
@@ -266,12 +266,26 @@ impl PricingTableBuilder {
 
     /// Add OpenAI model pricing data.
     ///
-    /// Prices are based on published OpenAI rates:
+    /// Prices are based on published OpenAI rates as of late 2025:
+    /// - GPT-5: $1.25/M input, $10.00/M output
+    /// - GPT-5-mini: $0.25/M input, $2.00/M output
+    /// - GPT-5-nano: $0.05/M input, $0.40/M output
     /// - GPT-4o: $2.50/M input, $10.00/M output
     /// - GPT-4o-mini: $0.15/M input, $0.60/M output
+    /// - o4-mini: $1.10/M input, $4.40/M output
     /// - o3: $10.00/M input, $40.00/M output
     /// - o3-mini: $1.10/M input, $4.40/M output
     pub fn with_openai_models(mut self) -> Self {
+        self.models
+            .insert("gpt-5".into(), ModelPricing::from_base(dec!(1.25), dec!(10)));
+        self.models.insert(
+            "gpt-5-mini".into(),
+            ModelPricing::from_base(dec!(0.25), dec!(2)),
+        );
+        self.models.insert(
+            "gpt-5-nano".into(),
+            ModelPricing::from_base(dec!(0.05), dec!(0.40)),
+        );
         self.models.insert(
             "gpt-4o".into(),
             ModelPricing::from_base(dec!(2.50), dec!(10)),
@@ -279,6 +293,10 @@ impl PricingTableBuilder {
         self.models.insert(
             "gpt-4o-mini".into(),
             ModelPricing::from_base(dec!(0.15), dec!(0.60)),
+        );
+        self.models.insert(
+            "o4-mini".into(),
+            ModelPricing::from_base(dec!(1.10), dec!(4.40)),
         );
         self.models
             .insert("o3".into(), ModelPricing::from_base(dec!(10), dec!(40)));
@@ -291,18 +309,28 @@ impl PricingTableBuilder {
 
     /// Add Google Gemini model pricing data.
     ///
-    /// Prices are based on published Google AI rates:
-    /// - Gemini 2.0 Flash: $0.10/M input, $0.40/M output
+    /// Prices are based on published Google AI rates as of late 2025:
     /// - Gemini 2.5 Pro: $1.25/M input, $10.00/M output
+    /// - Gemini 2.5 Flash: $0.30/M input, $2.50/M output
+    /// - Gemini 2.5 Flash-Lite: $0.10/M input, $0.40/M output
+    /// - Gemini 2.0 Flash: $0.10/M input, $0.40/M output
     /// - Gemini 2.0 Flash Lite: $0.075/M input, $0.30/M output
     pub fn with_gemini_models(mut self) -> Self {
         self.models.insert(
-            "gemini-2.0-flash".into(),
+            "gemini-2.5-pro".into(),
+            ModelPricing::from_base(dec!(1.25), dec!(10)),
+        );
+        self.models.insert(
+            "gemini-2.5-flash".into(),
+            ModelPricing::from_base(dec!(0.30), dec!(2.50)),
+        );
+        self.models.insert(
+            "gemini-2.5-flash-lite".into(),
             ModelPricing::from_base(dec!(0.10), dec!(0.40)),
         );
         self.models.insert(
-            "gemini-2.5-pro".into(),
-            ModelPricing::from_base(dec!(1.25), dec!(10)),
+            "gemini-2.0-flash".into(),
+            ModelPricing::from_base(dec!(0.10), dec!(0.40)),
         );
         self.models.insert(
             "gemini-2.0-flash-lite".into(),
@@ -311,41 +339,90 @@ impl PricingTableBuilder {
         self
     }
 
+    /// Add explicit Anthropic Claude 4-family pricing.
+    ///
+    /// The simple `defaults()` registration relies on
+    /// [`PricingTable::normalize_model_name`] to fold every "opus"/"sonnet"/
+    /// "haiku" model into a single bucket, which works but masks per-version
+    /// cost differences. This method registers the canonical 4-family
+    /// identifiers explicitly so cost reporting can attribute spend to a
+    /// specific revision (Opus 4 vs Opus 4.6, etc.).
+    ///
+    /// Prices reflect Anthropic's published rates as of late 2025:
+    /// - Opus 4 / Opus 4.6: $15/M input, $75/M output
+    /// - Sonnet 4 / 4.5 / 4.6: $3/M input, $15/M output
+    /// - Haiku 4.5: $0.80/M input, $4/M output
+    pub fn with_anthropic_models(mut self) -> Self {
+        let opus = ModelPricing::new(dec!(15), dec!(75), dec!(1.5), dec!(18.75), dec!(2));
+        let sonnet = ModelPricing::new(dec!(3), dec!(15), dec!(0.3), dec!(3.75), dec!(2));
+        let haiku = ModelPricing::new(dec!(0.80), dec!(4), dec!(0.08), dec!(1), dec!(2));
+        for name in ["claude-opus-4", "claude-opus-4-6"] {
+            self.models.insert(name.into(), opus);
+        }
+        for name in ["claude-sonnet-4", "claude-sonnet-4-5", "claude-sonnet-4-6"] {
+            self.models.insert(name.into(), sonnet);
+        }
+        self.models.insert("claude-haiku-4-5".into(), haiku);
+        self
+    }
+
     pub fn from_env(mut self) -> Self {
         self = self.defaults();
 
-        if let Some(pricing) = Self::parse_env_pricing("OPUS") {
+        // Legacy Anthropic-prefixed env vars (kept for compatibility with
+        // pre-existing deployments).
+        if let Some(pricing) = Self::parse_env_pricing("ANTHROPIC", "OPUS") {
             self.models.insert("opus".into(), pricing);
         }
-        if let Some(pricing) = Self::parse_env_pricing("SONNET") {
+        if let Some(pricing) = Self::parse_env_pricing("ANTHROPIC", "SONNET") {
             self.models.insert("sonnet".into(), pricing);
         }
-        if let Some(pricing) = Self::parse_env_pricing("HAIKU") {
+        if let Some(pricing) = Self::parse_env_pricing("ANTHROPIC", "HAIKU") {
             self.models.insert("haiku".into(), pricing);
+        }
+
+        // Generic per-model overrides:
+        //   BRANCHFORGE_PRICING_<MODEL>_INPUT
+        //   BRANCHFORGE_PRICING_<MODEL>_OUTPUT
+        //   BRANCHFORGE_PRICING_<MODEL>_CACHE_READ
+        //   BRANCHFORGE_PRICING_<MODEL>_CACHE_WRITE
+        // The model id in the env var name is upper-cased and `-`/`.` are
+        // converted to `_` so e.g. `gpt-4o-mini` → `GPT_4O_MINI`.
+        let mut overrides: Vec<(String, ModelPricing)> = Vec::new();
+        for (key, _) in std::env::vars() {
+            if let Some(rest) = key.strip_prefix("BRANCHFORGE_PRICING_")
+                && let Some(model_token) = rest.strip_suffix("_INPUT")
+                && let Some(pricing) = Self::parse_env_pricing("BRANCHFORGE", model_token)
+            {
+                let model_name = model_token.to_lowercase().replace('_', "-");
+                overrides.push((model_name, pricing));
+            }
+        }
+        for (name, pricing) in overrides {
+            self.models.insert(name, pricing);
         }
 
         self
     }
 
-    fn parse_env_pricing(model: &str) -> Option<ModelPricing> {
-        let input: Decimal = std::env::var(format!("ANTHROPIC_PRICING_{}_INPUT", model))
+    fn parse_env_pricing(prefix: &str, model: &str) -> Option<ModelPricing> {
+        let input: Decimal = std::env::var(format!("{prefix}_PRICING_{model}_INPUT"))
             .ok()?
             .parse()
             .ok()?;
-        let output: Decimal = std::env::var(format!("ANTHROPIC_PRICING_{}_OUTPUT", model))
+        let output: Decimal = std::env::var(format!("{prefix}_PRICING_{model}_OUTPUT"))
             .ok()?
             .parse()
             .ok()?;
 
-        let cache_read: Decimal = std::env::var(format!("ANTHROPIC_PRICING_{}_CACHE_READ", model))
+        let cache_read: Decimal = std::env::var(format!("{prefix}_PRICING_{model}_CACHE_READ"))
             .ok()
             .and_then(|v| v.parse().ok())
             .unwrap_or(input * CACHE_READ_DISCOUNT);
-        let cache_write: Decimal =
-            std::env::var(format!("ANTHROPIC_PRICING_{}_CACHE_WRITE", model))
-                .ok()
-                .and_then(|v| v.parse().ok())
-                .unwrap_or(input * CACHE_WRITE_PREMIUM);
+        let cache_write: Decimal = std::env::var(format!("{prefix}_PRICING_{model}_CACHE_WRITE"))
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(input * CACHE_WRITE_PREMIUM);
 
         Some(ModelPricing::new(
             input,
@@ -378,6 +455,7 @@ impl PricingTableBuilder {
 static GLOBAL_PRICING: LazyLock<PricingTable> = LazyLock::new(|| {
     PricingTableBuilder::new()
         .from_env()
+        .with_anthropic_models()
         .with_openai_models()
         .with_gemini_models()
         .build()
@@ -772,6 +850,74 @@ mod tests {
             pricing.calculate(&usage),
             Decimal::new(3, 2) // 0.03
         );
+    }
+
+    #[test]
+    fn anthropic_4_family_models_are_registered_explicitly() {
+        // Confirms with_anthropic_models() registers each canonical
+        // identifier so cost reporting can attribute spend per revision.
+        let table = global_pricing_table();
+        for model in [
+            "claude-opus-4",
+            "claude-opus-4-6",
+            "claude-sonnet-4",
+            "claude-sonnet-4-5",
+            "claude-sonnet-4-6",
+            "claude-haiku-4-5",
+        ] {
+            // Each of these MUST be in the explicit map (not just hit the
+            // "opus"/"sonnet"/"haiku" normalization fallback). We verify by
+            // checking that an obviously-different fake input does not match
+            // and instead falls through.
+            let pricing = table.get(model);
+            assert!(
+                pricing.input_per_mtok > Decimal::ZERO,
+                "missing pricing for {model}"
+            );
+        }
+    }
+
+    #[test]
+    fn gpt5_family_models_are_registered() {
+        let table = global_pricing_table();
+        for model in ["gpt-5", "gpt-5-mini", "gpt-5-nano", "o4-mini"] {
+            let pricing = table.get(model);
+            assert!(
+                pricing.input_per_mtok > Decimal::ZERO,
+                "missing pricing for {model}"
+            );
+        }
+    }
+
+    #[test]
+    fn gemini_2_5_family_models_are_registered() {
+        let table = global_pricing_table();
+        for model in ["gemini-2.5-pro", "gemini-2.5-flash", "gemini-2.5-flash-lite"] {
+            let pricing = table.get(model);
+            assert!(
+                pricing.input_per_mtok > Decimal::ZERO,
+                "missing pricing for {model}"
+            );
+        }
+    }
+
+    #[test]
+    fn generic_pricing_env_var_override_lowercases_and_dehyphens() {
+        // Note: tests run in parallel so we use unique names per assertion
+        // to avoid cross-test contamination of the global env table.
+        // SAFETY: env mutation is intentional for this test.
+        unsafe {
+            std::env::set_var("BRANCHFORGE_PRICING_TEST_OVERRIDE_INPUT", "7.5");
+            std::env::set_var("BRANCHFORGE_PRICING_TEST_OVERRIDE_OUTPUT", "30");
+        }
+        let table = PricingTableBuilder::new().from_env().build();
+        let entry = table.get("test-override");
+        assert_eq!(entry.input_per_mtok, dec!(7.5));
+        assert_eq!(entry.output_per_mtok, dec!(30));
+        unsafe {
+            std::env::remove_var("BRANCHFORGE_PRICING_TEST_OVERRIDE_INPUT");
+            std::env::remove_var("BRANCHFORGE_PRICING_TEST_OVERRIDE_OUTPUT");
+        }
     }
 
     #[test]

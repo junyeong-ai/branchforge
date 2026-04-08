@@ -44,6 +44,14 @@ pub struct ModelRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_choice: Option<ToolChoice>,
 
+    /// Structured output format. When set to [`ResponseFormat::JsonSchema`]
+    /// the codec instructs the provider to constrain the model output to
+    /// the given JSON Schema; codecs that only support free-form JSON
+    /// (`json_object`) or that emulate the feature via tool calls emit a
+    /// [`ModelWarning`] explaining the degradation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub response_format: Option<ResponseFormat>,
+
     /// Portable generation knobs (max_tokens, temperature, …).
     #[serde(default)]
     pub settings: ModelSettings,
@@ -87,12 +95,19 @@ impl ModelRequest {
             system: None,
             tools: Vec::new(),
             tool_choice: None,
+            response_format: None,
             settings: ModelSettings::default(),
             provider_options: ProviderOptions::default(),
             continuation: None,
             metadata: BTreeMap::new(),
             idempotency_key: None,
         }
+    }
+
+    /// Builder-style: set [`response_format`](Self::response_format).
+    pub fn with_response_format(mut self, format: ResponseFormat) -> Self {
+        self.response_format = Some(format);
+        self
     }
 
     /// Builder-style: set `max_output_tokens`.

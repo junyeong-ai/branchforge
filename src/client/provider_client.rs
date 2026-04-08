@@ -121,8 +121,8 @@ impl ProviderClient {
         let status = response.status();
         if !status.is_success() {
             let body = response.text().await.unwrap_or_default();
-            return Err(classify_http_error(
-                self.transport.id(),
+            return Err(classify_response_error(
+                self.transport.as_ref(),
                 status.as_u16(),
                 &body,
             ));
@@ -165,8 +165,8 @@ impl ProviderClient {
         let status = response.status();
         if !status.is_success() {
             let body = response.text().await.unwrap_or_default();
-            return Err(classify_http_error(
-                self.transport.id(),
+            return Err(classify_response_error(
+                self.transport.as_ref(),
                 status.as_u16(),
                 &body,
             ));
@@ -201,7 +201,7 @@ fn build_chunk_stream(
         let mut state = StreamDecodeState::new();
         let mut buffer: Vec<u8> = Vec::new();
         let mut aws_decoder = if matches!(framing, StreamFraming::AwsEventStream) {
-            Some(crate::client::adapter::bedrock_stream::AwsEventStreamDecoder::new())
+            Some(crate::client::transport::bedrock_stream::AwsEventStreamDecoder::new())
         } else {
             None
         };
@@ -390,40 +390,20 @@ fn validate_composition(codec: &dyn ModelCodec, transport: &dyn ModelTransport) 
     Ok(())
 }
 
-/// Map an HTTP error response to a typed [`Error::Provider`] with hints
-/// for the well-known failure modes.
-fn classify_http_error(transport: &'static str, status: u16, body: &str) -> Error {
+/// Convert a non-2xx HTTP response into a typed [`Error::Provider`] by
+/// asking the transport to classify the failure. Each transport owns its
+/// own vendor-specific patterns (Vertex quota project, Bedrock throttling,
+/// …), so adding a new transport never requires editing this function.
+fn classify_response_error(
+    transport: &dyn ModelTransport,
+    status: u16,
+    body: &str,
+) -> Error {
     use crate::error::ProviderErrorKind;
     let snippet = body.chars().take(500).collect::<String>();
-    let (kind, hint) = match (transport, status) {
-        ("vertex", 401 | 403) if body.contains("quota") || body.contains("user-project") => (
-            ProviderErrorKind::Quota,
-            Some(
-                "Set GOOGLE_CLOUD_QUOTA_PROJECT or pass VertexTransport::with_quota_project(...). \
-                 If using gcloud creds, run: gcloud auth application-default set-quota-project <project>",
-            ),
-        ),
-        ("vertex", 401 | 403) => (
-            ProviderErrorKind::Auth,
-            Some("Vertex authentication failed. Run: gcloud auth application-default login"),
-        ),
-        ("vertex", 404) if body.contains("Publisher Model") || body.contains("publisher") => (
-            ProviderErrorKind::BadRequest,
-            Some(
-                "Model not enabled in this project. Enable it in the Vertex AI Model Garden for the publisher.",
-            ),
-        ),
-        ("direct", 401) => (
-            ProviderErrorKind::Auth,
-            Some("API key missing or invalid. Check the configured credential."),
-        ),
-        (_, 429) => (ProviderErrorKind::RateLimit, None),
-        (_, 500..=599) => (ProviderErrorKind::Server, None),
-        (_, 400..=499) => (ProviderErrorKind::BadRequest, None),
-        _ => (ProviderErrorKind::Server, None),
-    };
+    let (kind, hint) = transport.classify_error(status, body);
     Error::Provider {
-        provider: transport,
+        provider: transport.id(),
         kind,
         message: snippet,
         hint,
@@ -461,6 +441,7 @@ mod tests {
         }
         fn endpoint_shape(&self) -> &'static EndpointShape {
             const S: EndpointShape = EndpointShape {
+                codec_id: "pinned",
                 path_template: "v1/x",
                 verb_unary: "",
                 verb_stream: "",
@@ -643,8 +624,10 @@ mod tests {
 
     #[tokio::test]
     async fn http_error_classified_with_hint_for_vertex_403_quota() {
-        // Build a fake transport that claims id "vertex" so error
-        // classification uses the vertex branch.
+        // The classify_error trait method is what makes the OCP-clean
+        // distributed error classification work. This test stands in for a
+        // real VertexTransport (which would need ADC) and reproduces the
+        // vendor-specific quota-project detection logic.
         #[derive(Debug)]
         struct FakeVertex(String);
         #[async_trait]
@@ -669,6 +652,23 @@ mod tests {
                 _body_bytes: &[u8],
             ) -> Result<reqwest::RequestBuilder> {
                 Ok(req)
+            }
+            fn classify_error(
+                &self,
+                status: u16,
+                body: &str,
+            ) -> (crate::error::ProviderErrorKind, Option<&'static str>) {
+                use crate::error::ProviderErrorKind;
+                match status {
+                    401 | 403 if body.contains("quota") || body.contains("user-project") => (
+                        ProviderErrorKind::Quota,
+                        Some(
+                            "Set GOOGLE_CLOUD_QUOTA_PROJECT or pass VertexTransport::with_quota_project(...). \
+                             If using gcloud creds, run: gcloud auth application-default set-quota-project <project>",
+                        ),
+                    ),
+                    _ => crate::client::transport::default_classify_status(status),
+                }
             }
         }
 
@@ -749,6 +749,59 @@ mod tests {
         assert_eq!(extract_ndjson_line(&mut buf).unwrap(), b"line1");
         assert_eq!(extract_ndjson_line(&mut buf).unwrap(), b"line2");
         assert!(extract_ndjson_line(&mut buf).is_none());
+    }
+
+    /// SSE / NDJSON / JsonArray framing operates on raw bytes; the
+    /// extracted frame is then handed to a JSON parser. The framing layer
+    /// only needs to find the boundary bytes (`\n\n`, `\n`, `}`) — it
+    /// must not corrupt the multi-byte UTF-8 sequences inside. These
+    /// tests guard the byte-buffer assembly path against the most likely
+    /// regression: a multi-byte character split across chunk boundaries.
+
+    #[test]
+    fn extract_sse_event_preserves_multibyte_korean() {
+        // "안녕하세요" is 15 bytes in UTF-8 (5 chars × 3 bytes).
+        let mut buf = "data: 안녕하세요\n\nrest".as_bytes().to_vec();
+        let frame = extract_sse_event(&mut buf).unwrap();
+        assert_eq!(std::str::from_utf8(&frame).unwrap(), "data: 안녕하세요");
+        assert_eq!(buf, b"rest");
+    }
+
+    #[test]
+    fn extract_sse_event_preserves_multibyte_emoji() {
+        // 🎉 is 4 bytes in UTF-8.
+        let mut buf = "data: 🎉🎉\n\n".as_bytes().to_vec();
+        let frame = extract_sse_event(&mut buf).unwrap();
+        assert_eq!(std::str::from_utf8(&frame).unwrap(), "data: 🎉🎉");
+    }
+
+    #[test]
+    fn extract_ndjson_line_preserves_multibyte_chars() {
+        let mut buf = "한국어\n日本語\n".as_bytes().to_vec();
+        let l1 = extract_ndjson_line(&mut buf).unwrap();
+        assert_eq!(std::str::from_utf8(&l1).unwrap(), "한국어");
+        let l2 = extract_ndjson_line(&mut buf).unwrap();
+        assert_eq!(std::str::from_utf8(&l2).unwrap(), "日本語");
+    }
+
+    #[test]
+    fn extract_json_array_element_preserves_multibyte_in_string_value() {
+        let mut buf = r#"[{"text":"안녕 🎉"}]"#.as_bytes().to_vec();
+        let f = extract_json_array_element(&mut buf).unwrap();
+        assert_eq!(std::str::from_utf8(&f).unwrap(), r#"{"text":"안녕 🎉"}"#);
+    }
+
+    #[test]
+    fn extract_sse_event_handles_partial_frame_then_completion() {
+        // First push: incomplete (boundary not yet seen).
+        let mut buf = "data: 안녕".as_bytes().to_vec();
+        assert!(extract_sse_event(&mut buf).is_none());
+        // Buffer is unchanged — multi-byte char preserved at the end.
+        assert_eq!(std::str::from_utf8(&buf).unwrap(), "data: 안녕");
+        // Subsequent push completes the frame.
+        buf.extend_from_slice("하세요\n\n".as_bytes());
+        let frame = extract_sse_event(&mut buf).unwrap();
+        assert_eq!(std::str::from_utf8(&frame).unwrap(), "data: 안녕하세요");
     }
 
     #[tokio::test]

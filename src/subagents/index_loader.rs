@@ -5,7 +5,7 @@ use std::path::Path;
 use serde::{Deserialize, Serialize};
 
 use super::SubagentIndex;
-use crate::client::ModelType;
+use crate::agent::ModelType;
 use crate::common::{ContentSource, SourceType, is_markdown, parse_frontmatter};
 
 /// Frontmatter for subagent files.

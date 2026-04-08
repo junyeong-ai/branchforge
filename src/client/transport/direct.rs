@@ -51,6 +51,14 @@ impl std::fmt::Debug for DirectAuth {
 /// codec's `required_headers` (resolving `ContextValue` placeholders from
 /// the transport's [`Self::context`] map) and applies the configured
 /// [`DirectAuth`] in [`Self::authorize`].
+///
+/// # Credential refresh
+///
+/// When `credential_provider` is set, [`ModelTransport::refresh`] asks
+/// the provider for a fresh credential and rewrites the cached
+/// [`DirectAuth`]. This is what makes Bearer-token presets (Anthropic
+/// CLI OAuth, custom OAuth2 deployments) recover from `401 Unauthorized`
+/// without forcing the caller to rebuild the transport.
 pub struct DirectTransport {
     base_url: String,
     auth: RwLock<DirectAuth>,
@@ -60,6 +68,11 @@ pub struct DirectTransport {
     /// Codec ids this transport explicitly supports. If empty, every codec
     /// is accepted (the common case for direct HTTPS).
     allowed_codecs: Arc<[&'static str]>,
+    /// Optional credential provider used by [`ModelTransport::refresh`] to
+    /// pull a fresh credential after a `401`. Only meaningful when the
+    /// underlying provider supports `refresh()` — for static API keys this
+    /// stays `None`.
+    credential_provider: Option<Arc<dyn crate::auth::CredentialProvider>>,
 }
 
 impl std::fmt::Debug for DirectTransport {
@@ -82,6 +95,7 @@ impl DirectTransport {
             auth: RwLock::new(auth),
             context: HashMap::new(),
             allowed_codecs: Arc::from([] as [&'static str; 0]),
+            credential_provider: None,
         }
     }
 
@@ -100,9 +114,50 @@ impl DirectTransport {
         self
     }
 
+    /// Attach a credential provider so [`ModelTransport::refresh`] can
+    /// fetch a fresh credential after a `401 Unauthorized`. The provider
+    /// must implement [`crate::auth::CredentialProvider::supports_refresh`]
+    /// and return `true`; otherwise refresh will fail with an auth error.
+    pub fn with_credential_provider(
+        mut self,
+        provider: Arc<dyn crate::auth::CredentialProvider>,
+    ) -> Self {
+        self.credential_provider = Some(provider);
+        self
+    }
+
     /// Replace the auth scheme. Used by credential refresh.
     pub async fn set_auth(&self, auth: DirectAuth) {
         *self.auth.write().await = auth;
+    }
+
+    /// Internal helper: convert a freshly-resolved [`crate::auth::Credential`]
+    /// into the equivalent [`DirectAuth`] variant. Bearer tokens and API
+    /// keys are mapped one-to-one; query-param auth is unchanged because
+    /// we cannot infer which query parameter the new credential should
+    /// use without more context.
+    fn credential_to_auth(
+        current: &DirectAuth,
+        credential: crate::auth::Credential,
+    ) -> Option<DirectAuth> {
+        use crate::auth::Credential as Cred;
+        match (current, credential) {
+            (DirectAuth::XApiKey(_), Cred::ApiKey(secret)) => Some(DirectAuth::XApiKey(secret)),
+            (DirectAuth::Bearer(_), Cred::OAuth(oauth)) => {
+                Some(DirectAuth::Bearer(oauth.access_token))
+            }
+            (DirectAuth::Bearer(_), Cred::ApiKey(secret)) => Some(DirectAuth::Bearer(secret)),
+            // Query-param auth retains the original parameter name; the
+            // refreshed credential just rewrites the secret value.
+            (
+                DirectAuth::QueryParam { param, .. },
+                Cred::ApiKey(secret),
+            ) => Some(DirectAuth::QueryParam {
+                param,
+                value: secret,
+            }),
+            _ => None,
+        }
     }
 }
 
@@ -193,6 +248,47 @@ impl ModelTransport for DirectTransport {
         };
         Ok(req)
     }
+
+    fn classify_error(
+        &self,
+        status: u16,
+        _body: &str,
+    ) -> (
+        crate::error::ProviderErrorKind,
+        Option<&'static str>,
+    ) {
+        use crate::error::ProviderErrorKind;
+        match status {
+            401 => (
+                ProviderErrorKind::Auth,
+                Some("API key missing or invalid. Check the configured credential."),
+            ),
+            _ => super::default_classify_status(status),
+        }
+    }
+
+    async fn refresh(&self) -> Result<()> {
+        // Static API-key transports have nothing to refresh.
+        let Some(provider) = &self.credential_provider else {
+            return Ok(());
+        };
+        if !provider.supports_refresh() {
+            return Err(crate::Error::auth(format!(
+                "DirectTransport credential provider '{}' does not support refresh",
+                provider.name()
+            )));
+        }
+        let fresh = provider.refresh().await?;
+        let current = self.auth.read().await.clone();
+        let next = Self::credential_to_auth(&current, fresh).ok_or_else(|| {
+            crate::Error::auth(
+                "DirectTransport could not map the refreshed credential to its current auth scheme"
+                    .to_string(),
+            )
+        })?;
+        self.set_auth(next).await;
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -202,6 +298,7 @@ mod tests {
 
     fn anthropic_shape() -> EndpointShape {
         EndpointShape {
+            codec_id: "anthropic-messages",
             path_template: "v1/messages",
             verb_unary: "",
             verb_stream: "",
@@ -216,6 +313,7 @@ mod tests {
 
     fn gemini_shape() -> EndpointShape {
         EndpointShape {
+            codec_id: "gemini-generate",
             path_template: "v1beta/models/{model}:{verb}",
             verb_unary: "generateContent",
             verb_stream: "streamGenerateContent",
@@ -342,6 +440,7 @@ mod tests {
     #[tokio::test]
     async fn missing_context_value_for_required_header_errors() {
         const SHAPE: EndpointShape = EndpointShape {
+            codec_id: "test-codec",
             path_template: "v1/x",
             verb_unary: "",
             verb_stream: "",
@@ -365,6 +464,7 @@ mod tests {
     #[tokio::test]
     async fn context_value_substituted_into_header() {
         const SHAPE: EndpointShape = EndpointShape {
+            codec_id: "test-codec",
             path_template: "v1/x",
             verb_unary: "",
             verb_stream: "",

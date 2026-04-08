@@ -8,7 +8,7 @@ use std::path::PathBuf;
 #[cfg(feature = "file-resources")]
 use super::{ChainOutputStyleProvider, file_output_style_provider};
 use super::{InMemoryOutputStyleProvider, OutputStyle, builtin_styles, default_style};
-use crate::client::DEFAULT_MODEL;
+use crate::agent::DEFAULT_MODEL;
 use crate::common::Provider;
 use crate::common::SourceType;
 use crate::prompts::{

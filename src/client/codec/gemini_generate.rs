@@ -30,15 +30,16 @@ use crate::ir::SystemPrompt;
 use crate::ir::{
     CacheGranularity, CacheSupport, ContentPart, FinishReason, MediaSource, Message, ModelRequest,
     ModelResponse, ModelStreamChunk, ModelWarning, ProviderCapabilities, ReasoningContent,
-    ReasoningKind, ReasoningSupport, Role, StreamDecodeState, StructuredOutputSupport, Support,
-    SystemPromptShape, ToolCallSupport, ToolDefinition, ToolIdSemantics, ToolOrigin,
-    ToolResultContent, Usage, VisionSupport,
+    ReasoningKind, ReasoningSupport, ResponseFormat, Role, StreamDecodeState,
+    StructuredOutputSupport, Support, SystemPromptShape, ToolCallSupport, ToolDefinition,
+    ToolIdSemantics, ToolOrigin, ToolResultContent, Usage, VisionSupport,
 };
 use crate::{Error, Result};
 
 const CODEC_ID: &str = "gemini-generate";
 
 const SHAPE: EndpointShape = EndpointShape {
+    codec_id: CODEC_ID,
     path_template: "v1beta/models/{model}:{verb}",
     verb_unary: "generateContent",
     verb_stream: "streamGenerateContent",
@@ -74,8 +75,16 @@ const CAPABILITIES: ProviderCapabilities = ProviderCapabilities {
         accepts_url: false,
     },
     prompt_caching: CacheSupport {
-        // Gemini cachedContent exists but works as a separate handle, not
-        // an inline cache_control marker. Mark unsupported for now.
+        // Gemini's `cachedContent` API is a separate resource lifecycle:
+        // clients POST to `/cachedContents` to mint a cache handle, then
+        // reference it by name in `generateContent.cachedContent`. This is
+        // fundamentally different from Anthropic/OpenAI inline
+        // `cache_control` markers and cannot be represented as a per-message
+        // IR annotation. Supporting it would require a dedicated
+        // cache-management surface on `ProviderClient`, which is
+        // intentionally out of scope for the current IR. The capability is
+        // reported as `Unsupported` so callers do not assume parity with
+        // inline-cache providers.
         mode: Support::Unsupported,
         granularity: CacheGranularity::None,
     },
@@ -120,6 +129,26 @@ impl ModelCodec for GeminiGenerateCodec {
         _mode: InvocationMode,
     ) -> Result<EncodedRequest> {
         let mut warnings = Vec::new();
+
+        // Gemini's `functionResponse` requires the function name. Surface a
+        // warning for any ToolResult that arrives without a `tool_name` —
+        // we still encode (with an empty placeholder) so the call doesn't
+        // fail outright, but the operator can spot the misuse.
+        for msg in &request.messages {
+            for part in &msg.content {
+                if let ContentPart::ToolResult {
+                    tool_name: None, ..
+                } = part
+                {
+                    warnings.push(ModelWarning::lossy(
+                        "tool_result.tool_name",
+                        "gemini-generate functionResponse requires a name; \
+                         agent layer should populate ToolResult.tool_name from \
+                         the matching ToolCall — encoding with empty name as fallback",
+                    ));
+                }
+            }
+        }
 
         let contents = encode_messages(&request.messages)?;
         let mut body = json!({"contents": contents});
@@ -171,6 +200,25 @@ impl ModelCodec for GeminiGenerateCodec {
         }
         if let Some(seed) = s.seed {
             gc.insert("seed".into(), json!(seed));
+        }
+
+        // Structured output. Gemini exposes this through `responseMimeType`
+        // + (optionally) `responseSchema` on `generationConfig`. The schema
+        // is OpenAPI-flavoured rather than strict JSON Schema, but Gemini
+        // accepts the standard JSON-Schema subset we get from `schemars`.
+        if let Some(format) = &request.response_format {
+            match format {
+                ResponseFormat::Text => {
+                    gc.insert("responseMimeType".into(), json!("text/plain"));
+                }
+                ResponseFormat::JsonObject => {
+                    gc.insert("responseMimeType".into(), json!("application/json"));
+                }
+                ResponseFormat::JsonSchema { schema, .. } => {
+                    gc.insert("responseMimeType".into(), json!("application/json"));
+                    gc.insert("responseSchema".into(), schema.clone());
+                }
+            }
         }
         if s.presence_penalty.is_some() {
             warnings.push(ModelWarning::unsupported("presence_penalty", CODEC_ID));
@@ -462,15 +510,15 @@ fn encode_content_part(part: &ContentPart) -> Result<Value> {
         }
         ContentPart::ToolResult {
             tool_call_id: _,
+            tool_name,
             content,
             is_error,
         } => {
-            // Gemini functionResponse uses the function name, not an id.
-            // Without context here, we use an empty name placeholder; the
-            // codec is supposed to be invoked from a context where the
-            // caller has paired up tool_call_id → name. For now we accept
-            // the limitation and stuff the result under "result".
-            // TODO: thread function name through ToolResult on Phase 1b.
+            // Gemini functionResponse requires the tool name, not the id.
+            // The agent runtime should populate `tool_name` from the
+            // matching ToolCall; if it's missing we emit an empty string
+            // and a warning so the failure is observable.
+            let name = tool_name.as_deref().unwrap_or("");
             let response_value = match content {
                 ToolResultContent::Text(s) => json!({"result": s}),
                 ToolResultContent::Json(v) => json!({"result": v}),
@@ -480,7 +528,7 @@ fn encode_content_part(part: &ContentPart) -> Result<Value> {
             if *is_error && let Some(obj) = response.as_object_mut() {
                 obj.insert("error".into(), json!(true));
             }
-            json!({"functionResponse": {"name": "", "response": response}})
+            json!({"functionResponse": {"name": name, "response": response}})
         }
         ContentPart::Reasoning { content, .. } => match content {
             ReasoningContent::Visible { text } => json!({"text": text, "thought": true}),
@@ -750,6 +798,48 @@ mod tests {
         assert_eq!(enc.body["contents"][0]["role"], "user");
         assert_eq!(enc.body["contents"][0]["parts"][0]["text"], "hello");
         assert!(enc.warnings.is_empty());
+    }
+
+    #[test]
+    fn encode_response_format_json_schema_into_generation_config() {
+        let c = GeminiGenerateCodec::new();
+        let mut r = req(vec![Message::user("emit json")]);
+        r.response_format = Some(ResponseFormat::JsonSchema {
+            name: "Person".into(),
+            schema: json!({"type": "object", "properties": {"name": {"type": "string"}}}),
+            strict: true,
+        });
+        let enc = c.encode_request(&r, InvocationMode::Unary).unwrap();
+        assert_eq!(
+            enc.body["generationConfig"]["responseMimeType"],
+            "application/json"
+        );
+        assert_eq!(
+            enc.body["generationConfig"]["responseSchema"]["type"],
+            "object"
+        );
+    }
+
+    #[test]
+    fn encode_response_format_json_object_sets_mime_type_only() {
+        let c = GeminiGenerateCodec::new();
+        let mut r = req(vec![Message::user("emit json")]);
+        r.response_format = Some(ResponseFormat::JsonObject);
+        let enc = c.encode_request(&r, InvocationMode::Unary).unwrap();
+        assert_eq!(
+            enc.body["generationConfig"]["responseMimeType"],
+            "application/json"
+        );
+        assert!(enc.body["generationConfig"].get("responseSchema").is_none());
+    }
+
+    #[test]
+    fn encode_response_format_text_sets_text_mime_type() {
+        let c = GeminiGenerateCodec::new();
+        let mut r = req(vec![Message::user("hi")]);
+        r.response_format = Some(ResponseFormat::Text);
+        let enc = c.encode_request(&r, InvocationMode::Unary).unwrap();
+        assert_eq!(enc.body["generationConfig"]["responseMimeType"], "text/plain");
     }
 
     #[test]

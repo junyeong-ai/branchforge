@@ -17,6 +17,7 @@
 
 #[cfg(feature = "aws")]
 pub mod bedrock;
+pub mod bedrock_stream;
 pub mod direct;
 #[cfg(feature = "azure")]
 pub mod foundry;
@@ -28,6 +29,7 @@ use std::collections::HashMap;
 
 use crate::Result;
 use crate::client::codec::{EndpointShape, InvocationMode};
+use crate::error::ProviderErrorKind;
 
 #[cfg(feature = "aws")]
 pub use bedrock::BedrockTransport;
@@ -76,6 +78,35 @@ pub trait ModelTransport: Send + Sync + std::fmt::Debug {
     /// no-op for transports with non-refreshing credentials.
     async fn refresh(&self) -> Result<()> {
         Ok(())
+    }
+
+    /// Classify a non-2xx HTTP response from this transport into a
+    /// [`ProviderErrorKind`] plus an optional human-readable hint.
+    ///
+    /// Each transport owns its own error patterns: GCP quota project
+    /// failures (`x-goog-user-project`), Vertex Publisher Model 404s,
+    /// Bedrock throttling, Foundry Entra refresh hints, and so on. The
+    /// default implementation handles only generic HTTP status codes;
+    /// transports with vendor-specific failure modes override this.
+    ///
+    /// This method exists so that adding a new transport never requires
+    /// editing a central `match` block on the transport id — adhering to
+    /// the open/closed principle.
+    fn classify_error(&self, status: u16, body: &str) -> (ProviderErrorKind, Option<&'static str>) {
+        let _ = body;
+        default_classify_status(status)
+    }
+}
+
+/// Generic status-code classification used as the default for transports
+/// that have no vendor-specific failure modes.
+pub(crate) fn default_classify_status(status: u16) -> (ProviderErrorKind, Option<&'static str>) {
+    match status {
+        401 | 403 => (ProviderErrorKind::Auth, None),
+        429 => (ProviderErrorKind::RateLimit, None),
+        500..=599 => (ProviderErrorKind::Server, None),
+        400..=499 => (ProviderErrorKind::BadRequest, None),
+        _ => (ProviderErrorKind::Server, None),
     }
 }
 
@@ -173,6 +204,7 @@ mod tests {
     #[test]
     fn append_stream_query_unary_is_noop() {
         let shape = EndpointShape {
+            codec_id: "test-codec",
             path_template: "x",
             verb_unary: "",
             verb_stream: "",
@@ -188,6 +220,7 @@ mod tests {
     #[test]
     fn append_stream_query_stream_appends() {
         let shape = EndpointShape {
+            codec_id: "test-codec",
             path_template: "x",
             verb_unary: "",
             verb_stream: "",
@@ -203,6 +236,7 @@ mod tests {
     #[test]
     fn append_stream_query_with_existing_query() {
         let shape = EndpointShape {
+            codec_id: "test-codec",
             path_template: "x",
             verb_unary: "",
             verb_stream: "",

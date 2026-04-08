@@ -12,17 +12,20 @@
 use serde_json::{Value, json};
 
 use super::{ApiVersionHint, EncodedRequest, EndpointShape, InvocationMode, ModelCodec};
+use crate::client::schema::transform_for_strict;
 use crate::ir::{
     CacheGranularity, CacheSupport, ContentPart, FinishReason, MediaSource, Message, ModelRequest,
-    ModelResponse, ModelStreamChunk, ModelWarning, ProviderCapabilities, ReasoningSupport, Role,
-    StreamDecodeState, StructuredOutputSupport, Support, SystemPromptShape, ToolCallSupport,
-    ToolDefinition, ToolIdSemantics, ToolOrigin, ToolResultContent, Usage, VisionSupport,
+    ModelResponse, ModelStreamChunk, ModelWarning, ProviderCapabilities, ReasoningSupport,
+    ResponseFormat, Role, StreamDecodeState, StructuredOutputSupport, Support, SystemPromptShape,
+    ToolCallSupport, ToolDefinition, ToolIdSemantics, ToolOrigin, ToolResultContent, Usage,
+    VisionSupport,
 };
 use crate::{Error, Result};
 
 const CODEC_ID: &str = "openai-chat";
 
 const SHAPE: EndpointShape = EndpointShape {
+    codec_id: CODEC_ID,
     path_template: "v1/chat/completions",
     verb_unary: "",
     verb_stream: "",
@@ -134,6 +137,39 @@ impl ModelCodec for OpenAiChatCodec {
         }
         if let Some(choice) = &request.tool_choice {
             body["tool_choice"] = encode_tool_choice(choice);
+        }
+
+        // Structured output. Chat Completions uses the legacy
+        // `response_format` envelope. JSON-schema mode requires the schema
+        // to be transformed for OpenAI's strict-mode validator.
+        if let Some(format) = &request.response_format {
+            match format {
+                ResponseFormat::Text => {
+                    body["response_format"] = json!({"type": "text"});
+                }
+                ResponseFormat::JsonObject => {
+                    body["response_format"] = json!({"type": "json_object"});
+                }
+                ResponseFormat::JsonSchema {
+                    name,
+                    schema,
+                    strict,
+                } => {
+                    let prepared = if *strict {
+                        transform_for_strict(schema.clone())
+                    } else {
+                        schema.clone()
+                    };
+                    body["response_format"] = json!({
+                        "type": "json_schema",
+                        "json_schema": {
+                            "name": name,
+                            "schema": prepared,
+                            "strict": strict,
+                        }
+                    });
+                }
+            }
         }
 
         let s = &request.settings;
@@ -671,6 +707,39 @@ mod tests {
         assert_eq!(enc.body["messages"][0]["role"], "user");
         assert_eq!(enc.body["messages"][0]["content"], "hello");
         assert!(enc.body.get("stream").is_none());
+    }
+
+    #[test]
+    fn encode_response_format_json_schema_uses_legacy_envelope() {
+        let c = OpenAiChatCodec::new();
+        let mut r = req(vec![Message::user("emit json")]);
+        r.response_format = Some(ResponseFormat::JsonSchema {
+            name: "Person".into(),
+            schema: json!({
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string"}
+                }
+            }),
+            strict: true,
+        });
+        let enc = c.encode_request(&r, InvocationMode::Unary).unwrap();
+        assert_eq!(enc.body["response_format"]["type"], "json_schema");
+        assert_eq!(enc.body["response_format"]["json_schema"]["name"], "Person");
+        assert_eq!(enc.body["response_format"]["json_schema"]["strict"], true);
+        assert_eq!(
+            enc.body["response_format"]["json_schema"]["schema"]["additionalProperties"],
+            false
+        );
+    }
+
+    #[test]
+    fn encode_response_format_json_object() {
+        let c = OpenAiChatCodec::new();
+        let mut r = req(vec![Message::user("emit json")]);
+        r.response_format = Some(ResponseFormat::JsonObject);
+        let enc = c.encode_request(&r, InvocationMode::Unary).unwrap();
+        assert_eq!(enc.body["response_format"]["type"], "json_object");
     }
 
     #[test]

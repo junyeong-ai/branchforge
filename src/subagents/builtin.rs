@@ -4,7 +4,7 @@
 //! distinct from tool names which use PascalCase.
 
 use super::SubagentIndex;
-use crate::client::ModelType;
+use crate::agent::ModelType;
 use crate::common::{ContentSource, SourceType};
 
 /// Bash agent - Command execution specialist.

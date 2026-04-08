@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 use std::env;
 
-use crate::client::messages::{DEFAULT_MAX_TOKENS, MIN_THINKING_BUDGET};
+use crate::agent::{DEFAULT_MAX_TOKENS, MIN_THINKING_BUDGET};
 
 #[derive(Clone, Debug, Default)]
 pub struct CloudConfig {

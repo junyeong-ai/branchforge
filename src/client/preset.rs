@@ -122,7 +122,11 @@ impl Preset {
         match self {
             Preset::Anthropic => {
                 let key = std::env::var("ANTHROPIC_API_KEY").map_err(|_| {
-                    Error::Config("ANTHROPIC_API_KEY not set for `anthropic` preset".into())
+                    Error::Config(
+                        "ANTHROPIC_API_KEY not set for `anthropic` preset. \
+                         Get your key at https://console.anthropic.com/settings/keys"
+                            .into(),
+                    )
                 })?;
                 let base = std::env::var("ANTHROPIC_BASE_URL")
                     .unwrap_or_else(|_| "https://api.anthropic.com".into());
@@ -135,7 +139,11 @@ impl Preset {
             }
             Preset::OpenAi => {
                 let key = std::env::var("OPENAI_API_KEY").map_err(|_| {
-                    Error::Config("OPENAI_API_KEY not set for `openai` preset".into())
+                    Error::Config(
+                        "OPENAI_API_KEY not set for `openai` preset. \
+                         Get your key at https://platform.openai.com/api-keys"
+                            .into(),
+                    )
                 })?;
                 let base = std::env::var("OPENAI_BASE_URL")
                     .unwrap_or_else(|_| "https://api.openai.com".into());
@@ -148,7 +156,12 @@ impl Preset {
             }
             Preset::OpenAiChat => {
                 let key = std::env::var("OPENAI_API_KEY").map_err(|_| {
-                    Error::Config("OPENAI_API_KEY not set for `openai-chat` preset".into())
+                    Error::Config(
+                        "OPENAI_API_KEY not set for `openai-chat` preset. \
+                         Get your key at https://platform.openai.com/api-keys \
+                         (or set OPENAI_BASE_URL for an OpenAI-compatible server)"
+                            .into(),
+                    )
                 })?;
                 let base = std::env::var("OPENAI_BASE_URL")
                     .unwrap_or_else(|_| "https://api.openai.com".into());
@@ -164,7 +177,9 @@ impl Preset {
                     .or_else(|_| std::env::var("GOOGLE_API_KEY"))
                     .map_err(|_| {
                         Error::Config(
-                            "GEMINI_API_KEY (or GOOGLE_API_KEY) not set for `gemini` preset".into(),
+                            "GEMINI_API_KEY (or GOOGLE_API_KEY) not set for `gemini` preset. \
+                             Get your key at https://aistudio.google.com/apikey"
+                                .into(),
                         )
                     })?;
                 let base = std::env::var("GEMINI_BASE_URL")

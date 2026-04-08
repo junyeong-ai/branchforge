@@ -40,7 +40,6 @@
 //! - [`capabilities`] — [`ProviderCapabilities`] and sub-structs.
 
 pub mod capabilities;
-pub mod compat;
 pub mod content;
 pub mod finish;
 pub mod model;

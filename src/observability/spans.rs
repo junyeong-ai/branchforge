@@ -109,12 +109,12 @@ impl ApiCallSpan {
         }
     }
 
-    pub fn record_usage(&self, input_tokens: u32, output_tokens: u32) {
+    pub fn record_usage(&self, input_tokens: u64, output_tokens: u64) {
         self.span.record("input_tokens", input_tokens);
         self.span.record("output_tokens", output_tokens);
     }
 
-    pub fn record_cache(&self, read_tokens: u32, creation_tokens: u32) {
+    pub fn record_cache(&self, read_tokens: u64, creation_tokens: u64) {
         self.span.record("cache_read_tokens", read_tokens);
         self.span.record("cache_creation_tokens", creation_tokens);
     }

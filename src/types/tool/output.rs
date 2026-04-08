@@ -3,7 +3,7 @@
 use serde::{Deserialize, Serialize};
 
 use super::error::ToolError;
-use crate::types::response::Usage;
+use crate::ir::Usage;
 
 #[derive(Debug, Clone)]
 pub struct ToolInput {
@@ -23,15 +23,8 @@ pub enum ToolOutput {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ToolOutputBlock {
-    Text {
-        text: String,
-    },
-    Image {
-        data: String,
-        media_type: String,
-    },
-    #[serde(rename = "search_result")]
-    SearchResult(crate::types::search::SearchResultBlock),
+    Text { text: String },
+    Image { data: String, media_type: String },
 }
 
 impl ToolOutput {
@@ -69,15 +62,6 @@ impl ToolOutput {
 
     pub fn empty() -> Self {
         Self::Empty
-    }
-
-    pub fn search_results(results: Vec<crate::types::search::SearchResultBlock>) -> Self {
-        Self::SuccessBlocks(
-            results
-                .into_iter()
-                .map(ToolOutputBlock::SearchResult)
-                .collect(),
-        )
     }
 
     pub fn is_error(&self) -> bool {

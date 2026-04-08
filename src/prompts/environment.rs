@@ -2,7 +2,7 @@
 
 use std::path::Path;
 
-use crate::client::DEFAULT_REASONING_MODEL;
+use crate::agent::DEFAULT_REASONING_MODEL;
 
 /// Generates the environment block with runtime information.
 pub fn environment_block(

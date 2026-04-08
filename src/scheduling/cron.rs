@@ -3,8 +3,12 @@
 //! Provides a lightweight cron scheduler built on tokio timers.
 //! Each entry runs an async callback at the specified interval or
 //! according to a cron expression.
+//!
+//! Each [`CronEntry`] keeps a bounded execution history ([`ExecutionRecord`])
+//! capturing the start timestamp, duration, and outcome of recent runs so
+//! operators can audit recurring tasks and detect abnormal latency.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
@@ -13,6 +17,29 @@ use chrono::{DateTime, Utc};
 use tokio::sync::RwLock;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
+
+/// Maximum number of execution records retained per entry by default.
+pub const DEFAULT_MAX_HISTORY: usize = 100;
+
+/// Outcome of a single scheduled execution.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ExecutionOutcome {
+    /// The callback ran to completion.
+    Success,
+    /// The tick was skipped because a previous execution was still running.
+    Skipped,
+}
+
+/// One row of [`CronEntry::history`].
+#[derive(Debug, Clone)]
+pub struct ExecutionRecord {
+    /// Wall-clock instant when the callback started.
+    pub started_at: DateTime<Utc>,
+    /// How long the callback took.
+    pub duration: Duration,
+    /// Outcome of the execution.
+    pub outcome: ExecutionOutcome,
+}
 
 /// Scheduling strategy for a cron entry.
 #[derive(Debug, Clone)]
@@ -41,9 +68,44 @@ pub struct CronEntry {
     /// Whether the callback is currently executing.
     pub executing: Arc<AtomicBool>,
     /// Last error message from a failed execution.
+    ///
+    /// The current callback signature returns `()`, so this is reserved
+    /// for future use when callbacks return `Result`.
     pub last_error: Option<String>,
     /// Total number of completed runs.
     pub run_count: u64,
+    /// Bounded execution history (newest at the back).
+    ///
+    /// Length is capped at [`Self::max_history`]; the oldest record is
+    /// dropped when a new one is appended past the limit.
+    pub history: VecDeque<ExecutionRecord>,
+    /// Maximum number of records retained in [`Self::history`].
+    pub max_history: usize,
+}
+
+impl CronEntry {
+    /// Average duration across the retained history, or `None` if empty.
+    pub fn avg_duration(&self) -> Option<Duration> {
+        if self.history.is_empty() {
+            return None;
+        }
+        let total_nanos: u128 = self.history.iter().map(|r| r.duration.as_nanos()).sum();
+        let avg = total_nanos / self.history.len() as u128;
+        Some(Duration::from_nanos(avg as u64))
+    }
+
+    /// Number of [`ExecutionOutcome::Skipped`] records in history.
+    pub fn skip_count(&self) -> usize {
+        self.history
+            .iter()
+            .filter(|r| r.outcome == ExecutionOutcome::Skipped)
+            .count()
+    }
+
+    /// Most recent `n` history records (newest first).
+    pub fn recent_history(&self, n: usize) -> Vec<&ExecutionRecord> {
+        self.history.iter().rev().take(n).collect()
+    }
 }
 
 /// Cron scheduler for periodic agent execution.
@@ -145,6 +207,8 @@ impl CronScheduler {
             executing: executing.clone(),
             last_error: None,
             run_count: 0,
+            history: VecDeque::with_capacity(DEFAULT_MAX_HISTORY),
+            max_history: DEFAULT_MAX_HISTORY,
         };
         let id = entry.id;
 
@@ -190,16 +254,39 @@ impl CronScheduler {
                                 entry_id = %id,
                                 "skipping tick: previous execution still running"
                             );
+                            // Record the skip in history so operators can
+                            // see chronic overlap.
+                            push_history(
+                                &entries,
+                                &id,
+                                ExecutionRecord {
+                                    started_at: Utc::now(),
+                                    duration: Duration::ZERO,
+                                    outcome: ExecutionOutcome::Skipped,
+                                },
+                            )
+                            .await;
                             continue;
                         }
 
+                        let started_at = Utc::now();
+                        let started_instant = tokio::time::Instant::now();
                         callback().await;
+                        let duration = started_instant.elapsed();
 
                         executing.store(false, Ordering::Release);
 
                         if let Some(entry) = entries.write().await.get_mut(&id) {
                             entry.last_run = Some(Utc::now());
                             entry.run_count += 1;
+                            entry.history.push_back(ExecutionRecord {
+                                started_at,
+                                duration,
+                                outcome: ExecutionOutcome::Success,
+                            });
+                            while entry.history.len() > entry.max_history {
+                                entry.history.pop_front();
+                            }
                         }
                     }
                 }
@@ -252,6 +339,20 @@ impl CronScheduler {
     /// Whether the scheduler has no entries.
     pub async fn is_empty(&self) -> bool {
         self.entries.read().await.is_empty()
+    }
+}
+
+/// Append a record to an entry's history, respecting `max_history`.
+async fn push_history(
+    entries: &Arc<RwLock<HashMap<Uuid, CronEntry>>>,
+    id: &Uuid,
+    record: ExecutionRecord,
+) {
+    if let Some(entry) = entries.write().await.get_mut(id) {
+        entry.history.push_back(record);
+        while entry.history.len() > entry.max_history {
+            entry.history.pop_front();
+        }
     }
 }
 
@@ -398,6 +499,69 @@ mod tests {
         assert_eq!(run_count.load(Ordering::Relaxed), 1);
         let _ = skip_count;
 
+        scheduler.stop().await;
+    }
+
+    #[tokio::test]
+    async fn history_records_each_run_with_duration() {
+        let scheduler = CronScheduler::new();
+        let id = scheduler
+            .register("hist", Duration::from_millis(15), || {
+                Box::pin(async {
+                    tokio::time::sleep(Duration::from_millis(5)).await;
+                })
+            })
+            .await;
+        tokio::time::sleep(Duration::from_millis(80)).await;
+
+        let entry = scheduler.get(&id).await.unwrap();
+        assert!(
+            entry.history.len() >= 2,
+            "expected >=2 history records, got {}",
+            entry.history.len()
+        );
+        for record in &entry.history {
+            assert_eq!(record.outcome, ExecutionOutcome::Success);
+            assert!(record.duration >= Duration::from_millis(4));
+        }
+        assert!(entry.avg_duration().is_some());
+        scheduler.stop().await;
+    }
+
+    #[tokio::test]
+    async fn history_truncates_to_max_history() {
+        let scheduler = CronScheduler::new();
+        let id = scheduler
+            .register("burst", Duration::from_millis(5), || Box::pin(async {}))
+            .await;
+        // Manually shrink max_history so the test runs fast.
+        {
+            let mut entries = scheduler.entries.write().await;
+            if let Some(e) = entries.get_mut(&id) {
+                e.max_history = 3;
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(80)).await;
+
+        let entry = scheduler.get(&id).await.unwrap();
+        assert!(entry.history.len() <= 3);
+        scheduler.stop().await;
+    }
+
+    #[tokio::test]
+    async fn skip_count_zero_for_normal_runs() {
+        // Sanity check: in the strictly-sequential per-entry loop the
+        // `executing` guard never fires, so a healthy entry never records
+        // Skipped. The Skipped path in the loop is reserved for future
+        // concurrent dispatch but instrumented now so the structure is
+        // ready when that lands.
+        let scheduler = CronScheduler::new();
+        let id = scheduler
+            .register("normal", Duration::from_millis(10), || Box::pin(async {}))
+            .await;
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let entry = scheduler.get(&id).await.unwrap();
+        assert_eq!(entry.skip_count(), 0);
         scheduler.stop().await;
     }
 

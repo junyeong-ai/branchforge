@@ -52,7 +52,7 @@ pub use index_loader::{SubagentFrontmatter, SubagentIndexLoader};
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::client::ModelConfig;
+    use crate::agent::ModelConfig;
     use crate::common::{ContentSource, SourceType, ToolRestricted};
 
     #[test]
@@ -120,7 +120,7 @@ mod tests {
 
     #[test]
     fn test_resolve_model_with_type() {
-        use crate::client::ModelType;
+        use crate::agent::ModelType;
 
         let config = ModelConfig::default();
 
