@@ -8,14 +8,14 @@
 use std::path::Path;
 
 use branchforge::common::ToolRestricted;
+use branchforge::ir::{ContentPart, Usage};
 use branchforge::session::{
-    ArchivePolicy, CompactConfig, CompactService, ExportPolicy, MemoryPersistence, Persistence,
-    QueueItem, SessionArchiveService,
+    ArchivePolicy, CompactConfig, Compactor, ExportPolicy, MemoryPersistence, Persistence,
+    QueueItem, SessionArchiver,
 };
-use branchforge::types::TokenUsage;
 use branchforge::{
-    ContentBlock, ContentSource, ContextBuilder, Index, ModelConfig, RuleIndex, Session,
-    SessionConfig, SessionMessage, SkillIndex, SubagentIndex,
+    ContentSource, ContextBuilder, Index, RuleIndex, Session, SessionConfig, SessionMessage,
+    SkillIndex, SubagentIndex, agent::ModelConfig,
 };
 
 #[tokio::test]
@@ -87,11 +87,9 @@ async fn progressive_disclosure_matrix_preserves_manual_only_and_rule_scoping() 
         .await;
     assert_eq!(active_rules.len(), 2);
 
-    orchestrator.update_usage(&TokenUsage {
+    orchestrator.update_usage(&Usage {
         input_tokens: 170_000,
         output_tokens: 0,
-        cache_creation_input_tokens: 0,
-        cache_read_input_tokens: 0,
         ..Default::default()
     });
     assert!(orchestrator.needs_compact());
@@ -102,23 +100,26 @@ async fn graph_first_compaction_archive_roundtrip_preserves_identity_and_history
     let mut session = Session::new(SessionConfig::default());
     session.set_identity(Some("tenant-a".to_string()), Some("user-1".to_string()));
     session
-        .add_message(SessionMessage::user(vec![ContentBlock::text(
+        .add_message(SessionMessage::user(vec![ContentPart::text(
             "Investigate auth bug",
         )]))
         .unwrap();
     session
-        .add_message(SessionMessage::assistant(vec![ContentBlock::text(
+        .add_message(SessionMessage::assistant(vec![ContentPart::text(
             "I traced it to session refresh ordering",
         )]))
         .unwrap();
     session
-        .add_message(SessionMessage::user(vec![ContentBlock::text(
+        .add_message(SessionMessage::user(vec![ContentPart::text(
             "Preserve the findings and next steps",
         )]))
         .unwrap();
-    session.current_input_tokens = 180_000;
+    session.update_usage(&branchforge::ir::Usage {
+        input_tokens: 180_000,
+        ..Default::default()
+    });
 
-    let executor = CompactService::new(CompactConfig::default());
+    let executor = Compactor::new(CompactConfig::default());
     let compact = executor
         .apply_compact(
             &mut session,
@@ -129,11 +130,11 @@ async fn graph_first_compaction_archive_roundtrip_preserves_identity_and_history
     executor.record_compact(&mut session, &compact);
 
     assert_eq!(session.current_branch_messages().len(), 1);
-    assert_eq!(session.compact_history.len(), 1);
-    assert_eq!(session.graph.checkpoints.len(), 1);
-    assert!(session.summary.is_some());
+    assert_eq!(session.compact_history().len(), 1);
+    assert_eq!(session.graph().checkpoints.len(), 1);
+    assert!(session.summary().is_some());
     assert!(
-        session.graph.events.len() >= 4,
+        session.graph().events.len() >= 4,
         "graph history should retain pre-compaction lineage"
     );
 
@@ -141,7 +142,7 @@ async fn graph_first_compaction_archive_roundtrip_preserves_identity_and_history
         QueueItem::enqueue(session.id, "first follow-up").priority(10),
         QueueItem::enqueue(session.id, "second follow-up").priority(1),
     ];
-    let bundle = SessionArchiveService::export_bundle(
+    let bundle = SessionArchiver::export_bundle(
         &session,
         &ExportPolicy::default(),
         &ArchivePolicy {
@@ -154,7 +155,7 @@ async fn graph_first_compaction_archive_roundtrip_preserves_identity_and_history
     .expect("archive export should succeed");
 
     let persistence = MemoryPersistence::new();
-    let restored = SessionArchiveService::restore_into(&bundle, &persistence)
+    let restored = SessionArchiver::restore_into(&bundle, &persistence)
         .await
         .expect("archive restore should succeed");
     let restored_queue = persistence
@@ -162,15 +163,15 @@ async fn graph_first_compaction_archive_roundtrip_preserves_identity_and_history
         .await
         .expect("queue load should succeed");
 
-    assert_eq!(restored.tenant_id.as_deref(), Some("tenant-a"));
-    assert_eq!(restored.principal_id.as_deref(), Some("user-1"));
+    assert_eq!(restored.tenant_id(), Some("tenant-a"));
+    assert_eq!(restored.principal_id(), Some("user-1"));
     assert_eq!(restored.current_branch_messages().len(), 1);
-    assert_eq!(restored.compact_history.len(), 1);
-    assert_eq!(restored.graph.checkpoints.len(), 1);
+    assert_eq!(restored.compact_history().len(), 1);
+    assert_eq!(restored.graph().checkpoints.len(), 1);
     assert_eq!(restored_queue.len(), 2);
     assert_eq!(restored_queue[0].content, "first follow-up");
     assert_eq!(restored_queue[1].content, "second follow-up");
-    assert_eq!(restored.current_input_tokens, session.current_input_tokens);
+    assert_eq!(restored.current_input_tokens(), session.current_input_tokens());
 }
 
 #[tokio::test]

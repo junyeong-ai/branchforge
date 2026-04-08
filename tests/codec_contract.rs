@@ -1065,6 +1065,7 @@ mod tool_result_encode {
                     role: Role::Tool,
                     content: vec![ContentPart::ToolResult {
                         tool_call_id: "call_xyz".into(),
+                        tool_name: Some("calc".into()),
                         content: ToolResultContent::Text("42".into()),
                         is_error: false,
                     }],
@@ -1213,5 +1214,102 @@ mod capability_honesty {
             strict_schema: false,
             id_semantics: ToolIdSemantics::Provided,
         };
+    }
+}
+
+// =============================================================================
+// Capability Honesty (response_format edition)
+// =============================================================================
+//
+// Goal: prevent "capability declaration drift" — a codec advertising a
+// `Native` feature in `ProviderCapabilities` while its `encode_request`
+// silently drops the relevant IR field. The most painful instance was
+// `OpenAiResponsesCodec` declaring `json_schema: Native` for years
+// without actually emitting `response_format`.
+//
+// Each test below picks a capability, sets the corresponding IR field
+// on a request, and asserts that the codec either (a) emits the wire
+// representation if the capability is `Native`, or (b) emits a
+// `CapabilityEmulated` warning if it's `Emulated`. Codecs declaring
+// `Unsupported` are expected to drop the field with no signal — that
+// is honest by definition.
+
+mod capability_honesty_response_format {
+    use super::*;
+    use branchforge::ir::{ModelWarning, ResponseFormat};
+
+    fn json_schema_request() -> ModelRequest {
+        let mut r = ModelRequest::new("test-model", vec![Message::user("emit json")]);
+        r.response_format = Some(ResponseFormat::JsonSchema {
+            name: "Person".into(),
+            schema: json!({"type": "object", "properties": {"name": {"type": "string"}}}),
+            strict: true,
+        });
+        r
+    }
+
+    fn assert_response_format_honesty<C: ModelCodec>(codec: &C) {
+        let req = json_schema_request();
+        let enc = codec
+            .encode_request(&req, InvocationMode::Unary)
+            .unwrap_or_else(|e| panic!("{} encode failed: {e}", codec.id()));
+        let cap = codec.capabilities();
+        match cap.structured_output.json_schema {
+            Support::Native => {
+                // Native: the wire body must mention the schema in some form.
+                let body = serde_json::to_string(&enc.body).unwrap();
+                assert!(
+                    body.contains("json_schema")
+                        || body.contains("responseSchema")
+                        || body.contains("\"schema\"")
+                        || body.contains("\"format\""),
+                    "{} declared json_schema: Native but the encoded body has no schema reference: {body}",
+                    codec.id()
+                );
+            }
+            Support::Emulated => {
+                // Emulated: must emit a CapabilityEmulated warning so the
+                // caller knows the request is honoured by tool/prompt
+                // emulation rather than a native parameter.
+                assert!(
+                    enc.warnings.iter().any(|w| matches!(
+                        w,
+                        ModelWarning::CapabilityEmulated { capability } if capability == "response_format"
+                    )),
+                    "{} declared json_schema: Emulated but emitted no CapabilityEmulated warning: {:?}",
+                    codec.id(),
+                    enc.warnings
+                );
+            }
+            Support::Unsupported => {
+                // Unsupported: the field is silently dropped, which is
+                // honest. No assertion needed.
+            }
+        }
+    }
+
+    #[test]
+    fn anthropic_messages_capability_honesty() {
+        assert_response_format_honesty(&AnthropicMessagesCodec::new());
+    }
+
+    #[test]
+    fn openai_chat_capability_honesty() {
+        assert_response_format_honesty(&OpenAiChatCodec::new());
+    }
+
+    #[test]
+    fn openai_responses_capability_honesty() {
+        assert_response_format_honesty(&OpenAiResponsesCodec::new());
+    }
+
+    #[test]
+    fn gemini_generate_capability_honesty() {
+        assert_response_format_honesty(&GeminiGenerateCodec::new());
+    }
+
+    #[test]
+    fn bedrock_converse_capability_honesty() {
+        assert_response_format_honesty(&BedrockConverseCodec::new());
     }
 }

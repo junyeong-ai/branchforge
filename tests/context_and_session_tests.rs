@@ -313,31 +313,31 @@ mod static_context_tests {
 // =============================================================================
 
 mod session_tests {
+    use branchforge::ir::ContentPart;
     use branchforge::session::{
-        CompactConfig, CompactService, Session, SessionAccessScope, SessionConfig, SessionManager,
+        CompactConfig, Compactor, Session, SessionAccessScope, SessionConfig, SessionManager,
         SessionMessage,
     };
-    use branchforge::types::ContentBlock;
 
     #[test]
     fn test_session_creation_and_messages() {
         let config = SessionConfig::default();
         let mut session = Session::new(config);
 
-        let user_msg = SessionMessage::user(vec![ContentBlock::text("Hello")]);
+        let user_msg = SessionMessage::user(vec![ContentPart::text("Hello")]);
         session.add_message(user_msg).unwrap();
 
-        let assistant_msg = SessionMessage::assistant(vec![ContentBlock::text("Hi there!")]);
+        let assistant_msg = SessionMessage::assistant(vec![ContentPart::text("Hi there!")]);
         session.add_message(assistant_msg).unwrap();
 
-        assert_eq!(session.messages.len(), 2);
-        assert!(session.current_leaf_id.is_some());
+        assert_eq!(session.current_branch_messages().len(), 2);
+        assert!(session.current_leaf_id().is_some());
     }
 
     #[test]
     fn test_context_compaction_threshold() {
         let strategy = CompactConfig::default().threshold(0.8);
-        let executor = CompactService::new(strategy);
+        let executor = Compactor::new(strategy);
 
         assert!(!executor.needs_compact(70_000, 100_000));
         assert!(executor.needs_compact(80_000, 100_000));

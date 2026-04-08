@@ -8,10 +8,12 @@ use std::sync::Arc;
 #[cfg(any(feature = "postgres", feature = "redis-backend"))]
 use std::time::Duration;
 
+#[cfg(any(feature = "jsonl", feature = "postgres", feature = "redis-backend"))]
+use branchforge::ir::ContentPart;
 #[cfg(any(feature = "postgres", feature = "redis-backend"))]
 use branchforge::session::Persistence;
 #[cfg(any(feature = "jsonl", feature = "postgres", feature = "redis-backend"))]
-use branchforge::session::SessionArchiveService;
+use branchforge::session::SessionArchiver;
 #[cfg(feature = "jsonl")]
 use branchforge::session::{ArchivePolicy, ExportPolicy, JsonlConfig, JsonlPersistence};
 #[cfg(feature = "postgres")]
@@ -22,8 +24,6 @@ use branchforge::session::{QueueItem, QueueOperation, QueueStatus};
 use branchforge::session::{RedisConfig, RedisPersistence};
 #[cfg(any(feature = "jsonl", feature = "postgres", feature = "redis-backend"))]
 use branchforge::session::{Session, SessionConfig, SessionMessage};
-#[cfg(any(feature = "jsonl", feature = "postgres", feature = "redis-backend"))]
-use branchforge::types::ContentBlock;
 #[cfg(feature = "redis-backend")]
 use chrono::Utc;
 #[cfg(feature = "jsonl")]
@@ -53,10 +53,10 @@ fn seeded_session() -> Session {
     let mut session = Session::new(SessionConfig::default());
     session.set_identity(Some("tenant-a".to_string()), Some("user-1".to_string()));
     session
-        .add_message(SessionMessage::user(vec![ContentBlock::text("hello")]))
+        .add_message(SessionMessage::user(vec![ContentPart::text("hello")]))
         .unwrap();
     session
-        .add_message(SessionMessage::assistant(vec![ContentBlock::text("world")]))
+        .add_message(SessionMessage::assistant(vec![ContentPart::text("world")]))
         .unwrap();
     session.bookmark_current_head("head", Some("bookmark".to_string()));
     session
@@ -84,7 +84,7 @@ where
     for idx in 0..MESSAGE_COUNT {
         let persistence = Arc::clone(&persistence);
         set.spawn(async move {
-            let message = SessionMessage::user(vec![ContentBlock::text(format!("message-{idx}"))]);
+            let message = SessionMessage::user(vec![ContentPart::text(format!("message-{idx}"))]);
             persistence.add_message(&session_id, message).await.unwrap();
         });
     }
@@ -122,7 +122,7 @@ where
         branchforge::session::QueueItem::enqueue(session.id, "second").priority(1),
     ];
 
-    let bundle = SessionArchiveService::export_bundle(
+    let bundle = SessionArchiver::export_bundle(
         &session,
         &ExportPolicy::default(),
         &ArchivePolicy {
@@ -133,21 +133,21 @@ where
     )
     .expect("bundle should be created");
 
-    let restored = SessionArchiveService::restore_into(&bundle, persistence.as_ref())
+    let restored = SessionArchiver::restore_into(&bundle, persistence.as_ref())
         .await
         .expect("archive restore should succeed");
-    assert_eq!(restored.tenant_id.as_deref(), Some("tenant-a"));
-    assert_eq!(restored.principal_id.as_deref(), Some("user-1"));
+    assert_eq!(restored.tenant_id(), Some("tenant-a"));
+    assert_eq!(restored.principal_id(), Some("user-1"));
     assert_eq!(restored.current_branch_messages().len(), 2);
-    assert_eq!(restored.graph.bookmarks.len(), 1);
-    assert_eq!(restored.graph.checkpoints.len(), 1);
+    assert_eq!(restored.graph().bookmarks.len(), 1);
+    assert_eq!(restored.graph().checkpoints.len(), 1);
 
     let restored_queue = persistence.pending_queue(&restored.id).await.unwrap();
     assert_eq!(restored_queue.len(), 2);
     assert_eq!(restored_queue[0].content, "first");
     assert_eq!(restored_queue[1].content, "second");
 
-    let overwrite = SessionArchiveService::restore_into(&bundle, persistence.as_ref())
+    let overwrite = SessionArchiver::restore_into(&bundle, persistence.as_ref())
         .await
         .expect_err("restoring same bundle twice should refuse overwrite");
     let overwrite_message = overwrite.to_string();
@@ -183,11 +183,11 @@ async fn test_postgres_backend_roundtrip_graph_identity() {
     persistence.save(&session).await.unwrap();
 
     let loaded = persistence.load(&session_id).await.unwrap().unwrap();
-    assert_eq!(loaded.tenant_id.as_deref(), Some("tenant-a"));
-    assert_eq!(loaded.principal_id.as_deref(), Some("user-1"));
+    assert_eq!(loaded.tenant_id(), Some("tenant-a"));
+    assert_eq!(loaded.principal_id(), Some("user-1"));
     assert_eq!(loaded.current_branch_messages().len(), 2);
-    assert_eq!(loaded.graph.bookmarks.len(), 1);
-    assert_eq!(loaded.graph.checkpoints.len(), 1);
+    assert_eq!(loaded.graph().bookmarks.len(), 1);
+    assert_eq!(loaded.graph().checkpoints.len(), 1);
 
     let tenant_list = persistence.list(Some("tenant-a")).await.unwrap();
     assert_eq!(tenant_list, vec![session_id]);
@@ -217,8 +217,8 @@ async fn test_postgres_backend_plan_clear_and_state_update() {
         .unwrap();
 
     let loaded = persistence.load(&session_id).await.unwrap().unwrap();
-    assert!(loaded.current_plan.is_none());
-    assert_eq!(loaded.state, branchforge::session::SessionState::Completed);
+    assert!(loaded.current_plan().is_none());
+    assert_eq!(loaded.state(), branchforge::session::SessionState::Completed);
 }
 
 #[cfg(feature = "postgres")]
@@ -265,11 +265,11 @@ async fn test_redis_backend_roundtrip_graph_identity() {
     persistence.save(&session).await.unwrap();
 
     let loaded = persistence.load(&session_id).await.unwrap().unwrap();
-    assert_eq!(loaded.tenant_id.as_deref(), Some("tenant-a"));
-    assert_eq!(loaded.principal_id.as_deref(), Some("user-1"));
+    assert_eq!(loaded.tenant_id(), Some("tenant-a"));
+    assert_eq!(loaded.principal_id(), Some("user-1"));
     assert_eq!(loaded.current_branch_messages().len(), 2);
-    assert_eq!(loaded.graph.bookmarks.len(), 1);
-    assert_eq!(loaded.graph.checkpoints.len(), 1);
+    assert_eq!(loaded.graph().bookmarks.len(), 1);
+    assert_eq!(loaded.graph().checkpoints.len(), 1);
 
     let tenant_list = persistence.list(Some("tenant-a")).await.unwrap();
     assert_eq!(tenant_list, vec![session_id]);
@@ -370,11 +370,11 @@ async fn test_jsonl_backend_roundtrip_graph_identity() {
     persistence.save(&session).await.unwrap();
 
     let loaded = persistence.load(&session_id).await.unwrap().unwrap();
-    assert_eq!(loaded.tenant_id.as_deref(), Some("tenant-a"));
-    assert_eq!(loaded.principal_id.as_deref(), Some("user-1"));
+    assert_eq!(loaded.tenant_id(), Some("tenant-a"));
+    assert_eq!(loaded.principal_id(), Some("user-1"));
     assert_eq!(loaded.current_branch_messages().len(), 2);
-    assert_eq!(loaded.graph.bookmarks.len(), 1);
-    assert_eq!(loaded.graph.checkpoints.len(), 1);
+    assert_eq!(loaded.graph().bookmarks.len(), 1);
+    assert_eq!(loaded.graph().checkpoints.len(), 1);
 }
 
 #[cfg(feature = "jsonl")]

@@ -337,7 +337,8 @@ async fn live_post_stream_chunk_via_streaming() {
 #[ignore = "Requires CLI credentials"]
 async fn live_cost_attribution() {
     use branchforge::budget::PricingTable;
-    use branchforge::types::{Usage, UsageProvider};
+    use branchforge::ir::Usage;
+    use branchforge::types::UsageProvider;
 
     let dir = tempdir().unwrap();
     fs::write(dir.path().join("cost.txt"), "cost_test_42")
