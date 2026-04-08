@@ -685,8 +685,8 @@ mod tests {
             .unwrap();
 
         let graph = persistence.load_graph(&id).await.unwrap().unwrap();
-        assert_eq!(graph.events.len(), 1);
-        assert_eq!(graph.branch_nodes(graph.primary_branch).len(), 1);
+        assert_eq!(graph.events().len(), 1);
+        assert_eq!(graph.branch_nodes(graph.primary_branch()).len(), 1);
     }
 
     #[tokio::test]
@@ -730,7 +730,7 @@ mod tests {
 
         let loaded = persistence.load(&session.id).await.unwrap().unwrap();
         assert_eq!(loaded.current_branch_messages().len(), 1);
-        assert_eq!(loaded.graph.checkpoints.len(), 1);
-        assert_eq!(loaded.graph.bookmarks.len(), 1);
+        assert_eq!(loaded.graph().checkpoints().len(), 1);
+        assert_eq!(loaded.graph().bookmarks().len(), 1);
     }
 }

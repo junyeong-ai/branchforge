@@ -391,4 +391,37 @@ mod tests {
         assert!(matches!(kind, crate::error::ProviderErrorKind::Server));
         assert!(hint.is_none());
     }
+
+    #[test]
+    fn classify_error_service_unavailable() {
+        let t = fake_transport("us-east-1");
+        let (kind, hint) = t.classify_error(
+            503,
+            r#"{"__type":"ServiceUnavailableException","message":"service down"}"#,
+        );
+        assert!(matches!(kind, crate::error::ProviderErrorKind::Server));
+        assert!(hint.unwrap().contains("retry"));
+    }
+
+    #[test]
+    fn classify_error_model_not_ready() {
+        let t = fake_transport("us-east-1");
+        let (kind, hint) = t.classify_error(
+            503,
+            r#"{"__type":"ModelNotReadyException","message":"model warming up"}"#,
+        );
+        assert!(matches!(kind, crate::error::ProviderErrorKind::Server));
+        assert!(hint.unwrap().contains("warming up"));
+    }
+
+    #[test]
+    fn classify_error_validation_exception() {
+        let t = fake_transport("us-east-1");
+        let (kind, hint) = t.classify_error(
+            400,
+            r#"{"__type":"ValidationException","message":"invalid input"}"#,
+        );
+        assert!(matches!(kind, crate::error::ProviderErrorKind::BadRequest));
+        assert!(hint.is_none());
+    }
 }

@@ -344,6 +344,17 @@ mod tests {
     }
 
     #[test]
+    fn classify_error_entra_consent_required() {
+        let t = FoundryTransport::with_api_key("https://x", "k");
+        let (kind, hint) = t.classify_error(
+            401,
+            r#"{"error":"interaction_required","error_description":"AADSTS65001: consent required"}"#,
+        );
+        assert!(matches!(kind, crate::error::ProviderErrorKind::Auth));
+        assert!(hint.unwrap().contains("az login"));
+    }
+
+    #[test]
     fn classify_error_generic_500_fallback() {
         let t = FoundryTransport::with_api_key("https://x", "k");
         let (kind, hint) = t.classify_error(500, "Internal Server Error");
