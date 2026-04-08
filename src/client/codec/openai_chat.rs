@@ -62,8 +62,14 @@ const CAPABILITIES: ProviderCapabilities = ProviderCapabilities {
         granularity: CacheGranularity::Conversation,
     },
     reasoning: ReasoningSupport {
-        // o-series exposes only token counts via Chat Completions, not text.
-        mode: Support::Emulated,
+        // The Chat Completions API exposes a native `reasoning_effort`
+        // wire field for the o-series (encoded directly at line ~212).
+        // The response side cannot return reasoning text — only token
+        // counts in `usage.completion_tokens_details.reasoning_tokens` —
+        // which is captured separately by `exposes_text: false`. The
+        // `mode` axis describes whether the wire path is native or
+        // emulated, not whether responses round-trip the reasoning text.
+        mode: Support::Native,
         exposes_text: false,
         exposes_tokens: true,
         requires_signature_passthrough: false,

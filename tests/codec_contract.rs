@@ -1313,3 +1313,98 @@ mod capability_honesty_response_format {
         assert_response_format_honesty(&BedrockConverseCodec::new());
     }
 }
+
+// =============================================================================
+// Capability Honesty (reasoning edition)
+// =============================================================================
+//
+// Same contract as the response_format honesty matrix above, applied to
+// the reasoning axis. Catches the same class of bug — a codec advertising
+// `reasoning: Native` while silently dropping `settings.reasoning`, or
+// `reasoning: Emulated` without emitting a warning.
+
+mod capability_honesty_reasoning {
+    use super::*;
+    use branchforge::ir::{ModelWarning, ReasoningEffort, ReasoningSettings};
+
+    fn reasoning_request() -> ModelRequest {
+        let mut r = ModelRequest::new("test-model", vec![Message::user("think hard")]);
+        r.settings.reasoning = Some(ReasoningSettings {
+            budget_tokens: Some(8192),
+            effort: Some(ReasoningEffort::High),
+            include_thoughts: true,
+        });
+        r
+    }
+
+    fn assert_reasoning_honesty<C: ModelCodec>(codec: &C) {
+        let req = reasoning_request();
+        let enc = codec
+            .encode_request(&req, InvocationMode::Unary)
+            .unwrap_or_else(|e| panic!("{} encode failed: {e}", codec.id()));
+        let cap = codec.capabilities();
+        match cap.reasoning.mode {
+            Support::Native => {
+                // Native: the wire body must mention reasoning in some form.
+                // Each codec uses a different field name — we accept any of:
+                //   - Anthropic / Bedrock direct: `thinking`
+                //   - OpenAI Chat: `reasoning_effort`
+                //   - OpenAI Responses: `reasoning`
+                //   - Gemini: `thinkingConfig` / `thinkingBudget`
+                let body = serde_json::to_string(&enc.body).unwrap();
+                assert!(
+                    body.contains("thinking")
+                        || body.contains("reasoning_effort")
+                        || body.contains("\"reasoning\"")
+                        || body.contains("thinkingConfig")
+                        || body.contains("thinkingBudget"),
+                    "{} declared reasoning: Native but the encoded body has no reasoning reference: {body}",
+                    codec.id()
+                );
+            }
+            Support::Emulated => {
+                // Emulated: must emit a CapabilityEmulated warning so the
+                // caller knows the request is honoured by passthrough or
+                // tool emulation rather than a native parameter.
+                assert!(
+                    enc.warnings.iter().any(|w| matches!(
+                        w,
+                        ModelWarning::CapabilityEmulated { capability } if capability == "reasoning"
+                    )),
+                    "{} declared reasoning: Emulated but emitted no CapabilityEmulated warning: {:?}",
+                    codec.id(),
+                    enc.warnings
+                );
+            }
+            Support::Unsupported => {
+                // Unsupported: the field is silently dropped, which is
+                // honest by definition. No assertion needed.
+            }
+        }
+    }
+
+    #[test]
+    fn anthropic_messages_reasoning_honesty() {
+        assert_reasoning_honesty(&AnthropicMessagesCodec::new());
+    }
+
+    #[test]
+    fn openai_chat_reasoning_honesty() {
+        assert_reasoning_honesty(&OpenAiChatCodec::new());
+    }
+
+    #[test]
+    fn openai_responses_reasoning_honesty() {
+        assert_reasoning_honesty(&OpenAiResponsesCodec::new());
+    }
+
+    #[test]
+    fn gemini_generate_reasoning_honesty() {
+        assert_reasoning_honesty(&GeminiGenerateCodec::new());
+    }
+
+    #[test]
+    fn bedrock_converse_reasoning_honesty() {
+        assert_reasoning_honesty(&BedrockConverseCodec::new());
+    }
+}

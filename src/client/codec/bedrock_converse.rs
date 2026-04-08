@@ -206,9 +206,17 @@ impl ModelCodec for BedrockConverseCodec {
         // Converse passes through to the underlying model.
         let mut additional = serde_json::Map::new();
         if let Some(reasoning) = &s.reasoning {
-            // Anthropic Claude on Bedrock accepts `thinking` in
-            // additionalModelRequestFields with the same shape as the
-            // direct API.
+            // Bedrock Converse has no portable reasoning wire field —
+            // we smuggle `thinking` through `additionalModelRequestFields`
+            // (the explicit model-specific escape hatch). Anthropic Claude
+            // on Bedrock recognises this shape; other models silently
+            // ignore it. Surface a CapabilityEmulated warning so callers
+            // know the IR field is honoured by passthrough rather than a
+            // native Converse parameter — matches the response_format
+            // pattern at the top of this function.
+            warnings.push(ModelWarning::CapabilityEmulated {
+                capability: "reasoning".to_string(),
+            });
             let budget = reasoning.budget_tokens.unwrap_or({
                 match reasoning.effort {
                     Some(crate::ir::ReasoningEffort::Minimal) => 1024,
