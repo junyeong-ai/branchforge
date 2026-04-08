@@ -19,7 +19,7 @@ use super::traits::Tool;
 use crate::agent::TaskRegistry;
 use crate::authorization::ToolPolicy;
 use crate::session::MemoryPersistence;
-use crate::types::{ToolDefinition, ToolOutput, ToolResult};
+use crate::types::{ToolSpec, ToolOutput, ToolResult};
 use std::path::PathBuf;
 
 #[derive(Clone)]
@@ -112,6 +112,22 @@ impl ToolRegistry {
         self.execute_with_progress(name, input, None, None).await
     }
 
+    /// Execute a tool with cancellation support.
+    ///
+    /// Pass a [`CancellationToken`] from `runtime.shutdown.child_token()`
+    /// so that graceful shutdown propagates into the tool's `tokio::select!`
+    /// race. Tools that explicitly check `ctx.cancel_token()` can also
+    /// abort cooperatively.
+    pub async fn execute_with_cancel(
+        &self,
+        name: &str,
+        input: serde_json::Value,
+        cancel_token: CancellationToken,
+    ) -> ToolResult {
+        self.execute_with_progress(name, input, None, Some(cancel_token))
+            .await
+    }
+
     /// Execute a tool with optional progress channel and cancellation token.
     ///
     /// If `progress_tx` is provided, the tool can call `ctx.progress()`
@@ -200,7 +216,7 @@ impl ToolRegistry {
     }
 
     /// Returns tool definitions sorted by name for prompt cache stability.
-    pub fn definitions(&self) -> Vec<ToolDefinition> {
+    pub fn definitions(&self) -> Vec<ToolSpec> {
         let mut defs: Vec<_> = self.tools.iter().map(|r| r.value().definition()).collect();
         defs.sort_by(|a, b| a.name.cmp(&b.name));
         defs

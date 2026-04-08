@@ -9,9 +9,9 @@
 use tracing::{debug, info, warn};
 
 use super::strategy::{CompactionContext, CompactionPlan, CompactionStrategy};
+use super::CompactResult;
 use crate::common::circuit::{CircuitBreaker, CircuitConfig};
 use crate::session::state::Session;
-use crate::types::CompactResult;
 
 /// Chain of compaction strategies with circuit breaker protection.
 pub struct CompactionChain {

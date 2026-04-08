@@ -232,7 +232,7 @@ pub trait Persistence: Send + Sync {
         Ok(self
             .load(session_id)
             .await?
-            .map(|session| session.to_graph()))
+            .map(|session| session.graph().clone()))
     }
 
     /// Append a message to an existing session.
@@ -690,13 +690,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_graph_first_roundtrip_restores_projection() {
+    async fn test_graph_first_roundtrip_restores_messages_from_graph() {
+        // After SSoT cleanup the messages are always derived from the graph,
+        // so a save/load round-trip should produce identical content with no
+        // explicit projection management on the caller's side.
         let persistence = MemoryPersistence::new();
         let mut session = Session::new(SessionConfig::default());
         session
             .add_message(SessionMessage::user(vec![ContentPart::text("Hello")]))
             .unwrap();
-        session.clear_messages();
 
         persistence.save(&session).await.unwrap();
 
@@ -723,7 +725,6 @@ mod tests {
             )
             .unwrap();
         session.bookmark_current_head("head", Some("note".to_string()));
-        session.clear_messages();
 
         persistence.save(&session).await.unwrap();
 

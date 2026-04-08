@@ -353,7 +353,7 @@ impl SessionManager {
         from_node: Option<crate::graph::NodeId>,
     ) -> SessionResult<crate::graph::ReplayInput> {
         let session = self.get(id).await?;
-        crate::session::ReplayService::replay_input(&session.graph, from_node)
+        crate::session::Replayer::replay_input(&session.graph, from_node)
     }
 
     pub async fn replay_input_scoped(
@@ -363,7 +363,7 @@ impl SessionManager {
         from_node: Option<crate::graph::NodeId>,
     ) -> SessionResult<crate::graph::ReplayInput> {
         let session = self.get_scoped(id, scope).await?;
-        crate::session::ReplayService::replay_input(&session.graph, from_node)
+        crate::session::Replayer::replay_input(&session.graph, from_node)
     }
 
     #[cfg(test)]
@@ -409,7 +409,7 @@ impl SessionManager {
         query: &crate::graph::GraphSearchQuery,
     ) -> SessionResult<Vec<crate::graph::NodeSummary>> {
         let session = self.get(id).await?;
-        Ok(crate::graph::GraphSearchService::search(
+        Ok(crate::graph::GraphSearcher::search(
             &session.graph,
             query,
         ))
@@ -422,7 +422,7 @@ impl SessionManager {
         query: &crate::graph::GraphSearchQuery,
     ) -> SessionResult<Vec<crate::graph::NodeSummary>> {
         let session = self.get_scoped(id, scope).await?;
-        Ok(crate::graph::GraphSearchService::search(
+        Ok(crate::graph::GraphSearcher::search(
             &session.graph,
             query,
         ))
@@ -434,7 +434,7 @@ impl SessionManager {
         id: &SessionId,
     ) -> SessionResult<crate::graph::GraphSessionStats> {
         let session = self.get(id).await?;
-        Ok(crate::graph::GraphSearchService::stats(&session.graph))
+        Ok(crate::graph::GraphSearcher::stats(&session.graph))
     }
 
     pub async fn graph_stats_scoped(
@@ -443,7 +443,7 @@ impl SessionManager {
         scope: &SessionAccessScope,
     ) -> SessionResult<crate::graph::GraphSessionStats> {
         let session = self.get_scoped(id, scope).await?;
-        Ok(crate::graph::GraphSearchService::stats(&session.graph))
+        Ok(crate::graph::GraphSearcher::stats(&session.graph))
     }
 
     #[cfg(test)]
@@ -475,7 +475,7 @@ impl SessionManager {
             branch_id,
         )
         .map_err(|message| SessionError::Storage { message })?;
-        crate::session::ReplayService::replay_input(
+        crate::session::Replayer::replay_input(
             &session.graph,
             Some(crate::graph::GraphReferenceResolver::node_id(&reference)),
         )
@@ -495,7 +495,7 @@ impl SessionManager {
             branch_id,
         )
         .map_err(|message| SessionError::Storage { message })?;
-        crate::session::ReplayService::replay_input(
+        crate::session::Replayer::replay_input(
             &session.graph,
             Some(crate::graph::GraphReferenceResolver::node_id(&reference)),
         )
@@ -735,7 +735,7 @@ impl ScopedSessionManager {
             branch_id,
         )
         .map_err(|message| SessionError::Storage { message })?;
-        crate::session::ReplayService::replay_input(
+        crate::session::Replayer::replay_input(
             &session.graph,
             Some(crate::graph::GraphReferenceResolver::node_id(&reference)),
         )
@@ -754,7 +754,7 @@ impl ScopedSessionManager {
             branch_id,
         )
         .map_err(|message| SessionError::Storage { message })?;
-        crate::session::ReplayService::replay_input(
+        crate::session::Replayer::replay_input(
             &session.graph,
             Some(crate::graph::GraphReferenceResolver::node_id(&reference)),
         )
@@ -957,7 +957,7 @@ impl ScopedSessionManager {
         } else {
             Vec::new()
         };
-        crate::session::SessionArchiveService::export_bundle(
+        crate::session::SessionArchiver::export_bundle(
             &session,
             export_policy,
             archive_policy,
@@ -981,7 +981,7 @@ impl ScopedSessionManager {
             });
         }
 
-        crate::session::SessionArchiveService::restore_into(
+        crate::session::SessionArchiver::restore_into(
             bundle,
             self.manager.persistence.as_ref(),
         )
@@ -1130,7 +1130,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_session_manager_replay_survives_projection_refresh() {
+    async fn test_session_manager_replay_uses_graph_as_source_of_truth() {
+        // After SSoT cleanup there is no projection cache to clear; replay
+        // and export must always reflect the graph state directly.
         let manager = SessionManager::in_memory();
         let mut session = manager.create(SessionConfig::default()).await.unwrap();
         session
@@ -1139,7 +1141,6 @@ mod tests {
         session
             .add_message(SessionMessage::assistant(vec![ContentPart::text("world")]))
             .unwrap();
-        session.clear_messages();
         manager.persistence.save(&session).await.unwrap();
 
         let replay = manager.replay_input(&session.id, None).await.unwrap();

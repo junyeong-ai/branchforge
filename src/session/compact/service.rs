@@ -5,12 +5,12 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::client::DEFAULT_FAST_MODEL;
+use crate::agent::DEFAULT_FAST_MODEL;
 use crate::ir::{ContentPart, Message, Role};
 use crate::session::state::{Session, SessionMessage};
 use crate::session::types::CompactRecord;
 use crate::session::{SessionError, SessionResult};
-use crate::types::CompactResult;
+use super::CompactResult;
 
 /// Context usage threshold for triggering compaction (80%).
 pub const DEFAULT_COMPACT_THRESHOLD: f32 = 0.8;
@@ -104,11 +104,11 @@ impl CompactConfig {
     }
 }
 
-pub struct CompactService {
+pub struct Compactor {
     config: CompactConfig,
 }
 
-impl CompactService {
+impl Compactor {
     pub fn new(config: CompactConfig) -> Self {
         Self { config }
     }
@@ -200,9 +200,9 @@ impl CompactService {
             vec!["compaction".to_string()],
         )?;
 
-        // Rebuild projection from graph — the Summary node is now the
-        // compaction checkpoint and graph_projected_messages() will start from it.
-        session.refresh_message_projection();
+        // Summary is the only cached projection that needs to be refreshed;
+        // current_branch_messages() now derives from graph on demand and
+        // automatically starts from the new compaction Summary node.
         session.refresh_summary_cache();
         session.updated_at = chrono::Utc::now();
 
@@ -499,7 +499,7 @@ mod tests {
 
     #[test]
     fn test_needs_compact() {
-        let executor = CompactService::new(CompactConfig::default().threshold(0.8));
+        let executor = Compactor::new(CompactConfig::default().threshold(0.8));
 
         assert!(!executor.needs_compact(70_000, 100_000));
         assert!(executor.needs_compact(80_000, 100_000));
@@ -509,7 +509,7 @@ mod tests {
     #[test]
     fn test_prepare_compact_empty() {
         let session = Session::new(SessionConfig::default());
-        let executor = CompactService::new(CompactConfig::default());
+        let executor = Compactor::new(CompactConfig::default());
 
         let result = executor.prepare_compact(&session).unwrap();
         assert!(matches!(result, PreparedCompact::NotNeeded));
@@ -518,7 +518,7 @@ mod tests {
     #[test]
     fn test_prepare_compact_ready_full_prompt() {
         let session = create_test_session(10);
-        let executor = CompactService::new(CompactConfig::default().detailed_summary(true));
+        let executor = Compactor::new(CompactConfig::default().detailed_summary(true));
 
         let result = executor.prepare_compact(&session).unwrap();
 
@@ -543,7 +543,7 @@ mod tests {
     #[test]
     fn test_prepare_compact_ready_minimal_prompt() {
         let session = create_test_session(10);
-        let executor = CompactService::new(CompactConfig::default().detailed_summary(false));
+        let executor = Compactor::new(CompactConfig::default().detailed_summary(false));
 
         let result = executor.prepare_compact(&session).unwrap();
 
@@ -569,7 +569,7 @@ mod tests {
     #[test]
     fn test_prepare_compact_with_custom_instructions() {
         let session = create_test_session(5);
-        let executor = CompactService::new(
+        let executor = Compactor::new(
             CompactConfig::default()
                 .custom_instructions("Focus on Rust code changes and test results."),
         );
@@ -588,7 +588,7 @@ mod tests {
     #[test]
     fn test_apply_compact() {
         let mut session = create_test_session(10);
-        let executor = CompactService::new(CompactConfig::default());
+        let executor = Compactor::new(CompactConfig::default());
 
         let result = executor
             .apply_compact(&mut session, "Test summary".to_string())
@@ -607,8 +607,9 @@ mod tests {
         }
 
         assert!(session.summary.is_some());
-        assert_eq!(session.messages.len(), 1);
-        assert!(session.messages[0].is_compact_summary);
+        let messages = session.current_branch_messages();
+        assert_eq!(messages.len(), 1);
+        assert!(messages[0].is_compact_summary);
     }
 
     #[test]

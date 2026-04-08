@@ -14,7 +14,8 @@ use crate::budget::{BudgetTracker, TenantBudget};
 use crate::context::PromptOrchestrator;
 use crate::hooks::{HookContext, HookEvent, HookInput, HookManager};
 use crate::session::{ToolExecution, ToolState};
-use crate::types::{CompactResult, ToolResult};
+use crate::session::compact::CompactResult;
+use crate::types::ToolResult;
 
 use super::config::BudgetConfig;
 use super::state::AgentMetrics;
@@ -84,20 +85,20 @@ pub(crate) fn accumulate_response_usage(
     tenant_budget: Option<&TenantBudget>,
     model: &str,
     ir_usage: &crate::ir::Usage,
-) -> Decimal {
+) -> crate::Result<Decimal> {
     total_usage.add(ir_usage);
 
     metrics.add_usage_with_cache(ir_usage);
     metrics.record_model_usage(model, ir_usage);
 
-    let cost = budget_tracker.record(model, ir_usage);
+    let cost = budget_tracker.record(model, ir_usage)?;
     metrics.add_cost(cost);
 
     if let Some(tenant_budget) = tenant_budget {
-        tenant_budget.record(model, ir_usage);
+        tenant_budget.record(model, ir_usage)?;
     }
 
-    cost
+    Ok(cost)
 }
 
 /// Emit a [`TokensConsumed`](crate::events::EventKind::TokensConsumed) event
@@ -216,23 +217,22 @@ pub(crate) async fn accumulate_inner_usage(
     budget_tracker: &BudgetTracker,
     result: &ToolResult,
     tool_name: &str,
-) {
-    if let Some(ref inner_usage) = result.inner_usage {
-        let inner_ir_usage: crate::ir::Usage = inner_usage.into();
+) -> crate::Result<()> {
+    if let Some(ref inner_ir_usage) = result.inner_usage {
         tool_state
             .with_session_mut(|session| {
-                session.update_usage(&inner_ir_usage);
+                session.update_usage(inner_ir_usage);
             })
             .await;
-        total_usage.add(&inner_ir_usage);
-        metrics.add_usage_with_cache(&inner_ir_usage);
+        total_usage.add(inner_ir_usage);
+        metrics.add_usage_with_cache(inner_ir_usage);
         let inner_model = result
             .inner_model
             .as_deref()
             .unwrap_or(DEFAULT_FALLBACK_MODEL);
-        metrics.record_model_usage(inner_model, &inner_ir_usage);
+        metrics.record_model_usage(inner_model, inner_ir_usage);
 
-        let inner_cost = budget_tracker.record(inner_model, &inner_ir_usage);
+        let inner_cost = budget_tracker.record(inner_model, inner_ir_usage)?;
         metrics.add_cost(inner_cost);
 
         debug!(
@@ -244,6 +244,7 @@ pub(crate) async fn accumulate_inner_usage(
             "Accumulated inner usage from tool"
         );
     }
+    Ok(())
 }
 
 pub(crate) async fn maybe_invoke_explicit_skill_command(
@@ -323,10 +324,10 @@ pub(crate) async fn maybe_invoke_explicit_skill_command(
                 }],
                 None,
             )?;
-            session.add_tool_results(vec![crate::ir::ContentPart::from_tool_result(
-                &tool_call_id,
-                &result,
-            )])?;
+            session.add_tool_results(vec![
+                crate::ir::ContentPart::from_tool_result(&tool_call_id, &result)
+                    .with_tool_name("Skill"),
+            ])?;
             Ok(())
         })
         .await?;

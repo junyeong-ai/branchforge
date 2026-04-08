@@ -44,35 +44,101 @@ pub(crate) struct RuleFrontmatter {
 ///
 /// Contains only metadata needed for system prompt injection.
 /// Full rule content is loaded on-demand via `load_content()`.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+///
+/// # Serialization
+///
+/// `compiled_patterns` is a derived field rebuilt from `paths` on
+/// deserialization via `#[serde(from = "RuleIndexRaw")]`. This guarantees
+/// that path matching works correctly on a deserialized `RuleIndex`.
+#[derive(Clone, Debug, Serialize)]
+#[serde(into = "RuleIndexRaw")]
 pub struct RuleIndex {
     /// Rule name (unique identifier).
     pub name: String,
 
     /// Human-readable description of what this rule does.
-    #[serde(default)]
     pub description: String,
 
     /// Path patterns this rule applies to (glob syntax).
     /// `None` means this is a global rule that applies to all files.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub paths: Option<Vec<String>>,
 
     /// Compiled glob patterns for efficient matching.
-    #[serde(skip)]
+    /// Derived from `paths`; rebuilt automatically on deserialization.
     compiled_patterns: Vec<Pattern>,
 
     /// Explicit priority for ordering. Higher values take precedence.
     /// This is separate from source_type-based priority in the Index trait.
-    #[serde(default)]
     pub priority: i32,
 
     /// Content source for lazy loading.
     pub source: ContentSource,
 
     /// Source type (builtin, user, project).
-    #[serde(default)]
     pub source_type: SourceType,
+}
+
+/// Wire format for `RuleIndex` (excludes derived `compiled_patterns`).
+///
+/// The `From<RuleIndexRaw> for RuleIndex` impl rebuilds `compiled_patterns`
+/// from `paths`, ensuring deserialized indices match paths correctly.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+struct RuleIndexRaw {
+    name: String,
+    #[serde(default)]
+    description: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    paths: Option<Vec<String>>,
+    #[serde(default)]
+    priority: i32,
+    source: ContentSource,
+    #[serde(default)]
+    source_type: SourceType,
+}
+
+impl From<RuleIndexRaw> for RuleIndex {
+    fn from(raw: RuleIndexRaw) -> Self {
+        let compiled_patterns = compile_patterns(raw.paths.as_deref());
+        Self {
+            name: raw.name,
+            description: raw.description,
+            paths: raw.paths,
+            compiled_patterns,
+            priority: raw.priority,
+            source: raw.source,
+            source_type: raw.source_type,
+        }
+    }
+}
+
+impl From<RuleIndex> for RuleIndexRaw {
+    fn from(idx: RuleIndex) -> Self {
+        Self {
+            name: idx.name,
+            description: idx.description,
+            paths: idx.paths,
+            priority: idx.priority,
+            source: idx.source,
+            source_type: idx.source_type,
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for RuleIndex {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        RuleIndexRaw::deserialize(deserializer).map(Self::from)
+    }
+}
+
+/// Compile glob patterns, dropping any that fail to parse.
+fn compile_patterns(paths: Option<&[String]>) -> Vec<Pattern> {
+    paths
+        .map(|p| p.iter().filter_map(|s| Pattern::new(s).ok()).collect())
+        .unwrap_or_default()
 }
 
 impl RuleIndex {
@@ -100,7 +166,7 @@ impl RuleIndex {
 
     /// Set path patterns this rule applies to.
     pub fn paths(mut self, paths: Vec<String>) -> Self {
-        self.compiled_patterns = paths.iter().filter_map(|p| Pattern::new(p).ok()).collect();
+        self.compiled_patterns = compile_patterns(Some(&paths));
         self.paths = Some(paths);
         self
     }
@@ -145,11 +211,7 @@ impl RuleIndex {
             .map(|doc| doc.frontmatter)
             .unwrap_or_default();
 
-        let compiled_patterns = fm
-            .paths
-            .as_ref()
-            .map(|p| p.iter().filter_map(|s| Pattern::new(s).ok()).collect())
-            .unwrap_or_default();
+        let compiled_patterns = compile_patterns(fm.paths.as_deref());
 
         Some(Self {
             name,
@@ -357,6 +419,39 @@ priority: 5
         let rule = RuleIndex::new("global-rule");
         let summary = rule.to_summary_line();
         assert_eq!(summary, "- global-rule: applies to all files");
+    }
+
+    #[test]
+    fn test_serde_roundtrip_recompiles_patterns() {
+        // Regression test for the bug where #[serde(skip)] on
+        // compiled_patterns left deserialized indices unable to match paths.
+        let original = RuleIndex::new("rust")
+            .description("Rust style")
+            .paths(vec!["**/*.rs".into()])
+            .source(ContentSource::in_memory("body"))
+            .source_type(SourceType::User);
+
+        let json = serde_json::to_string(&original).expect("serialize");
+        let restored: RuleIndex = serde_json::from_str(&json).expect("deserialize");
+
+        // The deserialized index must match paths, not silently fall back
+        // to the global rule (compiled_patterns.is_empty()) branch.
+        assert!(restored.matches_path(Path::new("src/lib.rs")));
+        assert!(restored.matches_path(Path::new("src/context/mod.rs")));
+        assert!(!restored.matches_path(Path::new("src/lib.ts")));
+        assert!(!restored.is_global());
+        assert_eq!(restored.name, "rust");
+        assert_eq!(restored.priority, 0);
+    }
+
+    #[test]
+    fn test_serde_roundtrip_global_rule() {
+        // Global rule (no paths) should remain global after roundtrip.
+        let original = RuleIndex::new("global").source(ContentSource::in_memory("body"));
+        let json = serde_json::to_string(&original).expect("serialize");
+        let restored: RuleIndex = serde_json::from_str(&json).expect("deserialize");
+        assert!(restored.is_global());
+        assert!(restored.matches_path(Path::new("any/file.rs")));
     }
 
     #[test]

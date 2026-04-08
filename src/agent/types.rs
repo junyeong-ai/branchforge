@@ -10,6 +10,13 @@ use serde::{Deserialize, Serialize};
 /// budget is set on the agent config.
 pub const DEFAULT_MAX_TOKENS: u32 = 8192;
 
+/// Minimum extended-thinking budget when reasoning is enabled.
+///
+/// Vendors that expose a thinking-budget parameter (Anthropic, OpenAI
+/// Responses, Gemini Pro) all clamp values below ~1k tokens, so the SDK
+/// rounds up to this floor on enable.
+pub const MIN_THINKING_BUDGET: u32 = 1024;
+
 /// Per-request metadata for SDK-level audit, attribution, and routing.
 ///
 /// `user_id` is forwarded to the provider for abuse-tracking. `tenant_id`

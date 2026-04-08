@@ -585,7 +585,7 @@ mod tests {
     use super::*;
     use crate::agent::{AgentMetrics, AgentResult, AgentState};
     use crate::ir::FinishReason;
-    use crate::ir::{ContentPart, Role};
+    use crate::ir::ContentPart;
     use crate::session::{MemoryPersistence, SessionConfig, SessionManager};
     use crate::tools::{ExecutionContext, Tool};
 

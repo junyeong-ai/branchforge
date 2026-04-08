@@ -4,8 +4,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use rust_decimal::Decimal;
 
-use super::COST_SCALE_FACTOR;
 use super::pricing::{PricingTable, global_pricing_table};
+use super::{COST_SCALE_FACTOR, cost_to_bits};
 
 /// Action to take when budget is exceeded.
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -79,11 +79,17 @@ impl BudgetTracker {
         Self::default()
     }
 
-    pub fn record(&self, model: &str, usage: &crate::ir::Usage) -> Decimal {
+    /// Record a usage observation against this tracker.
+    ///
+    /// Returns the computed cost on success, or
+    /// [`crate::Error::ResourceExhausted`] if the cost would overflow the
+    /// internal `u64` accumulator (practically unreachable, but enforced
+    /// rather than silently clamped).
+    pub fn record(&self, model: &str, usage: &crate::ir::Usage) -> crate::Result<Decimal> {
         let cost = self.pricing.calculate(model, usage);
-        let cost_bits = (cost * COST_SCALE_FACTOR).try_into().unwrap_or(u64::MAX);
+        let cost_bits = cost_to_bits(cost)?;
         self.used_cost_bits.fetch_add(cost_bits, Ordering::Relaxed);
-        cost
+        Ok(cost)
     }
 
     fn used_cost_usd_internal(&self) -> Decimal {
@@ -182,13 +188,13 @@ mod tests {
         };
 
         // Sonnet: 0.1M * $3 + 0.05M * $15 = $0.30 + $0.75 = $1.05
-        let cost = tracker.record("claude-sonnet-4-5", &usage);
+        let cost = tracker.record("claude-sonnet-4-5", &usage).unwrap();
         assert_eq!(cost, dec!(1.05));
         assert!(!tracker.should_stop());
 
         // Add more usage to exceed budget
         for _ in 0..10 {
-            tracker.record("claude-sonnet-4-5", &usage);
+            tracker.record("claude-sonnet-4-5", &usage).unwrap();
         }
 
         assert!(tracker.should_stop());
@@ -206,7 +212,7 @@ mod tests {
         };
 
         for _ in 0..100 {
-            tracker.record("claude-opus-4-6", &usage);
+            tracker.record("claude-opus-4-6", &usage).unwrap();
         }
 
         assert!(!tracker.should_stop());
@@ -223,7 +229,7 @@ mod tests {
             ..Default::default()
         };
 
-        tracker.record("claude-sonnet-4-5", &usage);
+        tracker.record("claude-sonnet-4-5", &usage).unwrap();
 
         assert!(matches!(tracker.check(), BudgetStatus::Exceeded { .. }));
         assert!(!tracker.should_stop()); // WarnAndContinue doesn't stop

@@ -6,9 +6,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use dashmap::DashMap;
 use rust_decimal::Decimal;
 
-use super::COST_SCALE_FACTOR;
 use super::pricing::global_pricing_table;
 use super::tracker::OnExceed;
+use super::{COST_SCALE_FACTOR, cost_to_bits};
 
 #[derive(Debug)]
 pub struct TenantBudget {
@@ -33,11 +33,16 @@ impl TenantBudget {
         self
     }
 
-    pub fn record(&self, model: &str, usage: &crate::ir::Usage) -> Decimal {
+    /// Record a usage observation against this tenant's budget.
+    ///
+    /// Returns the computed cost on success, or
+    /// [`crate::Error::ResourceExhausted`] if the cost would overflow the
+    /// internal `u64` accumulator.
+    pub fn record(&self, model: &str, usage: &crate::ir::Usage) -> crate::Result<Decimal> {
         let cost = global_pricing_table().calculate(model, usage);
-        let cost_bits: u64 = (cost * COST_SCALE_FACTOR).try_into().unwrap_or(u64::MAX);
+        let cost_bits = cost_to_bits(cost)?;
         self.used_cost_usd.fetch_add(cost_bits, Ordering::Relaxed);
-        cost
+        Ok(cost)
     }
 
     pub fn used_cost_usd(&self) -> Decimal {
@@ -103,12 +108,17 @@ impl TenantBudgetManager {
         self.budgets.get(tenant_id).map(|v| Arc::clone(&v))
     }
 
+    /// Record usage for a known tenant.
+    ///
+    /// Returns `None` if the tenant is unknown, otherwise the result of
+    /// [`TenantBudget::record`] (cost on success, or
+    /// [`crate::Error::ResourceExhausted`] on overflow).
     pub fn record(
         &self,
         tenant_id: &str,
         model: &str,
         usage: &crate::ir::Usage,
-    ) -> Option<Decimal> {
+    ) -> Option<crate::Result<Decimal>> {
         self.budgets
             .get(tenant_id)
             .map(|budget| budget.record(model, usage))
@@ -173,8 +183,7 @@ mod tests {
 
         // tenant-a: 0.1M * $3 + 0.05M * $15 = $0.3 + $0.75 = $1.05
         let cost = manager.record("tenant-a", "claude-sonnet-4-5", &usage);
-        assert!(cost.is_some());
-        assert_eq!(cost.unwrap(), dec!(1.05));
+        assert_eq!(cost.unwrap().unwrap(), dec!(1.05));
 
         let budget_a = manager.get("tenant-a").unwrap();
         assert_eq!(budget_a.used_cost_usd(), dec!(1.05));
@@ -202,7 +211,9 @@ mod tests {
                         ..Default::default()
                     };
                     for _ in 0..100 {
-                        m.record("tenant-concurrent", "claude-sonnet-4-5", &usage);
+                        m.record("tenant-concurrent", "claude-sonnet-4-5", &usage)
+                            .unwrap()
+                            .unwrap();
                     }
                 })
             })
@@ -229,7 +240,10 @@ mod tests {
         };
 
         // First call: ~$13.5 (long context), exceeds $5 limit
-        manager.record("small-budget", "claude-sonnet-4-5", &usage);
+        manager
+            .record("small-budget", "claude-sonnet-4-5", &usage)
+            .unwrap()
+            .unwrap();
 
         assert!(manager.should_stop("small-budget"));
     }

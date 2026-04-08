@@ -2,7 +2,7 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::client::DEFAULT_MODEL;
+use crate::agent::DEFAULT_MODEL;
 use crate::common::IndexRegistry;
 use crate::skills::{SkillIndex, build_model_invocable_summary};
 

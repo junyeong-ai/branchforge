@@ -204,6 +204,13 @@ impl ExecutionContext {
         self.resolve_with_limits(path, &limits)
     }
 
+    /// Tool helper: resolve a path or short-circuit with a `ToolResult::error`.
+    ///
+    /// The `Err` variant is intentionally `ToolResult` (not boxed) so tool
+    /// implementations can write `let p = ctx.try_resolve_for(...)?;` and
+    /// return the error directly. The size lint is suppressed because
+    /// boxing here would force every call site to dereference manually.
+    #[allow(clippy::result_large_err)]
     pub fn try_resolve_for(
         &self,
         tool_name: &str,
@@ -213,6 +220,9 @@ impl ExecutionContext {
             .map_err(|e| crate::types::ToolResult::error(e.to_string()))
     }
 
+    /// Same as [`Self::try_resolve_for`] but allows an absent path that
+    /// resolves to the sandbox root. Same boxing rationale applies.
+    #[allow(clippy::result_large_err)]
     pub fn try_resolve_or_root_for(
         &self,
         tool_name: &str,

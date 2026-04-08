@@ -5,7 +5,7 @@
 
 use crate::ir::SystemBlock;
 use crate::mcp::make_mcp_name;
-use crate::types::ToolDefinition;
+use crate::types::ToolSpec;
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, Default)]
@@ -14,7 +14,7 @@ pub struct StaticContext {
     pub claude_md: String,
     pub skill_summary: String,
     pub rules_summary: String,
-    pub tool_definitions: Vec<ToolDefinition>,
+    pub tool_definitions: Vec<ToolSpec>,
     pub mcp_tool_metadata: Vec<McpToolMeta>,
 }
 
@@ -50,7 +50,7 @@ impl StaticContext {
         self
     }
 
-    pub fn tools(mut self, tools: Vec<ToolDefinition>) -> Self {
+    pub fn tools(mut self, tools: Vec<ToolSpec>) -> Self {
         self.tool_definitions = tools;
         self
     }

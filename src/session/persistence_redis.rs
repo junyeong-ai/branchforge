@@ -195,7 +195,6 @@ impl RedisPersistence {
         }
 
         session.refresh_summary_cache();
-        session.refresh_message_projection();
         Ok(())
     }
 
@@ -365,7 +364,6 @@ impl RedisPersistence {
                     mutate(&mut session)?;
                     validate_session_graph(&session, "redis")?;
                     session.refresh_summary_cache();
-                    session.refresh_message_projection();
                     let next_json =
                         serde_json::to_string(&session).map_err(SessionError::Serialization)?;
 
@@ -433,8 +431,7 @@ impl Persistence for RedisPersistence {
         validate_session_graph(session, "redis")?;
         let mut conn = self.get_connection().await?;
         let key = self.session_key(&session.id);
-        let mut persisted = session.clone();
-        persisted.refresh_message_projection();
+        let persisted = session.clone();
         let data = serde_json::to_string(&persisted).map_err(SessionError::Serialization)?;
 
         let ttl_secs = persisted
@@ -755,8 +752,7 @@ impl Persistence for RedisPersistence {
         let restore_nonce = Uuid::new_v4();
         let staging_key = self.restore_staging_session_key(&session.id, restore_nonce);
         let staging_queue_key = self.restore_staging_queue_key(&session.id, restore_nonce);
-        let mut persisted = session.clone();
-        persisted.refresh_message_projection();
+        let persisted = session.clone();
         let data = serde_json::to_string(&persisted).map_err(SessionError::Serialization)?;
         let ttl_secs = persisted
             .config

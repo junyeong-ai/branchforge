@@ -25,7 +25,8 @@ use crate::ir::ContentPart;
 use crate::ir::ModelStreamChunk;
 use crate::session::ToolExecution;
 use crate::session::{MessageMetadata, SessionAccessScope, SessionManager, ToolState};
-use crate::types::{AuthorizationDenied, context_window};
+use crate::authorization::AuthorizationDenied;
+use crate::types::context_window;
 
 impl Agent {
     pub async fn execute_stream(
@@ -68,7 +69,7 @@ impl Agent {
                 })
             })?;
         }
-        let static_context = match &self.runtime.orchestrator {
+        let static_context = match &self.runtime.orchestration.orchestrator {
             Some(orchestrator) => orchestrator.read().await.static_context().clone(),
             None => crate::context::StaticContext::new(),
         };
@@ -961,14 +962,16 @@ impl StreamState {
             )
             .await;
 
-        accumulate_response_usage(
+        if let Err(e) = accumulate_response_usage(
             &mut self.total_usage,
             &mut self.metrics,
             &self.cfg.runtime.budget_tracker,
             self.cfg.runtime.tenant_budget.as_deref(),
             &self.cfg.runtime.config.model.primary,
             &accumulated_usage,
-        );
+        ) {
+            return Some(Err(e));
+        }
 
         emit_tokens_consumed(
             self.cfg.runtime.event_bus.as_deref(),
@@ -1109,7 +1112,10 @@ impl StreamState {
                     .unwrap_or_else(|| "Blocked by hook".into());
                 debug!(tool = %tool_use.name, "Tool blocked by hook");
 
-                all_tool_results.push(ContentPart::tool_error(&tool_use.id, reason.clone()));
+                all_tool_results.push(
+                    ContentPart::tool_error(&tool_use.id, reason.clone())
+                        .with_tool_name(&tool_use.name),
+                );
                 self.metrics.record_authorization_denial(
                     AuthorizationDenied::new(
                         &tool_use.name,
@@ -1136,7 +1142,10 @@ impl StreamState {
                         "Tool '{}' is not available in plan mode. Only read/navigation tools are allowed.",
                         tool_use.name
                     );
-                    all_tool_results.push(ContentPart::tool_error(&tool_use.id, reason.clone()));
+                    all_tool_results.push(
+                        ContentPart::tool_error(&tool_use.id, reason.clone())
+                            .with_tool_name(&tool_use.name),
+                    );
                     events.push(AgentEvent::ToolBlocked {
                         id: tool_use.id.clone(),
                         name: tool_use.name.clone(),
@@ -1157,13 +1166,16 @@ impl StreamState {
                         name: tool_use.name.clone(),
                         input: actual_input.clone(),
                     });
-                    all_tool_results.push(ContentPart::tool_error(
-                        &tool_use.id,
-                        format!(
-                            "Tool '{}' requires user review. Use execute_stream() to handle ToolReview events.",
-                            tool_use.name
-                        ),
-                    ));
+                    all_tool_results.push(
+                        ContentPart::tool_error(
+                            &tool_use.id,
+                            format!(
+                                "Tool '{}' requires user review. Use execute_stream() to handle ToolReview events.",
+                                tool_use.name
+                            ),
+                        )
+                        .with_tool_name(&tool_use.name),
+                    );
                     continue;
                 }
 
@@ -1193,7 +1205,10 @@ impl StreamState {
         // The Phase machine in next_event() handles real-time progress delivery.
         let tools_ref = Arc::clone(&self.cfg.runtime.tools);
         let context_scope = self.cfg.runtime.context_scope.clone();
-        let cancel_token = self.cfg.runtime.shutdown.clone();
+        // Use child_token() for symmetry with execution.rs and to allow
+        // future per-batch cancellation without affecting the parent
+        // runtime.shutdown signal.
+        let cancel_token = self.cfg.runtime.shutdown.child_token();
 
         let mut batches = partition_tools_by_safety(&tools_ref, &prepared);
 
@@ -1358,12 +1373,12 @@ impl StreamState {
                 &result,
                 &name,
             )
-            .await;
+            .await?;
 
             try_activate_dynamic_rules(
                 &name,
                 &input,
-                &self.cfg.runtime.orchestrator,
+                &self.cfg.runtime.orchestration.orchestrator,
                 &mut self.dynamic_rules,
             )
             .await;
@@ -1395,7 +1410,9 @@ impl StreamState {
                 )
                 .await?;
 
-            all_tool_results.push(ContentPart::from_tool_result(&id, &result));
+            all_tool_results.push(
+                ContentPart::from_tool_result(&id, &result).with_tool_name(&name),
+            );
             events.push_back(AgentEvent::ToolComplete {
                 id,
                 name,

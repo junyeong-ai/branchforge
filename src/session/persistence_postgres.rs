@@ -408,8 +408,6 @@ fn reconstruct_session_from_row(
         state,
         config,
         authorization,
-        messages: Vec::new(),
-        current_leaf_id: current_leaf_id.clone(),
         summary: row.try_get("summary").ok(),
         total_usage: crate::ir::Usage {
             input_tokens: row.try_get::<i64, _>("total_input_tokens").unwrap_or(0) as u64,
@@ -440,7 +438,6 @@ fn reconstruct_session_from_row(
         &graph_events,
     )?;
     session.summary = session.graph.latest_summary();
-    session.refresh_message_projection();
     Ok(session)
 }
 
@@ -1617,7 +1614,7 @@ impl PostgresPersistence {
         .bind(session.total_usage.input_tokens as i64)
         .bind(session.total_usage.output_tokens as i64)
         .bind(session.total_cost_usd)
-        .bind(session.current_leaf_id.as_ref().map(|id| id.to_string()))
+        .bind(session.current_leaf_id().map(|id| id.to_string()))
         .bind(session.graph.primary_branch)
         .bind(&session.static_context_hash)
         .bind(&session.error)
@@ -1705,7 +1702,7 @@ impl PostgresPersistence {
         .bind(session.total_usage.input_tokens as i64)
         .bind(session.total_usage.output_tokens as i64)
         .bind(session.total_cost_usd)
-        .bind(session.current_leaf_id.as_ref().map(|id| id.to_string()))
+        .bind(session.current_leaf_id().map(|id| id.to_string()))
         .bind(session.graph.primary_branch)
         .bind(&session.static_context_hash)
         .bind(&session.error)
@@ -2381,7 +2378,6 @@ mod tests {
         restored.id = session.id;
         restored.created_at = session.created_at;
         restored.graph = crate::graph::GraphMaterializer::from_events(&session.graph.events);
-        restored.refresh_message_projection();
 
         assert_eq!(restored.current_branch_messages().len(), 2);
     }

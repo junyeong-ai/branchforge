@@ -266,7 +266,7 @@ pub(crate) fn verify_restored_session_roundtrip(
     if expected.graph.primary_branch != restored.graph.primary_branch {
         mismatches.push("primary_branch".to_string());
     }
-    if expected.current_leaf_id != restored.current_leaf_id {
+    if expected.current_leaf_id() != restored.current_leaf_id() {
         mismatches.push("current_leaf_id".to_string());
     }
     if expected.graph.branches.len() != restored.graph.branches.len() {
@@ -308,9 +308,9 @@ pub(crate) fn verify_restored_session_roundtrip(
     }
 }
 
-pub struct SessionArchiveService;
+pub struct SessionArchiver;
 
-impl SessionArchiveService {
+impl SessionArchiver {
     fn validate_graph(graph: &SessionGraph, context: &str) -> SessionResult<()> {
         let report = GraphValidator::validate(graph);
         if report.is_valid() {
@@ -362,7 +362,7 @@ impl SessionArchiveService {
             graph.primary_branch,
             export_policy,
         )?;
-        let stats = crate::graph::GraphSearchService::stats(&graph);
+        let stats = crate::graph::GraphSearcher::stats(&graph);
 
         Ok(SessionArchiveBundle {
             bundle_version: CURRENT_ARCHIVE_BUNDLE_VERSION,
@@ -424,8 +424,6 @@ impl SessionArchiveService {
             state: bundle.state,
             config: bundle.config.clone(),
             authorization: bundle.authorization.clone(),
-            messages: Vec::new(),
-            current_leaf_id: None,
             summary: bundle.graph.latest_summary(),
             total_usage: bundle.total_usage.clone(),
             current_input_tokens: bundle.current_input_tokens,
@@ -442,9 +440,10 @@ impl SessionArchiveService {
             event_bus: None,
             content_overrides: crate::session::state::ContentOverrides::default(),
         };
+        // Summary is the only derived state cached on Session that needs an
+        // explicit recompute after constructing from a bundle. Messages and
+        // current_leaf_id are now computed on demand from the graph.
         session.refresh_summary_cache();
-        session.refresh_message_projection();
-        // Restore the original updated_at after refresh methods that set it to now().
         session.updated_at = bundle.updated_at;
         Ok(session)
     }
@@ -579,7 +578,7 @@ mod tests {
             .add_message(SessionMessage::user(vec![ContentPart::text("hello")]))
             .unwrap();
 
-        let bundle = SessionArchiveService::export_bundle(
+        let bundle = SessionArchiver::export_bundle(
             &session,
             &crate::session::ExportPolicy::default(),
             &ArchivePolicy::default(),
@@ -587,7 +586,7 @@ mod tests {
         )
         .expect("bundle should be created");
 
-        let restored = SessionArchiveService::import_bundle(&bundle).unwrap();
+        let restored = SessionArchiver::import_bundle(&bundle).unwrap();
         let report = RestoreVerifier::verify(&bundle, &restored);
         assert!(report.is_valid());
     }
@@ -597,7 +596,7 @@ mod tests {
         let mut session = Session::new(SessionConfig::default());
         session.set_identity(Some("tenant-a".to_string()), Some("user-1".to_string()));
 
-        let bundle = SessionArchiveService::export_bundle(
+        let bundle = SessionArchiver::export_bundle(
             &session,
             &crate::session::ExportPolicy::default(),
             &ArchivePolicy::default(),
@@ -605,7 +604,7 @@ mod tests {
         )
         .expect("bundle should be created");
 
-        let mut restored = SessionArchiveService::import_bundle(&bundle).unwrap();
+        let mut restored = SessionArchiver::import_bundle(&bundle).unwrap();
         restored.tenant_id = Some("tenant-b".to_string());
 
         let report = RestoreVerifier::verify(&bundle, &restored);
@@ -624,14 +623,14 @@ mod tests {
             .add_message(SessionMessage::assistant(vec![ContentPart::text("world")]))
             .unwrap();
 
-        let bundle = SessionArchiveService::export_bundle(
+        let bundle = SessionArchiver::export_bundle(
             &session,
             &crate::session::ExportPolicy::default(),
             &ArchivePolicy::default(),
             Vec::new(),
         )
         .expect("bundle should be created");
-        let restored = SessionArchiveService::import_bundle(&bundle).unwrap();
+        let restored = SessionArchiver::import_bundle(&bundle).unwrap();
 
         assert_eq!(restored.tenant_id.as_deref(), Some("tenant-a"));
         assert_eq!(restored.principal_id.as_deref(), Some("user-1"));
@@ -646,7 +645,7 @@ mod tests {
             .add_message(SessionMessage::user(vec![ContentPart::text("hello")]))
             .unwrap();
 
-        let mut bundle = SessionArchiveService::export_bundle(
+        let mut bundle = SessionArchiver::export_bundle(
             &session,
             &crate::session::ExportPolicy::default(),
             &ArchivePolicy::default(),
@@ -663,7 +662,7 @@ mod tests {
         node.provenance = None;
         node.created_by_principal_id = Some("user-1".to_string());
 
-        let error = SessionArchiveService::import_bundle(&bundle)
+        let error = SessionArchiver::import_bundle(&bundle)
             .expect_err("invalid graph should fail import");
         assert!(error.to_string().contains("Invalid archive bundle graph"));
     }
@@ -685,7 +684,7 @@ mod tests {
         node.provenance = None;
         node.created_by_principal_id = Some("user-1".to_string());
 
-        let error = SessionArchiveService::export_bundle(
+        let error = SessionArchiver::export_bundle(
             &session,
             &crate::session::ExportPolicy::default(),
             &ArchivePolicy::default(),
@@ -724,7 +723,7 @@ mod tests {
             )
             .unwrap();
 
-        let bundle = SessionArchiveService::export_bundle(
+        let bundle = SessionArchiver::export_bundle(
             &session,
             &crate::session::ExportPolicy::default(),
             &ArchivePolicy {
@@ -775,7 +774,7 @@ mod tests {
             )
             .unwrap();
 
-        let bundle = SessionArchiveService::export_bundle(
+        let bundle = SessionArchiver::export_bundle(
             &session,
             &crate::session::ExportPolicy {
                 include_identity: true,
@@ -828,7 +827,7 @@ mod tests {
             crate::session::QueueItem::enqueue(session.id, "second").priority(1),
         ];
 
-        let bundle = SessionArchiveService::export_bundle(
+        let bundle = SessionArchiver::export_bundle(
             &session,
             &crate::session::ExportPolicy::default(),
             &ArchivePolicy {
@@ -839,7 +838,7 @@ mod tests {
         )
         .expect("bundle should be created");
 
-        let restored = SessionArchiveService::restore_into(&bundle, persistence.as_ref())
+        let restored = SessionArchiver::restore_into(&bundle, persistence.as_ref())
             .await
             .expect("restore should succeed");
 
@@ -869,7 +868,7 @@ mod tests {
             )]))
             .unwrap();
 
-        let mut bundle = SessionArchiveService::export_bundle(
+        let mut bundle = SessionArchiver::export_bundle(
             &imported,
             &crate::session::ExportPolicy::default(),
             &ArchivePolicy::default(),
@@ -878,7 +877,7 @@ mod tests {
         .expect("bundle should be created");
         bundle.session_id = existing.id.to_string();
 
-        let error = SessionArchiveService::restore_into(&bundle, persistence.as_ref())
+        let error = SessionArchiver::restore_into(&bundle, persistence.as_ref())
             .await
             .expect_err("restore should refuse overwrite");
         assert!(error.to_string().contains("refuses to overwrite"));
@@ -903,7 +902,7 @@ mod tests {
             )]))
             .unwrap();
 
-        let mut bundle = SessionArchiveService::export_bundle(
+        let mut bundle = SessionArchiver::export_bundle(
             &session,
             &crate::session::ExportPolicy::default(),
             &ArchivePolicy {
@@ -916,7 +915,7 @@ mod tests {
 
         bundle.export.nodes.clear();
 
-        let error = SessionArchiveService::restore_into(&bundle, persistence.as_ref())
+        let error = SessionArchiver::restore_into(&bundle, persistence.as_ref())
             .await
             .expect_err("restore should fail verification");
         assert!(
@@ -937,7 +936,7 @@ mod tests {
     #[test]
     fn archive_import_rejects_unsupported_bundle_version() {
         let session = Session::new(SessionConfig::default());
-        let mut bundle = SessionArchiveService::export_bundle(
+        let mut bundle = SessionArchiver::export_bundle(
             &session,
             &crate::session::ExportPolicy::default(),
             &ArchivePolicy::default(),
@@ -946,7 +945,7 @@ mod tests {
         .expect("bundle should be created");
         bundle.bundle_version = CURRENT_ARCHIVE_BUNDLE_VERSION + 1;
 
-        let error = SessionArchiveService::import_bundle(&bundle)
+        let error = SessionArchiver::import_bundle(&bundle)
             .expect_err("unsupported archive version should fail");
         assert!(
             error
@@ -958,7 +957,7 @@ mod tests {
     #[test]
     fn archive_import_rejects_invalid_session_uuid() {
         let session = Session::new(SessionConfig::default());
-        let mut bundle = SessionArchiveService::export_bundle(
+        let mut bundle = SessionArchiver::export_bundle(
             &session,
             &crate::session::ExportPolicy::default(),
             &ArchivePolicy::default(),
@@ -967,7 +966,7 @@ mod tests {
         .expect("bundle should be created");
         bundle.session_id = "not-a-uuid".to_string();
 
-        let error = SessionArchiveService::import_bundle(&bundle)
+        let error = SessionArchiver::import_bundle(&bundle)
             .expect_err("invalid session id should fail");
         assert!(
             error

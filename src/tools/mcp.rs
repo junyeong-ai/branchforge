@@ -7,7 +7,7 @@ use serde_json::Value;
 
 use super::{ExecutionContext, Tool, ToolSurface};
 use crate::mcp::{McpManager, McpToolDefinition, make_mcp_name, parse_mcp_name};
-use crate::types::{ToolDefinition, ToolResult};
+use crate::types::{ToolResult, ToolSpec};
 
 /// Wrapper that adapts an MCP tool to the Tool trait.
 ///
@@ -69,8 +69,8 @@ impl Tool for McpToolWrapper {
         self.definition.input_schema.clone()
     }
 
-    fn definition(&self) -> ToolDefinition {
-        ToolDefinition::new(
+    fn definition(&self) -> ToolSpec {
+        ToolSpec::new(
             &self.qualified_name,
             &self.definition.description,
             self.definition.input_schema.clone(),

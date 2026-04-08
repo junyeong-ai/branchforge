@@ -11,9 +11,9 @@ use async_trait::async_trait;
 
 use super::micro::MicroCompaction;
 use super::strategy::{CompactionContext, CompactionPlan, CompactionStrategy};
+use super::CompactResult;
 use crate::session::SessionResult;
 use crate::session::state::Session;
-use crate::types::CompactResult;
 
 /// Time-based compaction strategy.
 ///

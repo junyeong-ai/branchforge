@@ -34,7 +34,8 @@ impl AgentState {
     }
 }
 
-use crate::types::{AuthorizationDenied, ModelUsage, ServerToolUse, ServerToolUseUsage};
+use crate::authorization::AuthorizationDenied;
+use crate::types::{ModelUsage, ServerToolUse};
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct AgentMetrics {
@@ -217,11 +218,12 @@ impl AgentMetrics {
         self.server_tool_use.web_fetch_requests += server_tool_use.web_fetch_requests;
     }
 
-    /// Update server_tool_use from API response's usage.server_tool_use field.
-    ///
-    /// This parses the server tool usage directly from the API response.
-    pub fn update_server_tool_use_from_api(&mut self, usage: &ServerToolUseUsage) {
-        self.server_tool_use.add_from_usage(usage);
+    /// Update server_tool_use from per-response IR `ServerToolInvocations`.
+    pub fn update_server_tool_use_from_ir(
+        &mut self,
+        invocations: &crate::ir::ServerToolInvocations,
+    ) {
+        self.server_tool_use.add_from_ir(invocations);
     }
 
     /// Record a authorization denial.
@@ -244,8 +246,8 @@ impl AgentMetrics {
                 .map(|(model, usage)| crate::budget::report::ModelCostEntry {
                     model: model.clone(),
                     cost_usd: usage.cost_usd,
-                    input_tokens: usage.input_tokens as u64,
-                    output_tokens: usage.output_tokens as u64,
+                    input_tokens: usage.input_tokens,
+                    output_tokens: usage.output_tokens,
                 })
                 .collect(),
             total_input_tokens: self.input_tokens,

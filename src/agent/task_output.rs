@@ -166,7 +166,7 @@ mod tests {
     use crate::ir::FinishReason;
     use crate::session::MemoryPersistence;
     use crate::tools::Tool;
-    use crate::types::{ToolOutput, Usage};
+    use crate::types::ToolOutput;
     use std::sync::Arc;
 
     // Use valid UUIDs for tests to ensure consistent session IDs

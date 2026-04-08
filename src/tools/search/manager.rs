@@ -8,7 +8,7 @@ use tokio::sync::RwLock;
 use super::engine::{SearchEngine, SearchMode};
 use super::index::{ToolIndex, ToolIndexEntry};
 use crate::mcp::{McpManager, McpToolDefinition, McpToolsetRegistry};
-use crate::types::ToolDefinition;
+use crate::types::ToolSpec;
 
 #[derive(Debug, Clone)]
 pub struct ToolSearchConfig {
@@ -137,12 +137,12 @@ impl ToolSearchManager {
 
             // always_load has highest priority - never defer these tools
             if is_always_load {
-                let tool_def = ToolDefinition {
+                let tool_def = ToolSpec {
                     name: entry.qualified_name.clone(),
                     description: def.description.clone(),
                     input_schema: def.input_schema.clone(),
-                    strict: None,
-                    defer_loading: None,
+                    strict: false,
+                    defer_loading: false,
                 };
                 immediate.push(tool_def);
                 continue;
@@ -155,12 +155,12 @@ impl ToolSearchManager {
             // Defer if: toolset explicitly requests OR threshold exceeded
             let should_defer = toolset_deferred || use_search;
 
-            let tool_def = ToolDefinition {
+            let tool_def = ToolSpec {
                 name: entry.qualified_name.clone(),
                 description: def.description.clone(),
                 input_schema: def.input_schema.clone(),
-                strict: None,
-                defer_loading: if should_defer { Some(true) } else { None },
+                strict: false,
+                defer_loading: should_defer,
             };
 
             if should_defer {
@@ -186,28 +186,28 @@ impl ToolSearchManager {
         hits.into_iter().map(|h| h.entry.qualified_name).collect()
     }
 
-    pub async fn get_definition(&self, qualified_name: &str) -> Option<ToolDefinition> {
+    pub async fn get_definition(&self, qualified_name: &str) -> Option<ToolSpec> {
         let definitions = self.definitions.read().await;
-        definitions.get(qualified_name).map(|def| ToolDefinition {
+        definitions.get(qualified_name).map(|def| ToolSpec {
             name: qualified_name.to_string(),
             description: def.description.clone(),
             input_schema: def.input_schema.clone(),
-            strict: None,
-            defer_loading: None,
+            strict: false,
+            defer_loading: false,
         })
     }
 
-    pub async fn get_definitions(&self, names: &[String]) -> Vec<ToolDefinition> {
+    pub async fn get_definitions(&self, names: &[String]) -> Vec<ToolSpec> {
         let definitions = self.definitions.read().await;
         names
             .iter()
             .filter_map(|name| {
-                definitions.get(name).map(|def| ToolDefinition {
+                definitions.get(name).map(|def| ToolSpec {
                     name: name.clone(),
                     description: def.description.clone(),
                     input_schema: def.input_schema.clone(),
-                    strict: None,
-                    defer_loading: None,
+                    strict: false,
+                    defer_loading: false,
                 })
             })
             .collect()
@@ -224,14 +224,14 @@ impl Default for ToolSearchManager {
 pub struct PreparedTools {
     pub use_search: bool,
     pub search_mode: SearchMode,
-    pub immediate: Vec<ToolDefinition>,
-    pub deferred: Vec<ToolDefinition>,
+    pub immediate: Vec<ToolSpec>,
+    pub deferred: Vec<ToolSpec>,
     pub total_tokens: usize,
     pub threshold_tokens: usize,
 }
 
 impl PreparedTools {
-    pub fn all_tools(&self) -> impl Iterator<Item = &ToolDefinition> {
+    pub fn all_tools(&self) -> impl Iterator<Item = &ToolSpec> {
         self.immediate.iter().chain(self.deferred.iter())
     }
 
@@ -252,7 +252,7 @@ impl PreparedTools {
         let total_tokens = immediate
             .iter()
             .chain(deferred.iter())
-            .map(ToolDefinition::estimated_tokens)
+            .map(ToolSpec::estimated_tokens)
             .sum::<usize>();
         let use_search =
             self.use_search && !deferred.is_empty() && total_tokens > self.threshold_tokens;
@@ -329,7 +329,7 @@ mod tests {
             use_search: true,
             search_mode: SearchMode::Regex,
             immediate: vec![],
-            deferred: vec![ToolDefinition::new(
+            deferred: vec![ToolSpec::new(
                 "mcp__filesystem__read_file",
                 "Read a file",
                 serde_json::json!({"type": "object"}),
@@ -353,12 +353,12 @@ mod tests {
             search_mode: SearchMode::Regex,
             immediate: vec![],
             deferred: vec![
-                ToolDefinition::new(
+                ToolSpec::new(
                     "mcp__context7__search",
                     "Search docs",
                     serde_json::json!({"type": "object"}),
                 ),
-                ToolDefinition::new(
+                ToolSpec::new(
                     "mcp__filesystem__read_file",
                     "Read a file",
                     serde_json::json!({"type": "object"}),

@@ -84,35 +84,63 @@ pub struct Session {
     pub id: SessionId,
     pub parent_id: Option<SessionId>,
     pub session_type: SessionType,
-    pub tenant_id: Option<String>,
-    pub principal_id: Option<String>,
-    pub state: SessionState,
+    /// Tenant identifier — set via [`Self::set_identity`] only.
+    pub(crate) tenant_id: Option<String>,
+    /// Principal (user/service) identifier — set via [`Self::set_identity`] only.
+    pub(crate) principal_id: Option<String>,
+    /// Lifecycle state. Mutated only via [`Self::set_state`] so the
+    /// caller cannot bypass observability hooks. Read access stays public.
+    pub(crate) state: SessionState,
     pub config: SessionConfig,
     pub authorization: SessionAuthorization,
-    pub messages: Vec<SessionMessage>,
-    pub current_leaf_id: Option<MessageId>,
-    pub summary: Option<String>,
-    pub total_usage: crate::ir::Usage,
+    /// Latest cached compaction summary. Refreshed by
+    /// [`Self::refresh_summary_cache`] / [`Self::update_summary`].
+    pub(crate) summary: Option<String>,
+    /// Aggregate token usage. Mutated via [`Self::update_usage`] which
+    /// also keeps `current_input_tokens` in sync.
+    pub(crate) total_usage: crate::ir::Usage,
     #[serde(default)]
-    pub current_input_tokens: u64,
-    pub total_cost_usd: Decimal,
-    pub static_context_hash: Option<String>,
+    pub(crate) current_input_tokens: u64,
+    /// Accumulated cost. Updated by the budget tracker via crate-internal
+    /// session manipulation; external readers should use
+    /// [`Self::total_cost_usd`].
+    pub(crate) total_cost_usd: Decimal,
+    /// Hash of the static context blob used for cache identity. Set by
+    /// the agent builder during session creation.
+    pub(crate) static_context_hash: Option<String>,
+    /// The canonical session graph — the single source of truth for
+    /// messages, branches, checkpoints, bookmarks, and provenance. Marked
+    /// `pub(crate)` because external mutation would silently break the
+    /// SSoT invariant; use [`Self::graph`] for read access and the
+    /// `add_message`/`fork_at`/`bookmark_*`/`checkpoint_*` methods for
+    /// the mutation entry points.
     #[serde(default)]
-    pub graph: SessionGraph,
-    pub created_at: DateTime<Utc>,
-    pub updated_at: DateTime<Utc>,
-    pub expires_at: Option<DateTime<Utc>>,
-    pub error: Option<String>,
+    pub(crate) graph: SessionGraph,
+    pub(crate) created_at: DateTime<Utc>,
+    pub(crate) updated_at: DateTime<Utc>,
+    /// TTL expiry timestamp. Read-only after init.
+    pub(crate) expires_at: Option<DateTime<Utc>>,
+    /// Latest error string when the session is in a Failed-like state.
+    /// Mutated by the task registry / executor; external readers should
+    /// use [`Self::error`].
+    pub(crate) error: Option<String>,
+    /// Todo list, mutated via [`Self::set_todos`].
     #[serde(default)]
-    pub todos: Vec<TodoItem>,
+    pub(crate) todos: Vec<TodoItem>,
+    /// Active plan, mutated via the `enter_plan_mode`/`exit_plan_mode`
+    /// methods.
     #[serde(default)]
-    pub current_plan: Option<Plan>,
+    pub(crate) current_plan: Option<Plan>,
+    /// Compaction history, appended via [`Self::record_compact`].
     #[serde(default)]
-    pub compact_history: VecDeque<CompactRecord>,
+    pub(crate) compact_history: VecDeque<CompactRecord>,
     #[serde(skip)]
     pub(crate) event_bus: Option<Arc<EventBus>>,
+    /// Transient micro-compaction overrides applied at projection time.
+    /// `pub(crate)` because direct mutation would bypass the compaction
+    /// strategy contract; the compact module owns this state.
     #[serde(skip)]
-    pub content_overrides: ContentOverrides,
+    pub(crate) content_overrides: ContentOverrides,
 }
 
 impl Session {
@@ -173,8 +201,6 @@ impl Session {
             state: SessionState::Created,
             authorization: config.authorization.clone(),
             config,
-            messages: Vec::with_capacity(32),
-            current_leaf_id: None,
             summary: None,
             total_usage: crate::ir::Usage::default(),
             current_input_tokens: 0,
@@ -219,8 +245,8 @@ impl Session {
     }
 
     pub fn add_message(&mut self, mut message: SessionMessage) -> SessionResult<()> {
-        if let Some(leaf) = &self.current_leaf_id {
-            message.parent_id = Some(leaf.clone());
+        if let Some(leaf) = self.current_leaf_id() {
+            message.parent_id = Some(leaf);
         }
         if let Some(usage) = &message.usage {
             self.total_usage.add(usage);
@@ -229,8 +255,6 @@ impl Session {
         if message.is_compact_summary {
             self.refresh_summary_cache();
         }
-        // Derive current_leaf_id and messages projection from graph.
-        self.refresh_message_projection();
         self.updated_at = Utc::now();
 
         if let Some(ref bus) = self.event_bus {
@@ -238,7 +262,7 @@ impl Session {
                 crate::events::EventKind::SessionChanged,
                 serde_json::json!({
                     "session_id": self.id.to_string(),
-                    "message_count": self.messages.len(),
+                    "message_count": self.current_branch_messages().len(),
                 }),
             );
         }
@@ -246,8 +270,123 @@ impl Session {
         Ok(())
     }
 
-    pub fn to_graph(&self) -> crate::graph::SessionGraph {
-        self.graph.clone()
+    /// Returns a reference to the underlying [`SessionGraph`].
+    ///
+    /// The graph is the canonical source of truth — every projection
+    /// (`messages`, `current_leaf_id`, summary, etc.) is derived from it.
+    pub fn graph(&self) -> &crate::graph::SessionGraph {
+        &self.graph
+    }
+
+    /// Returns the current lifecycle state.
+    pub fn state(&self) -> SessionState {
+        self.state
+    }
+
+    /// Returns the cached summary, if any.
+    pub fn summary(&self) -> Option<&str> {
+        self.summary.as_deref()
+    }
+
+    /// Returns the aggregate token usage for this session.
+    pub fn total_usage(&self) -> &crate::ir::Usage {
+        &self.total_usage
+    }
+
+    /// Returns the most recently observed input-token count for this
+    /// session — used by the compaction trigger.
+    pub fn current_input_tokens(&self) -> u64 {
+        self.current_input_tokens
+    }
+
+    /// Returns the latest error message, if the session is in an error state.
+    pub fn error(&self) -> Option<&str> {
+        self.error.as_deref()
+    }
+
+    /// Returns the accumulated cost in USD for this session.
+    pub fn total_cost_usd(&self) -> rust_decimal::Decimal {
+        self.total_cost_usd
+    }
+
+    /// Returns the static-context hash if one was registered.
+    pub fn static_context_hash(&self) -> Option<&str> {
+        self.static_context_hash.as_deref()
+    }
+
+    /// Returns the expiry timestamp if the session has a TTL.
+    pub fn expires_at(&self) -> Option<DateTime<Utc>> {
+        self.expires_at
+    }
+
+    /// Returns the todo list for this session.
+    pub fn todos(&self) -> &[TodoItem] {
+        &self.todos
+    }
+
+    /// Returns the active plan, if plan mode is engaged.
+    pub fn current_plan(&self) -> Option<&Plan> {
+        self.current_plan.as_ref()
+    }
+
+    /// Returns the compaction history (most recent at the back).
+    pub fn compact_history(&self) -> &VecDeque<CompactRecord> {
+        &self.compact_history
+    }
+
+    /// Returns the session creation timestamp (read-only after init).
+    pub fn created_at(&self) -> DateTime<Utc> {
+        self.created_at
+    }
+
+    /// Returns the timestamp of the most recent mutation.
+    pub fn updated_at(&self) -> DateTime<Utc> {
+        self.updated_at
+    }
+
+    /// Returns the transient micro-compaction overrides table. These are
+    /// applied at projection time and are not persisted across reload.
+    pub fn content_overrides(&self) -> &ContentOverrides {
+        &self.content_overrides
+    }
+
+    /// Apply a transient content override for a graph node. Used by the
+    /// micro-compaction strategy and by debugging tooling that needs to
+    /// inject a smaller projection without rewriting the graph.
+    pub fn set_content_override(
+        &mut self,
+        node_id: crate::graph::NodeId,
+        content: Vec<ContentPart>,
+    ) {
+        self.content_overrides.set(node_id, content);
+        self.updated_at = Utc::now();
+    }
+
+    /// Drop all transient content overrides — the next call to
+    /// [`Self::to_api_messages`] will return the unredacted projection.
+    pub fn clear_content_overrides(&mut self) {
+        self.content_overrides.clear();
+        self.updated_at = Utc::now();
+    }
+
+    /// Returns the tenant identifier, if one was set via [`Self::set_identity`].
+    pub fn tenant_id(&self) -> Option<&str> {
+        self.tenant_id.as_deref()
+    }
+
+    /// Returns the principal identifier, if one was set via [`Self::set_identity`].
+    pub fn principal_id(&self) -> Option<&str> {
+        self.principal_id.as_deref()
+    }
+
+    /// Returns the current leaf message id for the primary branch.
+    ///
+    /// Computed lazily from `self.graph.branch_head(primary_branch)`. There
+    /// is no cached field — the graph is the only source of truth.
+    pub fn current_leaf_id(&self) -> Option<MessageId> {
+        self.graph
+            .branch_head(self.graph.primary_branch)
+            .map(|node_id| MessageId::from_string(node_id.to_string()))
     }
 
     pub fn current_branch_graph_nodes(&self) -> Vec<&crate::graph::GraphNode> {
@@ -323,7 +462,8 @@ impl Session {
             .map_err(|e| SessionError::Storage {
                 message: format!("failed to create checkpoint on primary branch: {}", e),
             })?;
-        self.current_leaf_id = Some(MessageId::from_string(checkpoint.to_string()));
+        // The graph head now reflects the new checkpoint; current_leaf_id()
+        // is derived from it on demand.
         self.updated_at = Utc::now();
         Ok(checkpoint)
     }
@@ -332,7 +472,7 @@ impl Session {
         &self,
         from_node: Option<crate::graph::NodeId>,
     ) -> SessionResult<crate::graph::ReplayInput> {
-        crate::session::ReplayService::replay_input(&self.graph, from_node)
+        crate::session::Replayer::replay_input(&self.graph, from_node)
     }
 
     fn record_message_in_graph(&mut self, message: &SessionMessage) -> SessionResult<()> {
@@ -521,7 +661,6 @@ impl Session {
             message: format!("failed to append summary to primary branch: {}", e),
         })?;
         self.refresh_summary_cache();
-        self.refresh_message_projection();
         self.updated_at = Utc::now();
         Ok(())
     }
@@ -578,7 +717,6 @@ impl Session {
             return false;
         }
 
-        self.refresh_message_projection();
         self.updated_at = Utc::now();
         true
     }
@@ -596,30 +734,15 @@ impl Session {
     pub async fn compact(
         &mut self,
         llm: &dyn crate::client::LlmCall,
-    ) -> crate::Result<crate::types::CompactResult> {
-        let executor = crate::session::compact::CompactService::new(
+    ) -> crate::Result<crate::session::compact::CompactResult> {
+        let executor = crate::session::compact::Compactor::new(
             crate::session::compact::CompactConfig::default(),
         );
         let result = executor.execute(self, llm).await?;
-        if matches!(result, crate::types::CompactResult::Compacted { .. }) {
+        if matches!(result, crate::session::compact::CompactResult::Compacted { .. }) {
             self.current_input_tokens = 0;
         }
         Ok(result)
-    }
-
-    pub fn clear_messages(&mut self) {
-        self.messages.clear();
-        self.current_leaf_id = None;
-        self.content_overrides.clear();
-        self.updated_at = Utc::now();
-    }
-
-    pub fn refresh_message_projection(&mut self) {
-        self.messages = self.current_branch_messages();
-        self.current_leaf_id = self
-            .graph
-            .branch_head(self.graph.primary_branch)
-            .map(|node_id| MessageId::from_string(node_id.to_string()));
     }
 
     /// Fork this session at a specific graph node (or current head).
@@ -650,8 +773,6 @@ impl Session {
             .map_err(|e| SessionError::Storage {
                 message: format!("Failed to fork graph branch: {e}"),
             })?;
-
-        forked.refresh_message_projection();
 
         Ok(forked)
     }
@@ -776,7 +897,7 @@ mod tests {
 
         assert_eq!(session.state, SessionState::Created);
         assert!(session.current_branch_messages().is_empty());
-        assert!(session.current_leaf_id.is_none());
+        assert!(session.current_leaf_id().is_none());
     }
 
     #[test]
@@ -787,7 +908,7 @@ mod tests {
         session.add_message(msg1).unwrap();
 
         assert_eq!(session.current_branch_messages().len(), 1);
-        assert!(session.current_leaf_id.is_some());
+        assert!(session.current_leaf_id().is_some());
         assert_eq!(session.current_branch_graph_nodes().len(), 1);
     }
 
@@ -825,32 +946,17 @@ mod tests {
     }
 
     #[test]
-    fn test_refresh_message_projection_from_graph() {
+    fn test_messages_lazy_projection_from_graph() {
+        // After SSoT cleanup there is no messages cache to clear or refresh:
+        // every call to current_branch_messages() rebuilds from the graph,
+        // and current_leaf_id() reads the graph head directly.
         let mut session = Session::new(SessionConfig::default());
         session
             .add_message(SessionMessage::user(vec![ContentPart::text("Hello")]))
             .unwrap();
-        session.clear_messages();
-
-        session.refresh_message_projection();
 
         assert_eq!(session.current_branch_messages().len(), 1);
-        assert!(session.current_leaf_id.is_some());
-    }
-
-    #[test]
-    fn test_refresh_message_projection_preserves_updated_at() {
-        let mut session = Session::new(SessionConfig::default());
-        session
-            .add_message(SessionMessage::user(vec![ContentPart::text("Hello")]))
-            .unwrap();
-        let updated_at = session.updated_at;
-        session.clear_messages();
-        session.updated_at = updated_at;
-
-        session.refresh_message_projection();
-
-        assert_eq!(session.updated_at, updated_at);
+        assert!(session.current_leaf_id().is_some());
     }
 
     #[test]

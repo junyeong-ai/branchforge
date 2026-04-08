@@ -1,9 +1,9 @@
 use crate::graph::{NodeId, ReplayInput, SessionGraph};
 use crate::session::{SessionError, SessionResult};
 
-pub struct ReplayService;
+pub struct Replayer;
 
-impl ReplayService {
+impl Replayer {
     pub fn replay_input(
         graph: &SessionGraph,
         from_node: Option<NodeId>,

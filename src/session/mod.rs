@@ -21,13 +21,13 @@ pub mod types;
 
 pub use archive::{
     ArchivePolicy, RestoreVerificationReport, RestoreVerifier, SessionArchiveBundle,
-    SessionArchiveService,
+    SessionArchiver,
 };
 pub use compact::recovery::{
     ContextRecovery, RecoveryAction, RecoveryContext, RecoveryErrorKind, RecoveryStrategy,
 };
 pub use compact::{
-    CompactConfig, CompactService, CompactionChain, CompactionChainBuilder, CompactionContext,
+    CompactConfig, Compactor, CompactionChain, CompactionChainBuilder, CompactionContext,
     CompactionPlan, CompactionStrategy, ContentOverrideEntry, DEFAULT_COMPACT_THRESHOLD,
     FullCompaction, MicroCompaction, TimeBasedCompaction,
 };
@@ -54,7 +54,7 @@ pub use persistence_postgres::{
 #[cfg(feature = "redis-backend")]
 pub use persistence_redis::{RedisConfig, RedisPersistence};
 pub use queue::{InputQueue, MergedInput, QueueError, QueuedInput, SharedInputQueue};
-pub use replay::ReplayService;
+pub use replay::Replayer;
 pub use session_state::{ExecutionGuard, ExecutionState, SessionSnapshot, ToolState};
 pub use state::{
     ContentOverrides, ExecutionMetadata, MessageId, MessageMetadata, Session, SessionAuthorization,

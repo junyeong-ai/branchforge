@@ -251,7 +251,7 @@ Actions:
                     Ok(kind) => kind,
                     Err(error) => return ToolResult::error(error),
                 };
-                let matches = crate::graph::GraphSearchService::search(
+                let matches = crate::graph::GraphSearcher::search(
                     &session.graph,
                     &crate::graph::GraphSearchQuery {
                         text: input.query.clone(),
@@ -270,7 +270,7 @@ Actions:
                 Ok(output)
             }
             GraphHistoryAction::Stats => {
-                to_json(crate::graph::GraphSearchService::stats(&session.graph))
+                to_json(crate::graph::GraphSearcher::stats(&session.graph))
             }
         };
 
@@ -337,7 +337,7 @@ fn replay_from_reference(
 ) -> crate::session::SessionResult<String> {
     let reference =
         reference.map_err(|message| crate::session::SessionError::Storage { message })?;
-    crate::session::ReplayService::replay_input(
+    crate::session::Replayer::replay_input(
         graph,
         Some(crate::graph::GraphReferenceResolver::node_id(&reference)),
     )

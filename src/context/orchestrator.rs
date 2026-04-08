@@ -15,7 +15,7 @@ use crate::common::{IndexRegistry, LoadedEntry};
 use crate::session::compact::DEFAULT_COMPACT_THRESHOLD;
 use crate::skills::SkillIndex;
 use crate::skills::{build_model_invocable_summary, find_explicit_command, find_trigger_matches};
-use crate::types::{TokenUsage, context_window};
+use crate::types::context_window;
 
 use super::rule_index::RuleIndex;
 use super::static_context::StaticContext;
@@ -94,7 +94,7 @@ impl PromptOrchestrator {
         self.current_input_tokens
     }
 
-    pub fn update_usage(&mut self, usage: &TokenUsage) {
+    pub fn update_usage(&mut self, usage: &crate::ir::Usage) {
         self.current_input_tokens = usage.input_tokens;
     }
 
@@ -257,22 +257,18 @@ mod tests {
         let static_context = StaticContext::new();
         let mut orchestrator = PromptOrchestrator::new(static_context, "claude-sonnet-4-5");
 
-        orchestrator.update_usage(&TokenUsage {
+        orchestrator.update_usage(&crate::ir::Usage {
             input_tokens: 100_000,
             output_tokens: 500,
-            cache_read_input_tokens: 0,
-            cache_creation_input_tokens: 0,
             ..Default::default()
         });
 
         assert!(!orchestrator.needs_compact());
         assert_eq!(orchestrator.usage_percent(), 50.0);
 
-        orchestrator.update_usage(&TokenUsage {
+        orchestrator.update_usage(&crate::ir::Usage {
             input_tokens: 170_000,
             output_tokens: 500,
-            cache_read_input_tokens: 0,
-            cache_creation_input_tokens: 0,
             ..Default::default()
         });
 

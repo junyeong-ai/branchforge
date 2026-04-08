@@ -29,10 +29,11 @@ use std::time::Duration;
 
 use rust_decimal::Decimal;
 
+use crate::agent::{CloudProvider, ModelConfig, ProviderConfig};
 use crate::auth::{Credential, OAuthConfig};
 use crate::authorization::{ExecutionMode, ToolPolicy, ToolRule};
 use crate::budget::TenantBudgetManager;
-use crate::client::{CloudProvider, FallbackConfig, ModelConfig, ProviderConfig};
+use crate::client::FallbackConfig;
 use crate::common::IndexRegistry;
 use crate::context::{LeveledMemoryProvider, RuleIndex};
 use crate::hooks::{Hook, HookManager};
@@ -50,48 +51,79 @@ pub const DEFAULT_COMPACT_KEEP_MESSAGES: usize = 4;
 ///
 /// Use [`crate::Agent::builder()`] to create a new builder instance.
 #[derive(Default)]
+/// Builder for [`Agent`] construction.
+///
+/// Fields are organised by domain so the builder API surface stays
+/// navigable. The grouping is documentary — Rust struct fields are flat
+/// — but every builder method (`with_*`, `enable_*`, …) below sets a
+/// field belonging to one of these groups. Reading the groups in order
+/// roughly mirrors the order in which `build()` consumes them.
+///
+/// Groups: agent core configuration, auth & provider selection, resource
+/// catalogues, hooks & policies, MCP configuration, tool search, session
+/// & orchestration, resource-level loading flags, cloud-provider hints,
+/// plugins, and the pre-built provider client.
 pub struct AgentBuilder {
+    // ── Agent core configuration ─────────────────────────────────────
     pub(super) config: AgentConfig,
+
+    // ── Auth & provider selection ────────────────────────────────────
     pub(super) credential: Option<Credential>,
     pub(super) auth_type: Option<crate::auth::Auth>,
     pub(super) oauth_config: Option<OAuthConfig>,
     pub(super) cloud_provider: Option<CloudProvider>,
     pub(super) model_config: Option<ModelConfig>,
     pub(super) provider_config: Option<ProviderConfig>,
+    pub(super) fallback_config: Option<FallbackConfig>,
+    /// Pre-built [`ProviderClient`] from the codec/transport stack.
+    /// When set, the agent runtime dispatches LLM calls through this
+    /// directly instead of resolving a preset from environment variables.
+    pub(super) provider_client: Option<crate::client::provider_client::ProviderClient>,
+
+    // ── Resource catalogues (skills, subagents, rules, memory) ───────
     pub(super) skill_registry: Option<IndexRegistry<SkillIndex>>,
     pub(super) subagent_registry: Option<IndexRegistry<SubagentIndex>>,
     pub(super) rule_indices: Vec<RuleIndex>,
+    pub(super) memory_provider: Option<LeveledMemoryProvider>,
+    pub(super) output_style_name: Option<String>,
+
+    // ── Hooks, policies, and execution control ───────────────────────
     pub(super) hooks: HookManager,
     pub(super) execution_mode: ExecutionMode,
     pub(super) custom_tools: Vec<Arc<dyn Tool>>,
-    pub(super) memory_provider: Option<LeveledMemoryProvider>,
     pub(super) sandbox_settings: Option<crate::config::SandboxConfig>,
-    pub(super) initial_messages: Option<Vec<crate::ir::Message>>,
-    pub(super) resume_session_id: Option<String>,
-    pub(super) resumed_session: Option<crate::session::Session>,
+    pub(super) authorization_policy_explicit: bool,
     pub(super) tenant_budget_manager: Option<TenantBudgetManager>,
-    pub(super) fallback_config: Option<FallbackConfig>,
-    pub(super) output_style_name: Option<String>,
+
+    // ── MCP configuration ────────────────────────────────────────────
     pub(super) mcp_configs: std::collections::HashMap<String, crate::mcp::McpServerConfig>,
     pub(super) mcp_manager: Option<std::sync::Arc<crate::mcp::McpManager>>,
     pub(super) mcp_toolset_registry: Option<crate::mcp::McpToolsetRegistry>,
+
+    // ── Tool search ──────────────────────────────────────────────────
     pub(super) tool_search_config: Option<crate::tools::ToolSearchConfig>,
     pub(super) tool_search_manager: Option<std::sync::Arc<crate::tools::ToolSearchManager>>,
+
+    // ── Session & orchestration ──────────────────────────────────────
     pub(super) session_manager: Option<crate::session::SessionManager>,
     pub(super) context_scope: Option<crate::context_scope::SharedContextScope>,
     pub(super) compaction_chain: Option<std::sync::Arc<crate::session::compact::CompactionChain>>,
     pub(super) coordination: Option<std::sync::Arc<dyn crate::orchestration::Coordination>>,
     pub(super) recovery_strategy:
         Option<std::sync::Arc<dyn crate::session::compact::recovery::RecoveryStrategy>>,
-    pub(super) authorization_policy_explicit: bool,
+    pub(super) initial_messages: Option<Vec<crate::ir::Message>>,
+    pub(super) resume_session_id: Option<String>,
+    pub(super) resumed_session: Option<crate::session::Session>,
 
-    // Resource level flags - loaded in fixed order during build()
-    // Order: Enterprise → User → Project → Local (later overrides earlier)
+    // ── Resource-level loading flags ─────────────────────────────────
+    // Order of precedence inside `build()`:
+    //   Enterprise → User → Project → Local (later overrides earlier).
     pub(super) load_enterprise: bool,
     pub(super) load_user: bool,
     pub(super) load_project: bool,
     pub(super) load_local: bool,
 
+    // ── Cloud provider hints (feature-gated) ─────────────────────────
     #[cfg(feature = "aws")]
     pub(super) aws_region: Option<String>,
     #[cfg(feature = "gcp")]
@@ -101,12 +133,9 @@ pub struct AgentBuilder {
     #[cfg(feature = "azure")]
     pub(super) azure_resource: Option<String>,
 
+    // ── Plugins (feature-gated) ──────────────────────────────────────
     #[cfg(feature = "plugins")]
     pub(super) plugin_dirs: Vec<PathBuf>,
-
-    /// Pre-built ProviderClient from the new codec/transport stack. When
-    /// set, the Client dispatches through it instead of the old adapter.
-    pub(super) provider_client: Option<crate::client::provider_client::ProviderClient>,
 }
 
 impl AgentBuilder {
@@ -673,11 +702,11 @@ impl AgentBuilder {
         let session = manager.get(&id).await?;
 
         let messages: Vec<crate::ir::Message> = session
-            .messages
-            .iter()
+            .current_branch_messages()
+            .into_iter()
             .map(|m| crate::ir::Message {
                 role: m.role,
-                content: m.content.clone(),
+                content: m.content,
             })
             .collect();
 
@@ -1003,7 +1032,7 @@ impl AgentBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::client::DEFAULT_MAX_TOKENS;
+    use crate::agent::DEFAULT_MAX_TOKENS;
     use crate::ir::ContentPart;
     use crate::session::{SessionConfig, SessionManager, SessionMessage};
 

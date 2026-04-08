@@ -11,7 +11,6 @@ pub mod routing;
 pub mod rule_index;
 pub mod static_context;
 
-pub use crate::types::TokenUsage;
 pub use builder::ContextBuilder;
 pub use import_extractor::ImportExtractor;
 pub use level::{LeveledMemoryProvider, enterprise_base_path, user_base_path};

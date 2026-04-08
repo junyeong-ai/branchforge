@@ -21,7 +21,8 @@ use crate::hooks::{HookContext, HookEvent, HookInput};
 use crate::ir::FinishReason;
 use crate::ir::Message;
 use crate::session::{MessageMetadata, ToolExecution};
-use crate::types::{AuthorizationDenied, context_window};
+use crate::authorization::AuthorizationDenied;
+use crate::types::context_window;
 
 impl Agent {
     fn check_budget(&self) -> crate::Result<()> {
@@ -206,7 +207,7 @@ impl Agent {
         }
 
         let mut request_builder = {
-            let static_context = match &self.runtime.orchestrator {
+            let static_context = match &self.runtime.orchestration.orchestrator {
                 Some(orchestrator) => orchestrator.read().await.static_context().clone(),
                 None => crate::context::StaticContext::new(),
             };
@@ -397,7 +398,7 @@ impl Agent {
                 self.runtime.tenant_budget.as_deref(),
                 &self.runtime.config.model.primary,
                 &response.usage,
-            );
+            )?;
 
             emit_tokens_consumed(
                 self.runtime.event_bus.as_deref(),
@@ -470,7 +471,10 @@ impl Agent {
                         .stop_reason
                         .clone()
                         .unwrap_or_else(|| "Blocked by hook".into());
-                    blocked.push(crate::ir::ContentPart::tool_error(tool_id, reason.clone()));
+                    blocked.push(
+                        crate::ir::ContentPart::tool_error(tool_id, reason.clone())
+                            .with_tool_name(tool_name),
+                    );
                     metrics.record_authorization_denial(
                         AuthorizationDenied::new(tool_name, tool_id, tool_input.clone())
                             .reason(reason),
@@ -492,16 +496,22 @@ impl Agent {
             }
 
             let context_scope = self.runtime.context_scope.clone();
+            // Create a child cancellation token that fires when the runtime
+            // shuts down. Each tool future races against it via
+            // `execute_with_cancel`, so graceful shutdown aborts in-flight
+            // tools instead of waiting for their natural completion.
+            let shutdown = self.runtime.shutdown.clone();
             let tool_futures = prepared.into_iter().map(|(id, name, input)| {
                 let tools = &self.runtime.tools;
                 let context_scope = context_scope.clone();
+                let cancel = shutdown.child_token();
                 async move {
                     let start = Instant::now();
                     let result = if let Some(ref scope) = context_scope {
-                        let fut = tools.execute(&name, input.clone());
+                        let fut = tools.execute_with_cancel(&name, input.clone(), cancel);
                         scope.wrap_tool_future(Box::pin(fut)).await
                     } else {
-                        tools.execute(&name, input.clone()).await
+                        tools.execute_with_cancel(&name, input.clone(), cancel).await
                     };
                     let duration_ms = start.elapsed().as_millis() as u64;
                     (id, name, input, result, duration_ms)
@@ -529,12 +539,12 @@ impl Agent {
                     &result,
                     &name,
                 )
-                .await;
+                .await?;
 
                 try_activate_dynamic_rules(
                     &name,
                     &input,
-                    &self.runtime.orchestrator,
+                    &self.runtime.orchestration.orchestrator,
                     &mut dynamic_rules_context,
                 )
                 .await;
@@ -565,7 +575,10 @@ impl Agent {
                     )
                     .await?;
 
-                results.push(crate::ir::ContentPart::from_tool_result(&id, &result));
+                results.push(
+                    crate::ir::ContentPart::from_tool_result(&id, &result)
+                        .with_tool_name(&name),
+                );
             }
 
             self.state

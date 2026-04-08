@@ -88,15 +88,13 @@ impl RequestBuilder {
         let prepared_tools = self.prepare_request_tools();
         let system_prompt = self.build_system_prompt_blocks(dynamic_rules, &prepared_tools);
 
+        // ToolSpec → ir::ToolDefinition lowering. The `From` impl on
+        // ToolSpec keeps the wire layout in one place; this loop is just
+        // the iteration boilerplate.
         let ir_tools: Vec<ir::ToolDefinition> = prepared_tools
             .tool_definitions
             .iter()
-            .map(|t| ir::ToolDefinition {
-                name: t.name.clone(),
-                description: Some(t.description.clone()),
-                parameters: t.input_schema.clone(),
-                strict: t.strict.unwrap_or(false),
-            })
+            .map(ir::ToolDefinition::from)
             .collect();
 
         let mut metadata = BTreeMap::new();
@@ -154,6 +152,7 @@ impl RequestBuilder {
             system: Some(system_prompt),
             tools: ir_tools,
             tool_choice: None,
+            response_format: None,
             settings: ModelSettings {
                 max_output_tokens: Some(self.max_tokens),
                 ..Default::default()
@@ -341,8 +340,8 @@ impl RequestBuilder {
 
 #[derive(Default)]
 struct PreparedRequestTools {
-    tool_definitions: Vec<crate::types::ToolDefinition>,
-    static_tool_definitions: Vec<crate::types::ToolDefinition>,
+    tool_definitions: Vec<crate::types::ToolSpec>,
+    static_tool_definitions: Vec<crate::types::ToolSpec>,
     mcp_tool_metadata: Vec<McpToolMeta>,
     server_tool_summaries: Vec<String>,
 }

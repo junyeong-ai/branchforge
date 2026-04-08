@@ -6,15 +6,15 @@
 
 use async_trait::async_trait;
 
-use super::service::{CompactConfig, CompactService};
+use super::service::{CompactConfig, Compactor};
 use super::strategy::{CompactionContext, CompactionPlan, CompactionStrategy};
+use super::CompactResult;
 use crate::session::SessionResult;
 use crate::session::state::Session;
-use crate::types::CompactResult;
 
 /// LLM-based full summarization strategy.
 ///
-/// Delegates to [`CompactService`] for the actual summarization prompt
+/// Delegates to [`Compactor`] for the actual summarization prompt
 /// and graph operations. This wrapper implements [`CompactionStrategy`]
 /// so it can participate in a [`CompactionChain`](super::chain::CompactionChain).
 pub struct FullCompaction {
@@ -60,7 +60,7 @@ impl CompactionStrategy for FullCompaction {
     }
 
     fn plan(&self, session: &Session) -> SessionResult<CompactionPlan> {
-        let service = CompactService::new(self.config.clone());
+        let service = Compactor::new(self.config.clone());
         let prepared = service.prepare_compact(session)?;
         match prepared {
             super::service::PreparedCompact::NotNeeded => Ok(CompactionPlan::NotNeeded),
@@ -96,7 +96,7 @@ impl CompactionStrategy for FullCompaction {
         let ir_response = llm.send(&ir_request).await?;
         let summary = ir_response.text();
 
-        let service = CompactService::new(self.config.clone());
+        let service = Compactor::new(self.config.clone());
         let result = service.apply_compact(session, summary)?;
         service.record_compact(session, &result);
 

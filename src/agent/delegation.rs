@@ -1,10 +1,11 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-use crate::agent::{AgentBuilder, AgentConfig, AgentResult};
+use crate::agent::{
+    AgentBuilder, AgentConfig, AgentResult, ModelConfig, ModelType, ProviderConfig,
+};
 use crate::auth::Auth;
 use crate::authorization::{ExecutionMode, ToolPolicy, ToolRule};
-use crate::client::{ModelConfig, ModelType, ProviderConfig};
 use crate::common::{IndexRegistry, matches_tool_pattern};
 use crate::config::SandboxConfig;
 use crate::context::MemoryContent;

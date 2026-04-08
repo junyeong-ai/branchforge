@@ -1135,7 +1135,6 @@ impl JsonlPersistence {
         session.graph.id = graph_id;
         session.graph.created_at = created_at;
         session.refresh_summary_cache();
-        session.refresh_message_projection();
         session.updated_at = event.metadata.occurred_at;
 
         self.save_inner(&session).await
@@ -1352,7 +1351,7 @@ impl JsonlPersistence {
                 persisted_ids: persisted,
                 todos_hash: current_todos_hash,
                 plan_hash: current_plan_hash,
-                current_leaf_id: session.current_leaf_id.clone(),
+                current_leaf_id: session.current_leaf_id(),
                 primary_branch_id: Some(session.graph.primary_branch),
             },
         );
@@ -1497,7 +1496,6 @@ impl JsonlPersistence {
         session.graph.created_at = session.created_at;
         validate_graph(&session_id, &session.graph)?;
         session.summary = session.graph.latest_summary();
-        session.refresh_message_projection();
 
         Ok(session)
     }
@@ -2512,8 +2510,7 @@ mod tests {
         let expected_path = persistence.session_file_path(&session.id, Some(project_dir.path()));
         assert!(expected_path.exists());
 
-        let mut loaded = persistence.load(&session.id).await.unwrap().unwrap();
-        loaded.clear_messages();
+        let loaded = persistence.load(&session.id).await.unwrap().unwrap();
         persistence.save(&loaded).await.unwrap();
 
         assert!(expected_path.exists());
@@ -2601,7 +2598,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_graph_first_roundtrip_uses_projection_helper() {
+    async fn test_graph_first_roundtrip_replays_from_graph() {
+        // After SSoT cleanup, current_branch_messages() always rebuilds from
+        // the graph, so a save/load round-trip must produce identical content.
         let (persistence, _temp) = create_test_persistence().await;
 
         let mut session = Session::new(SessionConfig::default());
@@ -2611,7 +2610,6 @@ mod tests {
         session
             .add_message(SessionMessage::assistant(vec![ContentPart::text("world")]))
             .unwrap();
-        session.clear_messages();
 
         persistence.save(&session).await.unwrap();
 

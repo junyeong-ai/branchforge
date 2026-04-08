@@ -1,108 +1,30 @@
 //! Task registry for managing background agent tasks with Session-based persistence.
+//!
+//! Data types ([`TaskAssistantMetadata`], [`TaskExecutionSummary`],
+//! [`TaskResultSnapshot`], `PendingTaskTransition`, `TaskRuntime`) live in
+//! the sibling [`task_registry_types`] module. This file is the registry's
+//! behaviour: spawning background tasks, reconciling persisted state,
+//! handling cancellation, and producing terminal snapshots.
 
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
-use rust_decimal::Decimal;
 use tokio::sync::{OnceCell, RwLock, oneshot};
 use tokio::task::JoinHandle;
 use tracing::warn;
 
-use crate::ir::FinishReason;
-use crate::ir::{ContentPart, Message, Role};
+use crate::ir::{Message, Role};
 use crate::session::{
     ExecutionMetadata, MessageMetadata, Persistence, Session, SessionConfig, SessionError,
-    SessionId, SessionManager, SessionResult, SessionState, SessionType, ThinkingMetadata,
-    ToolResultMeta,
+    SessionId, SessionManager, SessionResult, SessionState, SessionType,
 };
 
 use super::AgentResult;
-
-#[derive(Clone)]
-enum PendingTaskTransition {
-    Completed(Box<AgentResult>),
-    Failed(String),
-    Cancelled,
-}
-
-impl PendingTaskTransition {
-    fn intent_state(&self) -> SessionState {
-        match self {
-            Self::Completed(_) => SessionState::Completing,
-            Self::Failed(_) => SessionState::Failing,
-            Self::Cancelled => SessionState::Cancelling,
-        }
-    }
-
-    fn terminal_state(&self) -> SessionState {
-        match self {
-            Self::Completed(_) => SessionState::Completed,
-            Self::Failed(_) => SessionState::Failed,
-            Self::Cancelled => SessionState::Cancelled,
-        }
-    }
-}
-
-struct TaskRuntime {
-    handle: Option<JoinHandle<()>>,
-    cancel_tx: Option<oneshot::Sender<()>>,
-    pending_transition: Option<PendingTaskTransition>,
-    background_slot: bool,
-}
-
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct TaskAssistantMetadata {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub model: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub request_id: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub tool_results: Option<Vec<ToolResultMeta>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub thinking: Option<ThinkingMetadata>,
-}
-
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct TaskExecutionSummary {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub result_uuid: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub stop_reason: Option<FinishReason>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub iterations: Option<usize>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub tool_calls: Option<usize>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub usage: Option<crate::ir::Usage>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub execution_time_ms: Option<u64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub api_calls: Option<usize>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub compactions: Option<usize>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub errors: Option<usize>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub total_cost_usd: Option<Decimal>,
-}
-
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct TaskResultSnapshot {
-    pub status: SessionState,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub text: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub content: Option<Vec<ContentPart>>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub structured_output: Option<serde_json::Value>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub response_metadata: Option<TaskAssistantMetadata>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub execution: Option<TaskExecutionSummary>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub error: Option<String>,
-}
+use super::task_registry_types::{PendingTaskTransition, TaskRuntime};
+pub use super::task_registry_types::{
+    TaskAssistantMetadata, TaskExecutionSummary, TaskResultSnapshot,
+};
 
 #[derive(Clone)]
 pub struct TaskRegistry {
@@ -943,8 +865,7 @@ impl TaskRegistry {
 mod tests {
     use super::*;
     use crate::agent::AgentState;
-    use crate::ir::FinishReason;
-    use crate::ir::Role;
+    use crate::ir::{ContentPart, FinishReason, Role};
     use crate::session::{MemoryPersistence, QueueItem, SessionMessage};
     use std::sync::atomic::{AtomicBool, Ordering};
     use uuid::Uuid;

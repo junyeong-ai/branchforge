@@ -15,7 +15,7 @@ use super::strategy::{
 use crate::ir::{ContentPart, ToolResultContent};
 use crate::session::SessionResult;
 use crate::session::state::Session;
-use crate::types::CompactResult;
+use super::CompactResult;
 
 /// Default threshold (fraction of max tokens) to trigger micro-compaction.
 const DEFAULT_MICRO_THRESHOLD: f64 = 0.6;
@@ -231,10 +231,12 @@ fn truncate_block(part: &ContentPart, max_chars: usize) -> ContentPart {
         )),
         ContentPart::ToolResult {
             tool_call_id,
+            tool_name,
             content,
             is_error,
         } => ContentPart::ToolResult {
             tool_call_id: tool_call_id.clone(),
+            tool_name: tool_name.clone(),
             content: truncate_tool_result_content(content, max_chars),
             is_error: *is_error,
         },

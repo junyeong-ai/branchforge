@@ -12,11 +12,11 @@ use std::time::Duration;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 
+use super::CompactResult;
 use crate::graph::NodeId;
 use crate::ir::ContentPart;
 use crate::session::SessionResult;
 use crate::session::state::Session;
-use crate::types::CompactResult;
 
 /// Context available when deciding whether compaction is needed.
 #[derive(Debug, Clone)]

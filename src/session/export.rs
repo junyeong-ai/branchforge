@@ -153,7 +153,7 @@ impl SessionExporter {
     pub fn audit_bundle(session: &Session, policy: &ExportPolicy) -> SessionResult<AuditBundle> {
         let export =
             Self::export_branch_with_policy(&session.graph, session.graph.primary_branch, policy)?;
-        let stats = crate::graph::GraphSearchService::stats(&session.graph);
+        let stats = crate::graph::GraphSearcher::stats(&session.graph);
         Ok(AuditBundle {
             session_id: session.id.to_string(),
             tenant_id: policy

@@ -19,30 +19,68 @@ use crate::tools::{ToolRegistry, ToolSearchManager};
 
 use super::config::AgentConfig;
 
+/// Multi-agent coordination bundle.
+///
+/// Groups the three fields that are only meaningful when the agent
+/// participates in a multi-agent workflow: prompt orchestration, the
+/// pluggable [`Coordination`] strategy, and the agent directory used for
+/// inter-agent dispatch. Always present on [`AgentRuntime`] so access
+/// remains a single field hop (`runtime.orchestration.orchestrator`),
+/// but every member is `Option` so single-agent execution does not pay
+/// the cost of constructing them.
+#[derive(Default)]
+pub struct OrchestrationBundle {
+    pub(crate) orchestrator: Option<Arc<RwLock<PromptOrchestrator>>>,
+    pub(crate) coordination: Option<Arc<dyn Coordination>>,
+    pub(crate) agent_directory: Option<Arc<AgentDirectory>>,
+}
+
 /// Shared, immutable infrastructure for agent execution.
 ///
 /// `AgentRuntime` holds everything that can be shared across multiple
 /// [`Agent`](super::Agent) instances (sessions). Create one runtime
 /// and spawn multiple agents from it for server environments.
+///
+/// # Field groups
+///
+/// - **Core call surface** — `llm`, `config`, `tools`, `hooks`. Always
+///   present; every iteration of the execution loop touches these.
+/// - **Operations** — `event_bus`, `execution_mode`, `context_scope`,
+///   `shutdown`. Cross-cutting observability and control.
+/// - **Resource accounting** — `budget_tracker`, `tenant_budget`,
+///   `mcp_manager`, `tool_search_manager`. External services and budgets
+///   that influence what tools and how many tokens the agent may consume.
+/// - **Session lifecycle** — `compaction_chain`, `recovery_strategy`. Hooks
+///   that fire on session compaction and recovery, both optional.
+/// - **Multi-agent coordination** — bundled into [`OrchestrationBundle`]
+///   to make the responsibility boundary explicit and to keep the
+///   top-level field count manageable.
 pub struct AgentRuntime {
+    // ── Core call surface ────────────────────────────────────────────
     /// IR-native LLM call surface. All model invocations go through this.
     pub(crate) llm: Arc<dyn LlmCall>,
     pub(crate) config: Arc<AgentConfig>,
     pub(crate) tools: Arc<ToolRegistry>,
     pub(crate) hooks: Arc<HookManager>,
+
+    // ── Operations ───────────────────────────────────────────────────
+    pub(crate) event_bus: Option<Arc<EventBus>>,
+    pub(crate) execution_mode: ExecutionMode,
+    pub(crate) context_scope: Option<SharedContextScope>,
+    pub(crate) shutdown: CancellationToken,
+
+    // ── Resource accounting ──────────────────────────────────────────
     pub(crate) budget_tracker: Arc<BudgetTracker>,
     pub(crate) tenant_budget: Option<Arc<TenantBudget>>,
     pub(crate) mcp_manager: Option<Arc<crate::mcp::McpManager>>,
     pub(crate) tool_search_manager: Option<Arc<ToolSearchManager>>,
-    pub(crate) event_bus: Option<Arc<EventBus>>,
-    pub(crate) execution_mode: ExecutionMode,
-    pub(crate) context_scope: Option<SharedContextScope>,
-    pub(crate) orchestrator: Option<Arc<RwLock<PromptOrchestrator>>>,
+
+    // ── Session lifecycle ────────────────────────────────────────────
     pub(crate) compaction_chain: Option<Arc<CompactionChain>>,
-    pub(crate) coordination: Option<Arc<dyn Coordination>>,
-    pub(crate) agent_directory: Option<Arc<AgentDirectory>>,
     pub(crate) recovery_strategy: Option<Arc<dyn RecoveryStrategy>>,
-    pub(crate) shutdown: CancellationToken,
+
+    // ── Multi-agent coordination ─────────────────────────────────────
+    pub(crate) orchestration: OrchestrationBundle,
 }
 
 impl AgentRuntime {
@@ -73,7 +111,7 @@ impl AgentRuntime {
     /// Returns a reference to the prompt orchestrator, if configured.
     #[must_use]
     pub fn orchestrator(&self) -> Option<&Arc<RwLock<PromptOrchestrator>>> {
-        self.orchestrator.as_ref()
+        self.orchestration.orchestrator.as_ref()
     }
 
     /// Returns the event bus, if one was configured.
@@ -91,7 +129,7 @@ impl AgentRuntime {
     /// Invalidate cached context after compaction so subsequent iterations
     /// rebuild prompts from the compacted session state.
     pub(crate) async fn invalidate_caches_after_compact(&self) {
-        if let Some(ref orchestrator) = self.orchestrator {
+        if let Some(ref orchestrator) = self.orchestration.orchestrator {
             let mut orch = orchestrator.write().await;
             orch.invalidate_static_cache();
         }

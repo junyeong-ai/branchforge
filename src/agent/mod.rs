@@ -6,16 +6,19 @@ mod delegation;
 mod events;
 mod execution;
 mod executor;
+pub mod model_config;
 mod options;
 mod request;
 pub mod run_config;
 pub mod runtime;
+pub mod server_tools;
 mod state;
 mod state_formatter;
 mod streaming;
 mod task;
 mod task_output;
 mod task_registry;
+mod task_registry_types;
 pub mod types;
 
 #[cfg(test)]
@@ -28,13 +31,20 @@ pub use config::{
 pub(crate) use delegation::{DelegationRuntime, DelegationRuntimeConfig};
 pub use events::{AgentEvent, AgentResult};
 pub use executor::Agent;
+pub use model_config::{
+    BetaConfig, BetaFeature, CloudProvider, DEFAULT_FAST_MODEL, DEFAULT_MODEL,
+    DEFAULT_REASONING_MODEL, ModelConfig, ModelType, ProviderConfig,
+};
 pub use options::{AgentBuilder, DEFAULT_COMPACT_KEEP_MESSAGES};
 pub use run_config::RunConfig;
 pub use runtime::AgentRuntime;
+pub use server_tools::{
+    CitationsConfig, ServerTool, ToolSearchTool, UserLocation, WebFetchTool, WebSearchTool,
+};
 pub use state::{AgentMetrics, AgentState, ToolCallRecord, ToolStats};
 pub use task::{TaskInput, TaskOutput, TaskTool};
 pub use task_output::{TaskOutputInput, TaskOutputResult, TaskOutputTool, TaskStatus};
 pub use task_registry::{
     TaskAssistantMetadata, TaskExecutionSummary, TaskRegistry, TaskResultSnapshot,
 };
-pub use types::{DEFAULT_MAX_TOKENS, RequestMetadata};
+pub use types::{DEFAULT_MAX_TOKENS, MIN_THINKING_BUDGET, RequestMetadata};

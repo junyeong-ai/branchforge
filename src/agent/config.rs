@@ -29,8 +29,8 @@ pub struct AgentModelConfig {
 impl Default for AgentModelConfig {
     fn default() -> Self {
         Self {
-            primary: crate::client::DEFAULT_MODEL.to_string(),
-            small: crate::client::DEFAULT_FAST_MODEL.to_string(),
+            primary: crate::agent::DEFAULT_MODEL.to_string(),
+            small: crate::agent::DEFAULT_FAST_MODEL.to_string(),
             max_tokens: DEFAULT_MAX_TOKENS,
             extended_context: false,
         }
@@ -474,24 +474,24 @@ impl CacheConfig {
 /// These are automatically enabled when "WebSearch" or "WebFetch" are in ToolSurface.
 #[derive(Debug, Clone, Default)]
 pub struct ServerToolsConfig {
-    pub web_search: Option<crate::types::WebSearchTool>,
-    pub web_fetch: Option<crate::types::WebFetchTool>,
+    pub web_search: Option<crate::agent::WebSearchTool>,
+    pub web_fetch: Option<crate::agent::WebFetchTool>,
 }
 
 impl ServerToolsConfig {
     pub fn all() -> Self {
         Self {
-            web_search: Some(crate::types::WebSearchTool::default()),
-            web_fetch: Some(crate::types::WebFetchTool::default()),
+            web_search: Some(crate::agent::WebSearchTool::default()),
+            web_fetch: Some(crate::agent::WebFetchTool::default()),
         }
     }
 
-    pub fn web_search(mut self, config: crate::types::WebSearchTool) -> Self {
+    pub fn web_search(mut self, config: crate::agent::WebSearchTool) -> Self {
         self.web_search = Some(config);
         self
     }
 
-    pub fn web_fetch(mut self, config: crate::types::WebFetchTool) -> Self {
+    pub fn web_fetch(mut self, config: crate::agent::WebFetchTool) -> Self {
         self.web_fetch = Some(config);
         self
     }

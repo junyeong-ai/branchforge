@@ -1,9 +1,11 @@
 //! Authorization system for controlling tool execution.
 
+mod denied;
 pub mod extractors;
 mod modes;
 mod rules;
 
+pub use denied::AuthorizationDenied;
 pub use extractors::{FieldExtractor, InputExtractor};
 pub use modes::ExecutionMode;
 pub use rules::{

@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use crate::client::CloudProvider;
+use crate::agent::CloudProvider;
 use crate::common::Index;
 use crate::common::IndexRegistry;
 use crate::context::{MemoryProvider, PromptOrchestrator, RuleIndex, StaticContext};
@@ -106,8 +106,8 @@ impl AgentBuilder {
 
         if let Some(coordination) = self.coordination {
             let directory = std::sync::Arc::new(crate::orchestration::AgentDirectory::new());
-            agent.runtime_mut().agent_directory = Some(directory);
-            agent.runtime_mut().coordination = Some(coordination);
+            agent.runtime_mut().orchestration.agent_directory = Some(directory);
+            agent.runtime_mut().orchestration.coordination = Some(coordination);
         }
 
         if let Some(strategy) = self.recovery_strategy {

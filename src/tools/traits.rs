@@ -7,7 +7,7 @@ use schemars::JsonSchema;
 use serde::de::DeserializeOwned;
 
 use super::context::ExecutionContext;
-use crate::types::{ToolDefinition, ToolResult};
+use crate::types::{ToolSpec, ToolResult};
 
 /// Core tool trait for all tool implementations.
 #[async_trait]
@@ -27,8 +27,8 @@ pub trait Tool: Send + Sync {
         false
     }
 
-    fn definition(&self) -> ToolDefinition {
-        ToolDefinition::new(self.name(), self.description(), self.input_schema())
+    fn definition(&self) -> ToolSpec {
+        ToolSpec::new(self.name(), self.description(), self.input_schema())
     }
 }
 
@@ -100,11 +100,11 @@ impl<T: SchemaTool + 'static> Tool for T {
         T::READ_ONLY
     }
 
-    fn definition(&self) -> ToolDefinition {
+    fn definition(&self) -> ToolSpec {
         let desc = self
             .custom_description()
             .unwrap_or_else(|| T::DESCRIPTION.to_string());
-        let mut definition = ToolDefinition::new(T::NAME, &desc, T::input_schema());
+        let mut definition = ToolSpec::new(T::NAME, &desc, T::input_schema());
         if T::STRICT {
             definition = definition.strict(true);
         }

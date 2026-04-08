@@ -82,10 +82,12 @@ impl Agent {
             config,
             tools,
             hooks,
-            orchestrator,
+            orchestration: super::runtime::OrchestrationBundle {
+                orchestrator,
+                coordination: None,
+                agent_directory: None,
+            },
             compaction_chain: None,
-            coordination: None,
-            agent_directory: None,
             recovery_strategy: None,
             budget_tracker: Arc::new(budget_tracker),
             tenant_budget: None,
@@ -191,8 +193,13 @@ impl Agent {
         super::AgentBuilder::new()
     }
 
-    /// Shortcut for `Agent::builder().model(model)`.
-    pub fn model(model: impl Into<String>) -> super::AgentBuilder {
+    /// Shortcut for `Agent::builder().model(model)` — returns a fresh
+    /// [`AgentBuilder`](super::AgentBuilder) with the model id pre-set.
+    ///
+    /// Renamed from the earlier `Agent::model(...)` because that name
+    /// read as a getter on `Agent`. The current `with_model` form lines
+    /// up with the rest of the builder API (`with_*`).
+    pub fn with_model(model: impl Into<String>) -> super::AgentBuilder {
         super::AgentBuilder::new().model(model)
     }
 
@@ -234,7 +241,7 @@ impl Agent {
     }
 
     pub fn orchestrator(&self) -> Option<&Arc<RwLock<PromptOrchestrator>>> {
-        self.runtime.orchestrator.as_ref()
+        self.runtime.orchestration.orchestrator.as_ref()
     }
 
     #[must_use]
