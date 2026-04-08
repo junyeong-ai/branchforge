@@ -293,11 +293,7 @@ impl Agent {
 
             let messages = self
                 .state
-                .with_session(|session| {
-                    session.to_api_messages_with_cache(
-                        self.runtime.config.cache.conversation_ttl_option(),
-                    )
-                })
+                .with_session(|session| session.to_api_messages())
                 .await;
 
             // Fire ModelSelection hook - allows overriding the model

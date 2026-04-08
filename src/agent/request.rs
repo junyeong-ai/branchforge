@@ -11,7 +11,6 @@ use crate::ir::{self, Message, ModelRequest, ModelSettings, SystemPrompt};
 use crate::output_style::{OutputStyle, SystemPromptGenerator};
 use crate::tools::ToolRegistry;
 use crate::tools::search::PreparedTools;
-use crate::types::CacheTtl;
 
 pub struct RequestBuilder {
     model: String,
@@ -115,13 +114,9 @@ impl RequestBuilder {
 
         // Build cache control from config
         let cache_control = if self.cache_config.strategy.cache_static() {
-            let ttl_str = match self.cache_config.static_ttl {
-                CacheTtl::FiveMinutes => "5m",
-                CacheTtl::OneHour => "1h",
-            };
             Some(ir::CacheControl {
                 mode: ir::CacheControlMode::SystemAndConversation,
-                ttl: Some(ttl_str.to_string()),
+                ttl: Some(self.cache_config.static_ttl.clone()),
             })
         } else {
             None
@@ -183,12 +178,10 @@ impl RequestBuilder {
             static_context = static_context.mcp_tools(prepared_tools.mcp_tool_metadata.clone());
         }
 
-        // StaticContext returns types::SystemBlock; convert to ir::SystemBlock
-        let legacy_blocks = static_context.to_system_blocks(
+        blocks.extend(static_context.to_system_blocks(
             self.cache_config.strategy.cache_static(),
-            self.cache_config.static_ttl,
-        );
-        blocks.extend(legacy_blocks.into_iter().map(legacy_system_block_to_ir));
+            &self.cache_config.static_ttl,
+        ));
 
         if let Some(tool_summary) = static_context.tool_summary() {
             let mut combined_tool_summary = tool_summary;
@@ -199,7 +192,7 @@ impl RequestBuilder {
             blocks.push(self.make_block(
                 &combined_tool_summary,
                 self.cache_config.strategy.cache_tools(),
-                self.cache_config.static_ttl,
+                &self.cache_config.static_ttl,
             ));
         } else if !prepared_tools.server_tool_summaries.is_empty() {
             blocks.push(self.make_block(
@@ -208,7 +201,7 @@ impl RequestBuilder {
                     prepared_tools.server_tool_summaries.join("\n")
                 ),
                 self.cache_config.strategy.cache_tools(),
-                self.cache_config.static_ttl,
+                &self.cache_config.static_ttl,
             ));
         }
 
@@ -220,7 +213,7 @@ impl RequestBuilder {
             blocks.push(self.make_block(
                 &guidelines,
                 self.cache_config.strategy.cache_static(),
-                self.cache_config.static_ttl,
+                &self.cache_config.static_ttl,
             ));
         }
 
@@ -300,13 +293,9 @@ impl RequestBuilder {
         }
     }
 
-    fn make_block(&self, text: &str, cached: bool, ttl: CacheTtl) -> ir::SystemBlock {
+    fn make_block(&self, text: &str, cached: bool, ttl: &str) -> ir::SystemBlock {
         if cached {
-            let ttl_str = match ttl {
-                CacheTtl::FiveMinutes => "5m",
-                CacheTtl::OneHour => "1h",
-            };
-            ir::SystemBlock::cached_with_ttl(text, ttl_str)
+            ir::SystemBlock::cached_with_ttl(text, ttl)
         } else {
             ir::SystemBlock::uncached(text)
         }
@@ -357,25 +346,6 @@ fn split_mcp_tool_name(name: &str) -> Option<(&str, &str)> {
     name.strip_prefix("mcp__")?.split_once("__")
 }
 
-/// Convert a legacy `types::SystemBlock` to an `ir::SystemBlock`.
-fn legacy_system_block_to_ir(block: crate::types::SystemBlock) -> ir::SystemBlock {
-    if let Some(cc) = block.cache_control {
-        let ttl_str = cc.ttl.map(|ttl| match ttl {
-            CacheTtl::FiveMinutes => "5m".to_string(),
-            CacheTtl::OneHour => "1h".to_string(),
-        });
-        ir::SystemBlock {
-            text: block.text,
-            cache_control: Some(ir::CacheControl {
-                mode: ir::CacheControlMode::System,
-                ttl: ttl_str,
-            }),
-        }
-    } else {
-        ir::SystemBlock::uncached(block.text)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
@@ -383,7 +353,6 @@ mod tests {
     use super::*;
     use crate::agent::config::{AgentConfig, CacheConfig, CacheStrategy};
     use crate::tools::{ToolRegistry, ToolSurface};
-    use crate::types::CacheTtl;
 
     fn test_config() -> AgentConfig {
         AgentConfig::default()
@@ -414,7 +383,7 @@ mod tests {
         let config = AgentConfig {
             cache: CacheConfig::default()
                 .strategy(CacheStrategy::ToolsOnly)
-                .static_ttl(CacheTtl::OneHour),
+                .static_ttl("1h"),
             ..Default::default()
         };
         let tools = Arc::new(ToolRegistry::default_tools(ToolSurface::All, None, None));
@@ -440,7 +409,7 @@ mod tests {
         let config = AgentConfig {
             cache: CacheConfig::default()
                 .strategy(CacheStrategy::StaticAndTools)
-                .static_ttl(CacheTtl::OneHour),
+                .static_ttl("1h"),
             ..Default::default()
         };
 

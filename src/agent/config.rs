@@ -362,18 +362,20 @@ impl CacheStrategy {
 pub struct CacheConfig {
     /// Cache strategy determining which content types to cache
     pub strategy: CacheStrategy,
-    /// TTL for static content (system prompt, tools, CLAUDE.md)
-    pub static_ttl: crate::types::CacheTtl,
-    /// TTL for message content (last user turn)
-    pub message_ttl: crate::types::CacheTtl,
+    /// TTL for static content (system prompt, tools, CLAUDE.md).
+    /// Provider-neutral TTL string (e.g., `"5m"`, `"1h"`).
+    pub static_ttl: String,
+    /// TTL for message content (last user turn).
+    /// Provider-neutral TTL string (e.g., `"5m"`, `"1h"`).
+    pub message_ttl: String,
 }
 
 impl Default for CacheConfig {
     fn default() -> Self {
         Self {
             strategy: CacheStrategy::Full,
-            static_ttl: crate::types::CacheTtl::OneHour,
-            message_ttl: crate::types::CacheTtl::FiveMinutes,
+            static_ttl: "1h".to_string(),
+            message_ttl: "5m".to_string(),
         }
     }
 }
@@ -441,15 +443,15 @@ impl CacheConfig {
         self
     }
 
-    /// Set the TTL for static content
-    pub fn static_ttl(mut self, ttl: crate::types::CacheTtl) -> Self {
-        self.static_ttl = ttl;
+    /// Set the TTL for static content (e.g., `"5m"`, `"1h"`).
+    pub fn static_ttl(mut self, ttl: impl Into<String>) -> Self {
+        self.static_ttl = ttl.into();
         self
     }
 
-    /// Set the TTL for message content
-    pub fn message_ttl(mut self, ttl: crate::types::CacheTtl) -> Self {
-        self.message_ttl = ttl;
+    /// Set the TTL for message content (e.g., `"5m"`, `"1h"`).
+    pub fn message_ttl(mut self, ttl: impl Into<String>) -> Self {
+        self.message_ttl = ttl.into();
         self
     }
 
@@ -457,9 +459,9 @@ impl CacheConfig {
     ///
     /// This is a convenience method to avoid duplicating the cache_conversation() check
     /// at every call site.
-    pub fn conversation_ttl_option(&self) -> Option<crate::types::CacheTtl> {
+    pub fn conversation_ttl_option(&self) -> Option<String> {
         if self.strategy.cache_conversation() {
-            Some(self.message_ttl)
+            Some(self.message_ttl.clone())
         } else {
             None
         }
@@ -638,8 +640,8 @@ mod tests {
     fn test_cache_strategy_default_is_full() {
         let config = CacheConfig::default();
         assert_eq!(config.strategy, CacheStrategy::Full);
-        assert_eq!(config.static_ttl, crate::types::CacheTtl::OneHour);
-        assert_eq!(config.message_ttl, crate::types::CacheTtl::FiveMinutes);
+        assert_eq!(config.static_ttl, "1h");
+        assert_eq!(config.message_ttl, "5m");
     }
 
     #[test]
@@ -707,11 +709,9 @@ mod tests {
 
     #[test]
     fn test_cache_config_with_ttl() {
-        let config = CacheConfig::default()
-            .static_ttl(crate::types::CacheTtl::FiveMinutes)
-            .message_ttl(crate::types::CacheTtl::OneHour);
+        let config = CacheConfig::default().static_ttl("5m").message_ttl("1h");
 
-        assert_eq!(config.static_ttl, crate::types::CacheTtl::FiveMinutes);
-        assert_eq!(config.message_ttl, crate::types::CacheTtl::OneHour);
+        assert_eq!(config.static_ttl, "5m");
+        assert_eq!(config.message_ttl, "1h");
     }
 }

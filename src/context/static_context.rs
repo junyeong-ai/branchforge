@@ -3,8 +3,9 @@
 //! Content that is always loaded and cached for the entire session.
 //! Per Anthropic best practices, static content uses 1-hour TTL.
 
+use crate::ir::SystemBlock;
 use crate::mcp::make_mcp_name;
-use crate::types::{CacheTtl, SystemBlock, ToolDefinition};
+use crate::types::ToolDefinition;
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, Default)]
@@ -62,7 +63,7 @@ impl StaticContext {
     /// Convert static context to system blocks.
     ///
     /// Static blocks are cached only when the caller enables static-context caching.
-    pub fn to_system_blocks(&self, cache_static: bool, ttl: CacheTtl) -> Vec<SystemBlock> {
+    pub fn to_system_blocks(&self, cache_static: bool, ttl: &str) -> Vec<SystemBlock> {
         let mut blocks = Vec::new();
 
         if !self.system_prompt.is_empty() {
@@ -108,7 +109,7 @@ impl StaticContext {
         }
     }
 
-    fn make_block(&self, text: &str, cached: bool, ttl: CacheTtl) -> SystemBlock {
+    fn make_block(&self, text: &str, cached: bool, ttl: &str) -> SystemBlock {
         if cached {
             SystemBlock::cached_with_ttl(text, ttl)
         } else {
@@ -170,16 +171,14 @@ impl StaticContext {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::CacheType;
 
     #[test]
     fn test_system_block_cached_with_ttl() {
-        let block = SystemBlock::cached_with_ttl("Hello", CacheTtl::OneHour);
+        let block = SystemBlock::cached_with_ttl("Hello", "1h");
         assert!(block.cache_control.is_some());
         let cache_ctrl = block.cache_control.unwrap();
-        assert_eq!(cache_ctrl.cache_type, CacheType::Ephemeral);
-        assert_eq!(cache_ctrl.ttl, Some(CacheTtl::OneHour));
-        assert_eq!(block.block_type, "text");
+        assert_eq!(cache_ctrl.ttl, Some("1h".to_string()));
+        assert_eq!(block.text, "Hello");
     }
 
     #[test]
@@ -188,7 +187,7 @@ mod tests {
             .system_prompt("You are a helpful assistant")
             .claude_md("# Project\nThis is a Rust project");
 
-        let blocks = static_context.to_system_blocks(true, CacheTtl::OneHour);
+        let blocks = static_context.to_system_blocks(true, "1h");
         assert_eq!(blocks.len(), 2);
         assert!(blocks[0].text.contains("helpful assistant"));
         assert!(blocks[1].text.contains("Rust project"));

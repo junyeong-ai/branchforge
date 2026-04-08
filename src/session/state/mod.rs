@@ -26,7 +26,6 @@ use crate::graph::{GraphNode, NodeId, NodeKind, NodeProvenance, SessionGraph};
 use crate::ir::{ContentPart, Message, Role};
 use crate::session::types::{CompactRecord, Plan, TodoItem, TodoStatus};
 use crate::session::{SessionError, SessionResult};
-use crate::types::CacheTtl;
 
 /// Transient content overrides for micro-compaction.
 ///
@@ -394,21 +393,12 @@ impl Session {
         self.updated_at = Utc::now();
     }
 
-    /// Convert session messages to API format with default caching (5m TTL).
-    ///
-    /// Cache hints are now applied at the codec/transport layer via
-    /// `ProviderOptions::anthropic.cache_control`, not on individual
-    /// content parts. The `ttl` parameter is retained for backward
-    /// compatibility but is currently unused.
-    pub fn to_api_messages(&self) -> Vec<Message> {
-        self.to_api_messages_with_cache(Some(CacheTtl::FiveMinutes))
-    }
-
     /// Convert session messages to API format.
     ///
-    /// The `ttl` parameter is retained for signature compatibility but
-    /// cache breakpoints are now handled by the codec layer.
-    pub fn to_api_messages_with_cache(&self, _ttl: Option<CacheTtl>) -> Vec<Message> {
+    /// Cache hints are applied at the codec/transport layer via
+    /// `ProviderOptions::anthropic.cache_control`, not on individual
+    /// content parts.
+    pub fn to_api_messages(&self) -> Vec<Message> {
         let branch_messages = self.current_branch_messages();
         if branch_messages.is_empty() {
             return Vec::new();
