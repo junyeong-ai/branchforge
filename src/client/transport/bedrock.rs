@@ -196,6 +196,48 @@ impl ModelTransport for BedrockTransport {
         Ok(Endpoint { url, headers })
     }
 
+    fn classify_error(
+        &self,
+        status: u16,
+        body: &str,
+    ) -> (crate::error::ProviderErrorKind, Option<&'static str>) {
+        use crate::error::ProviderErrorKind;
+
+        // Bedrock returns ThrottlingException in the JSON body for rate
+        // limiting, even on 4xx status codes.  ServiceUnavailableException
+        // is retryable server overload.
+        if body.contains("ThrottlingException") || body.contains("TooManyRequestsException") {
+            return (
+                ProviderErrorKind::RateLimit,
+                Some("Bedrock throttled the request — back off and retry"),
+            );
+        }
+        if body.contains("ServiceUnavailableException")
+            || body.contains("ModelStreamErrorException")
+        {
+            return (
+                ProviderErrorKind::Server,
+                Some("Bedrock service temporarily unavailable — retry with backoff"),
+            );
+        }
+        if body.contains("AccessDeniedException") {
+            return (
+                ProviderErrorKind::Auth,
+                Some("Bedrock access denied — check IAM policy for bedrock:InvokeModel*"),
+            );
+        }
+        if body.contains("ModelNotReadyException") {
+            return (
+                ProviderErrorKind::Server,
+                Some("Bedrock model not ready — the model may be warming up, retry shortly"),
+            );
+        }
+        if body.contains("ValidationException") {
+            return (ProviderErrorKind::BadRequest, None);
+        }
+        super::default_classify_status(status)
+    }
+
     async fn authorize(
         &self,
         req: reqwest::RequestBuilder,
@@ -318,5 +360,35 @@ mod tests {
             built.headers().get("authorization").unwrap(),
             "Bearer test-token"
         );
+    }
+
+    #[test]
+    fn classify_error_throttling_exception() {
+        let t = fake_transport("us-east-1");
+        let (kind, hint) = t.classify_error(
+            429,
+            r#"{"__type":"ThrottlingException","message":"Rate exceeded"}"#,
+        );
+        assert!(matches!(kind, crate::error::ProviderErrorKind::RateLimit));
+        assert!(hint.is_some());
+    }
+
+    #[test]
+    fn classify_error_access_denied() {
+        let t = fake_transport("us-east-1");
+        let (kind, hint) = t.classify_error(
+            403,
+            r#"{"__type":"AccessDeniedException","message":"not authorized"}"#,
+        );
+        assert!(matches!(kind, crate::error::ProviderErrorKind::Auth));
+        assert!(hint.unwrap().contains("IAM"));
+    }
+
+    #[test]
+    fn classify_error_generic_500_fallback() {
+        let t = fake_transport("us-east-1");
+        let (kind, hint) = t.classify_error(500, "Internal Server Error");
+        assert!(matches!(kind, crate::error::ProviderErrorKind::Server));
+        assert!(hint.is_none());
     }
 }

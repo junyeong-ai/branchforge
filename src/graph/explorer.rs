@@ -202,7 +202,7 @@ fn summarize_node(node: &super::GraphNode) -> NodeSummary {
         parent_id: node.parent_id,
         created_by_principal_id: node.created_by_principal_id.clone(),
         provenance: node.provenance.clone(),
-        provenance_digest: crate::graph::ProvenanceSummaryService::render_node_digest(node),
+        provenance_digest: crate::graph::ProvenanceSummarizer::render_node_digest(node),
         created_at: node.created_at,
         tags: node.tags.clone(),
         preview: preview_payload(&node.payload),

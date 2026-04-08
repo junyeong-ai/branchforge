@@ -131,10 +131,10 @@ async fn graph_first_compaction_archive_roundtrip_preserves_identity_and_history
 
     assert_eq!(session.current_branch_messages().len(), 1);
     assert_eq!(session.compact_history().len(), 1);
-    assert_eq!(session.graph().checkpoints.len(), 1);
+    assert_eq!(session.graph().checkpoints().len(), 1);
     assert!(session.summary().is_some());
     assert!(
-        session.graph().events.len() >= 4,
+        session.graph().events().len() >= 4,
         "graph history should retain pre-compaction lineage"
     );
 
@@ -167,7 +167,7 @@ async fn graph_first_compaction_archive_roundtrip_preserves_identity_and_history
     assert_eq!(restored.principal_id(), Some("user-1"));
     assert_eq!(restored.current_branch_messages().len(), 1);
     assert_eq!(restored.compact_history().len(), 1);
-    assert_eq!(restored.graph().checkpoints.len(), 1);
+    assert_eq!(restored.graph().checkpoints().len(), 1);
     assert_eq!(restored_queue.len(), 2);
     assert_eq!(restored_queue[0].content, "first follow-up");
     assert_eq!(restored_queue[1].content, "second follow-up");

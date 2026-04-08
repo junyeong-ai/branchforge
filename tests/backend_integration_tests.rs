@@ -139,8 +139,8 @@ where
     assert_eq!(restored.tenant_id(), Some("tenant-a"));
     assert_eq!(restored.principal_id(), Some("user-1"));
     assert_eq!(restored.current_branch_messages().len(), 2);
-    assert_eq!(restored.graph().bookmarks.len(), 1);
-    assert_eq!(restored.graph().checkpoints.len(), 1);
+    assert_eq!(restored.graph().bookmarks().len(), 1);
+    assert_eq!(restored.graph().checkpoints().len(), 1);
 
     let restored_queue = persistence.pending_queue(&restored.id).await.unwrap();
     assert_eq!(restored_queue.len(), 2);
@@ -186,8 +186,8 @@ async fn test_postgres_backend_roundtrip_graph_identity() {
     assert_eq!(loaded.tenant_id(), Some("tenant-a"));
     assert_eq!(loaded.principal_id(), Some("user-1"));
     assert_eq!(loaded.current_branch_messages().len(), 2);
-    assert_eq!(loaded.graph().bookmarks.len(), 1);
-    assert_eq!(loaded.graph().checkpoints.len(), 1);
+    assert_eq!(loaded.graph().bookmarks().len(), 1);
+    assert_eq!(loaded.graph().checkpoints().len(), 1);
 
     let tenant_list = persistence.list(Some("tenant-a")).await.unwrap();
     assert_eq!(tenant_list, vec![session_id]);
@@ -268,8 +268,8 @@ async fn test_redis_backend_roundtrip_graph_identity() {
     assert_eq!(loaded.tenant_id(), Some("tenant-a"));
     assert_eq!(loaded.principal_id(), Some("user-1"));
     assert_eq!(loaded.current_branch_messages().len(), 2);
-    assert_eq!(loaded.graph().bookmarks.len(), 1);
-    assert_eq!(loaded.graph().checkpoints.len(), 1);
+    assert_eq!(loaded.graph().bookmarks().len(), 1);
+    assert_eq!(loaded.graph().checkpoints().len(), 1);
 
     let tenant_list = persistence.list(Some("tenant-a")).await.unwrap();
     assert_eq!(tenant_list, vec![session_id]);
@@ -373,8 +373,8 @@ async fn test_jsonl_backend_roundtrip_graph_identity() {
     assert_eq!(loaded.tenant_id(), Some("tenant-a"));
     assert_eq!(loaded.principal_id(), Some("user-1"));
     assert_eq!(loaded.current_branch_messages().len(), 2);
-    assert_eq!(loaded.graph().bookmarks.len(), 1);
-    assert_eq!(loaded.graph().checkpoints.len(), 1);
+    assert_eq!(loaded.graph().bookmarks().len(), 1);
+    assert_eq!(loaded.graph().checkpoints().len(), 1);
 }
 
 #[cfg(feature = "jsonl")]

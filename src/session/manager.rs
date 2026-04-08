@@ -454,7 +454,7 @@ impl SessionManager {
         right: crate::graph::BranchId,
     ) -> SessionResult<crate::graph::BranchDiffSummary> {
         let session = self.get(id).await?;
-        crate::graph::GraphDiffService::branch_diff(&session.graph, left, right).map_err(|error| {
+        crate::graph::GraphDiffer::branch_diff(&session.graph, left, right).map_err(|error| {
             SessionError::Storage {
                 message: error.to_string(),
             }
@@ -910,7 +910,7 @@ impl ScopedSessionManager {
         right: crate::graph::BranchId,
     ) -> SessionResult<crate::graph::BranchDiffSummary> {
         let session = self.manager.get_scoped(id, &self.scope).await?;
-        crate::graph::GraphDiffService::branch_diff(&session.graph, left, right).map_err(|error| {
+        crate::graph::GraphDiffer::branch_diff(&session.graph, left, right).map_err(|error| {
             SessionError::Storage {
                 message: error.to_string(),
             }

@@ -11,9 +11,9 @@ pub struct ProvenanceDigest {
     pub task_id: Option<String>,
 }
 
-pub struct ProvenanceSummaryService;
+pub struct ProvenanceSummarizer;
 
-impl ProvenanceSummaryService {
+impl ProvenanceSummarizer {
     pub fn node_digest(node: &GraphNode) -> Option<ProvenanceDigest> {
         let provenance = node.provenance.as_ref();
         Some(ProvenanceDigest {
@@ -90,7 +90,7 @@ mod tests {
             payload: serde_json::json!({}),
         };
 
-        let digest = ProvenanceSummaryService::render_node_digest(&node).unwrap();
+        let digest = ProvenanceSummarizer::render_node_digest(&node).unwrap();
         assert!(digest.contains("actor:user-1"));
         assert!(digest.contains("subagent:explore"));
     }

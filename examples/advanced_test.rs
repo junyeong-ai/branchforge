@@ -432,7 +432,7 @@ async fn test_session_fork() -> Result<(), String> {
     let original = scoped.get(&id).await.map_err(|e| e.to_string())?;
     let head = original
         .graph()
-        .branch_head(original.graph().primary_branch)
+        .branch_head(original.graph().primary_branch())
         .ok_or_else(|| "Missing head".to_string())?;
     let forked = scoped
         .fork_from_node(&id, head)

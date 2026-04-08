@@ -71,13 +71,13 @@ async fn scenario_list_and_delete(p: Arc<dyn Persistence>) {
 /// Append a graph node, save, load — graph events round trip.
 async fn scenario_graph_events_round_trip(p: Arc<dyn Persistence>) {
     let session = fresh_session("graph");
-    let event_count_before = session.graph().events.len();
+    let event_count_before = session.graph().events().len();
     let id = session.id;
     p.save(&session).await.unwrap();
 
     let loaded = p.load(&id).await.unwrap().unwrap();
     assert_eq!(
-        loaded.graph().events.len(),
+        loaded.graph().events().len(),
         event_count_before,
         "{} dropped graph events on round trip",
         p.name()

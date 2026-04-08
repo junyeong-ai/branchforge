@@ -118,7 +118,7 @@ Actions:
                 let Some(right) = right else {
                     return ToolResult::error("other_branch_id is required for action=diff");
                 };
-                crate::graph::GraphDiffService::branch_diff(&session.graph, left, right)
+                crate::graph::GraphDiffer::branch_diff(&session.graph, left, right)
                     .map_err(|error| crate::session::SessionError::Storage {
                         message: error.to_string(),
                     })
@@ -371,7 +371,7 @@ fn render_branches(graph: &crate::graph::SessionGraph, follow_up_action: Option<
         .map(|branch| {
             serde_json::json!({
                 "summary": branch,
-                "digest": crate::graph::ProvenanceSummaryService::branch_digest(branch),
+                "digest": crate::graph::ProvenanceSummarizer::branch_digest(branch),
             })
         })
         .collect();

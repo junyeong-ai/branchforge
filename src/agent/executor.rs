@@ -197,8 +197,8 @@ impl Agent {
     /// [`AgentBuilder`](super::AgentBuilder) with the model id pre-set.
     ///
     /// Renamed from the earlier `Agent::model(...)` because that name
-    /// read as a getter on `Agent`. The current `with_model` form lines
-    /// up with the rest of the builder API (`with_*`).
+    /// read as a getter on `Agent`. `with_model` makes the factory-method
+    /// intent clear — it returns a fresh builder, not a property of Agent.
     pub fn with_model(model: impl Into<String>) -> super::AgentBuilder {
         super::AgentBuilder::new().model(model)
     }

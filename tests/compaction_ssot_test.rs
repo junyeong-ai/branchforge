@@ -144,12 +144,12 @@ fn graph_events_persist_compaction_marker() {
     // the persistence-side proof of SSoT without needing a persistence
     // backend round-trip.
     let mut session = fresh_session_with_messages(3);
-    let events_before = session.graph().events.len();
+    let events_before = session.graph().events().len();
 
     let svc = Compactor::new(branchforge::session::compact::CompactConfig::default());
     svc.apply_compact(&mut session, "persisted summary".to_string())
         .unwrap();
-    let events_after = session.graph().events.len();
+    let events_after = session.graph().events().len();
 
     // At least one new graph event was emitted (summary node + checkpoint).
     assert!(

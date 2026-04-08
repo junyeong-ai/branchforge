@@ -53,7 +53,10 @@ of truth via the type system, and removes the entire legacy
   - `ReplayService` → `Replayer`
   - `SessionArchiveService` → `SessionArchiver`
   - `GraphSearchService` → `GraphSearcher`
-- **`ModelTransport` trait gained `classify_error(status, body)`** with a default implementation that does generic status-code classification. `VertexTransport`, `DirectTransport`, `BedrockTransport`, `FoundryTransport` override it for vendor-specific patterns.
+  - `GraphDiffService` → `GraphDiffer`
+  - `ProvenanceSummaryService` → `ProvenanceSummarizer`
+- **`SessionGraph` fields encapsulated** — all 8 data fields (`id`, `created_at`, `events`, `branches`, `nodes`, `checkpoints`, `bookmarks`, `primary_branch`) are now `pub(crate)` with public read-only getters (`id()`, `created_at()`, `events()`, `branches()`, `nodes()`, `checkpoints()`, `bookmarks()`, `primary_branch()`). External code must use getters; crate-internal persistence code retains direct access.
+- **`ModelTransport` trait gained `classify_error(status, body)`** with a default implementation that does generic status-code classification. All 4 transports override it: `DirectTransport` (API key hint), `VertexTransport` (quota project, model not enabled), `BedrockTransport` (ThrottlingException, AccessDenied, ModelNotReady), `FoundryTransport` (Entra token expiry, DeploymentNotFound).
 - **`AgentRuntime` field count** went from 17 top-level fields to 14 + one `OrchestrationBundle`. Doc-comment grouping marks the responsibility boundaries (Core / Operations / Resources / Lifecycle / Multi-agent).
 - **`AgentBuilder` 43 fields reorganized** into doc-comment groups (Auth / Provider / Resources / Hooks / MCP / ToolSearch / Session / Cloud / Plugins) for navigability.
 - **`TaskRegistry`** data types (`PendingTaskTransition`, `TaskRuntime`, `TaskAssistantMetadata`, `TaskExecutionSummary`, `TaskResultSnapshot`) extracted into `task_registry_types.rs` (127 LOC) so `task_registry.rs` is focused on registry behaviour.
@@ -94,7 +97,8 @@ of truth via the type system, and removes the entire legacy
 - **`Agent::model("gpt-4o")`** → **`Agent::with_model("gpt-4o")`**.
 - **`types::tool::ToolDefinition`** → **`types::ToolSpec`** for the local registry spec; `ir::ToolDefinition` is the wire format (separate type).
 - **`ToolSpec { strict: Some(true), defer_loading: Some(true) }`** → **`ToolSpec { strict: true, defer_loading: true }`**.
-- **`CompactService`** → **`Compactor`**, **`ReplayService`** → **`Replayer`**, **`SessionArchiveService`** → **`SessionArchiver`**, **`GraphSearchService`** → **`GraphSearcher`**.
+- **`CompactService`** → **`Compactor`**, **`ReplayService`** → **`Replayer`**, **`SessionArchiveService`** → **`SessionArchiver`**, **`GraphSearchService`** → **`GraphSearcher`**, **`GraphDiffService`** → **`GraphDiffer`**, **`ProvenanceSummaryService`** → **`ProvenanceSummarizer`**.
+- **`SessionGraph.events`** field access → **`graph.events()`**; same for `branches()`, `nodes()`, `checkpoints()`, `bookmarks()`, `primary_branch()`, `id()`, `created_at()`.
 - **`Session::messages`** field access → **`Session::current_branch_messages()`**.
 - **`Session::clear_messages()` / `refresh_message_projection()` / `to_graph()`** are gone. Reset a session by constructing a fresh `Session::new()`; read the graph via `Session::graph()`.
 - **`use crate::tools::{WebSearchTool, WebFetchTool, ServerTool, ToolSearchTool, UserLocation, CitationsConfig}`** → **`use crate::agent::{...}`** (or via `Agent::server_tools::*`).

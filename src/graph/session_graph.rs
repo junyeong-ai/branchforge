@@ -15,19 +15,55 @@ use crate::events::EventBus;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionGraph {
-    pub id: SessionGraphId,
-    pub created_at: chrono::DateTime<Utc>,
-    pub events: Vec<GraphEvent>,
-    pub branches: HashMap<BranchId, Branch>,
-    pub nodes: HashMap<NodeId, GraphNode>,
-    pub checkpoints: HashMap<NodeId, Checkpoint>,
-    pub bookmarks: HashMap<Uuid, Bookmark>,
-    pub primary_branch: BranchId,
+    pub(crate) id: SessionGraphId,
+    pub(crate) created_at: chrono::DateTime<Utc>,
+    pub(crate) events: Vec<GraphEvent>,
+    pub(crate) branches: HashMap<BranchId, Branch>,
+    pub(crate) nodes: HashMap<NodeId, GraphNode>,
+    pub(crate) checkpoints: HashMap<NodeId, Checkpoint>,
+    pub(crate) bookmarks: HashMap<Uuid, Bookmark>,
+    pub(crate) primary_branch: BranchId,
     #[serde(skip)]
     pub(crate) event_bus: Option<Arc<EventBus>>,
 }
 
 impl SessionGraph {
+    // ── Read-only accessors ──────────────────────────────────────────
+
+    pub fn id(&self) -> SessionGraphId {
+        self.id
+    }
+
+    pub fn created_at(&self) -> chrono::DateTime<Utc> {
+        self.created_at
+    }
+
+    pub fn events(&self) -> &[GraphEvent] {
+        &self.events
+    }
+
+    pub fn branches(&self) -> &HashMap<BranchId, Branch> {
+        &self.branches
+    }
+
+    pub fn nodes(&self) -> &HashMap<NodeId, GraphNode> {
+        &self.nodes
+    }
+
+    pub fn checkpoints(&self) -> &HashMap<NodeId, Checkpoint> {
+        &self.checkpoints
+    }
+
+    pub fn bookmarks(&self) -> &HashMap<Uuid, Bookmark> {
+        &self.bookmarks
+    }
+
+    pub fn primary_branch(&self) -> BranchId {
+        self.primary_branch
+    }
+
+    // ── Mutators ─────────────────────────────────────────────────────
+
     /// Attach an [`EventBus`] for non-blocking observability events.
     pub fn with_event_bus(&mut self, bus: Arc<EventBus>) {
         self.event_bus = Some(bus);

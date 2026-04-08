@@ -186,6 +186,41 @@ impl ModelTransport for FoundryTransport {
         Ok(Endpoint { url, headers })
     }
 
+    fn classify_error(
+        &self,
+        status: u16,
+        body: &str,
+    ) -> (crate::error::ProviderErrorKind, Option<&'static str>) {
+        use crate::error::ProviderErrorKind;
+
+        // Entra ID token failures surface as 401 with specific error codes.
+        if body.contains("invalid_grant") || body.contains("AADSTS70043") {
+            return (
+                ProviderErrorKind::Auth,
+                Some("Azure Entra token expired — run `az login` to refresh credentials"),
+            );
+        }
+        if body.contains("AADSTS65001") || body.contains("AADSTS50076") {
+            return (
+                ProviderErrorKind::Auth,
+                Some("Azure Entra requires interactive consent — run `az login`"),
+            );
+        }
+        if status == 429 || body.contains("RateLimitReached") || body.contains("429") {
+            return (
+                ProviderErrorKind::RateLimit,
+                Some("Azure AI Foundry rate limit — back off and retry"),
+            );
+        }
+        if body.contains("DeploymentNotFound") || body.contains("ModelNotFound") {
+            return (
+                ProviderErrorKind::BadRequest,
+                Some("Azure AI Foundry model not deployed — check AZURE_AI_RESOURCE and model name"),
+            );
+        }
+        super::default_classify_status(status)
+    }
+
     async fn authorize(
         &self,
         req: reqwest::RequestBuilder,
@@ -273,5 +308,47 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(ep.url, "https://x.example.com/anthropic/v1/messages");
+    }
+
+    #[test]
+    fn classify_error_entra_token_expired() {
+        let t = FoundryTransport::with_api_key("https://x", "k");
+        let (kind, hint) = t.classify_error(
+            401,
+            r#"{"error":"invalid_grant","error_description":"AADSTS70043: token expired"}"#,
+        );
+        assert!(matches!(kind, crate::error::ProviderErrorKind::Auth));
+        assert!(hint.unwrap().contains("az login"));
+    }
+
+    #[test]
+    fn classify_error_rate_limit() {
+        let t = FoundryTransport::with_api_key("https://x", "k");
+        let (kind, hint) =
+            t.classify_error(429, r#"{"error":"RateLimitReached","message":"slow down"}"#);
+        assert!(matches!(kind, crate::error::ProviderErrorKind::RateLimit));
+        assert!(hint.is_some());
+    }
+
+    #[test]
+    fn classify_error_deployment_not_found() {
+        let t = FoundryTransport::with_api_key("https://x", "k");
+        let (kind, hint) = t.classify_error(
+            404,
+            r#"{"error":"DeploymentNotFound","message":"model not available"}"#,
+        );
+        assert!(matches!(
+            kind,
+            crate::error::ProviderErrorKind::BadRequest
+        ));
+        assert!(hint.unwrap().contains("AZURE_AI_RESOURCE"));
+    }
+
+    #[test]
+    fn classify_error_generic_500_fallback() {
+        let t = FoundryTransport::with_api_key("https://x", "k");
+        let (kind, hint) = t.classify_error(500, "Internal Server Error");
+        assert!(matches!(kind, crate::error::ProviderErrorKind::Server));
+        assert!(hint.is_none());
     }
 }

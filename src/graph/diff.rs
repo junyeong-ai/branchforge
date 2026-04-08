@@ -16,9 +16,9 @@ pub struct BranchDiffSummary {
     pub right_only_preview: Vec<NodeSummary>,
 }
 
-pub struct GraphDiffService;
+pub struct GraphDiffer;
 
-impl GraphDiffService {
+impl GraphDiffer {
     pub fn branch_diff(
         graph: &SessionGraph,
         left: BranchId,
@@ -109,7 +109,7 @@ mod tests {
             .unwrap();
 
         let diff =
-            GraphDiffService::branch_diff(&graph, graph.primary_branch, right_branch).unwrap();
+            GraphDiffer::branch_diff(&graph, graph.primary_branch, right_branch).unwrap();
         assert_eq!(diff.common_ancestor, Some(root));
         assert_eq!(diff.left_only_count, 1);
         assert_eq!(diff.right_only_count, 1);
@@ -121,7 +121,7 @@ mod tests {
         let missing = uuid::Uuid::new_v4();
 
         let error =
-            GraphDiffService::branch_diff(&graph, graph.primary_branch, missing).unwrap_err();
+            GraphDiffer::branch_diff(&graph, graph.primary_branch, missing).unwrap_err();
         assert!(matches!(
             error,
             GraphError::MissingBranch { branch_id } if branch_id == missing
