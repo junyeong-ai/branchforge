@@ -221,11 +221,12 @@ struct StreamState {
     pending_tool_results: Vec<ContentPart>,
     pending_tool_uses: Vec<PendingToolCall>,
     recovery_attempts: u32,
-    /// Accumulator for tool_use content blocks being streamed.
-    /// Codecs emit ToolCallStart, ToolCallArgsDelta, ToolCallEnd.
-    /// We accumulate the partial JSON here and emit ToolUseComplete on end.
-    /// Tuple: (tool_call_id, tool_name, json_buffer).
-    accumulating_tool_use: Option<(String, String, String)>,
+    /// Accumulators for tool_use content blocks being streamed, keyed by
+    /// the codec's `index`. Codecs (esp. OpenAI Chat Completions) can
+    /// interleave deltas for multiple tool calls in a single stream, so
+    /// we MUST key on `index` rather than tracking a single in-flight call.
+    /// Each entry is `(tool_call_id, tool_name, json_buffer)`.
+    accumulating_tool_calls: std::collections::HashMap<usize, (String, String, String)>,
     final_text: String,
     final_thinking: String,
     thinking_signature: Option<crate::ir::ReasoningSignature>,
@@ -259,7 +260,7 @@ impl StreamState {
             pending_tool_results: Vec::new(),
             pending_tool_uses: Vec::new(),
             recovery_attempts: 0,
-            accumulating_tool_use: None,
+            accumulating_tool_calls: std::collections::HashMap::new(),
             final_text: String::new(),
             final_thinking: String::new(),
             thinking_signature: None,
@@ -836,18 +837,29 @@ impl StreamState {
                 }
                 StreamPollResult::Event(Ok(AgentEvent::Thinking { content: text }))
             }
-            ModelStreamChunk::ToolCallStart { id, name, .. } => {
-                self.accumulating_tool_use = Some((id, name, String::new()));
+            ModelStreamChunk::ToolCallStart {
+                index, id, name, ..
+            } => {
+                self.accumulating_tool_calls
+                    .insert(index, (id, name, String::new()));
                 StreamPollResult::Continue
             }
-            ModelStreamChunk::ToolCallArgsDelta { partial_json, .. } => {
-                if let Some((_, _, ref mut json_buf)) = self.accumulating_tool_use {
+            ModelStreamChunk::ToolCallArgsDelta {
+                index,
+                partial_json,
+            } => {
+                if let Some((_, _, json_buf)) = self.accumulating_tool_calls.get_mut(&index) {
                     json_buf.push_str(&partial_json);
+                } else {
+                    tracing::warn!(
+                        index,
+                        "ToolCallArgsDelta received without matching ToolCallStart — dropped"
+                    );
                 }
                 StreamPollResult::Continue
             }
-            ModelStreamChunk::ToolCallEnd { .. } => {
-                if let Some((id, name, json_buf)) = self.accumulating_tool_use.take() {
+            ModelStreamChunk::ToolCallEnd { index } => {
+                if let Some((id, name, json_buf)) = self.accumulating_tool_calls.remove(&index) {
                     let input: serde_json::Value = match serde_json::from_str(&json_buf) {
                         Ok(v) => v,
                         Err(e) => {
@@ -877,7 +889,10 @@ impl StreamState {
                     }
                     self.pending_tool_uses.push(tool_call);
                 } else {
-                    tracing::warn!("ToolCallEnd received without matching ToolCallStart — dropped");
+                    tracing::warn!(
+                        index,
+                        "ToolCallEnd received without matching ToolCallStart — dropped"
+                    );
                 }
                 StreamPollResult::Continue
             }

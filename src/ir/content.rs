@@ -122,10 +122,12 @@ impl ContentPart {
         }
     }
 
-    /// Build an IR `ToolResult` content part from a legacy `types::ToolResult`.
+    /// Build an IR `ToolResult` content part from a tool execution result.
     ///
-    /// This is the canonical conversion point used by the agent layer to
-    /// avoid depending on `types::ToolResultBlock`.
+    /// This is the canonical conversion point used by the agent layer.
+    /// Multi-block results (text + images + search results) are preserved
+    /// via [`ToolResultContent::MultiPart`]; pure text/error/empty results
+    /// use [`ToolResultContent::Text`].
     pub fn from_tool_result(call_id: impl Into<String>, result: &crate::types::ToolResult) -> Self {
         use crate::types::{ToolOutput, ToolOutputBlock};
         let call_id = call_id.into();
@@ -136,17 +138,27 @@ impl ContentPart {
                 is_error: false,
             },
             ToolOutput::SuccessBlocks(blocks) => {
-                let text = blocks
+                // Preserve all block types (text, image, search result) as
+                // a MultiPart so downstream consumers and the codec layer
+                // can render them faithfully.
+                let parts: Vec<ContentPart> = blocks
                     .iter()
-                    .filter_map(|b| match b {
-                        ToolOutputBlock::Text { text } => Some(text.as_str()),
-                        _ => None,
+                    .map(|b| match b {
+                        ToolOutputBlock::Text { text } => ContentPart::text(text.clone()),
+                        ToolOutputBlock::Image { data, media_type } => ContentPart::Image {
+                            source: MediaSource::Base64 { data: data.clone() },
+                            mime: media_type.clone(),
+                        },
+                        ToolOutputBlock::SearchResult(sr) => ContentPart::Source {
+                            url: sr.source.clone(),
+                            title: Some(sr.title.clone()),
+                            snippet: None,
+                        },
                     })
-                    .collect::<Vec<_>>()
-                    .join("\n");
+                    .collect();
                 ContentPart::ToolResult {
                     tool_call_id: call_id,
-                    content: ToolResultContent::Text(text),
+                    content: ToolResultContent::MultiPart(parts),
                     is_error: false,
                 }
             }
