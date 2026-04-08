@@ -218,14 +218,33 @@ impl ModelCodec for AnthropicMessagesCodec {
             ));
         }
 
-        // Anthropic Messages caps prompt-caching at MAX_CACHE_BREAKPOINTS
-        // markers per request. Multiple sources contribute markers
-        // (per-block `cache_marker` on system blocks, `apply_cache_control`
-        // on system/tools/conversation), and the agent runtime can easily
-        // exceed the cap when several static-context blocks are cached.
-        // Enforce the cap here as the single chokepoint, dropping the
-        // EARLIEST markers (later markers cache more content per Anthropic
-        // semantics, so keeping them maximises cache effectiveness).
+        // Cache_control post-processing chokepoint. Two API constraints
+        // are enforced here at the codec level so the agent runtime
+        // doesn't have to know about Anthropic-specific limits:
+        //
+        // 1. **TTL ordering** must be enforced FIRST. Anthropic rejects
+        //    requests where a longer TTL marker comes after a shorter
+        //    TTL marker in the `tools → system → messages` processing
+        //    order. Dropping violators here may reduce the marker count,
+        //    so the cap enforcement runs second on the surviving set.
+        //
+        // 2. **Marker cap** (MAX_CACHE_BREAKPOINTS = 4). Multiple sources
+        //    can contribute markers (per-block `cache_marker` on system
+        //    blocks, `apply_cache_control` on system/tools/conversation),
+        //    so the runtime can easily exceed the cap. Drop the EARLIEST
+        //    surviving markers since later markers cache more content
+        //    (Anthropic incremental caching includes everything before
+        //    the marker).
+        let ttl_violations = enforce_cache_ttl_ordering(&mut body);
+        if ttl_violations > 0 {
+            warnings.push(ModelWarning::lossy(
+                "cache_control_ttl",
+                "anthropic-messages requires cache_control TTLs to be \
+                 monotonically non-increasing in `tools → system → messages` \
+                 order; dropped markers whose TTL was longer than an earlier \
+                 marker's TTL",
+            ));
+        }
         let removed = enforce_cache_breakpoint_cap(&mut body);
         if removed > 0 {
             warnings.push(ModelWarning::lossy(
@@ -501,51 +520,83 @@ fn encode_tool_choice(choice: &crate::ir::ToolChoice) -> Value {
 /// be provided.`.
 const MAX_CACHE_BREAKPOINTS: usize = 4;
 
+/// Visit each `cache_control` marker in the request body in **wire stream
+/// order**. Anthropic's API documentation (and the live error message we
+/// observed during R10 — `"blocks are processed in the following order:
+/// tools, system, messages"`) define this as the canonical order, NOT the
+/// order in which fields appear in the JSON object.
+///
+/// `f` is invoked once per marker with a closure that, when called,
+/// removes that marker from the body. Returning `false` from the visitor
+/// stops further iteration.
+///
+/// This iterator centralises the wire-stream traversal so the cap
+/// enforcement and TTL ordering enforcement (and any future cache_control
+/// post-processor) can share one source of truth for "what's earliest"
+/// and "what comes after what".
+fn for_each_cache_marker_in_stream_order<F>(body: &mut Value, mut f: F)
+where
+    F: FnMut(&mut serde_json::Map<String, Value>) -> CacheMarkerVisit,
+{
+    // 1. tools (FIRST in the API processing stream)
+    if let Some(arr) = body.get_mut("tools").and_then(Value::as_array_mut) {
+        for tool in arr.iter_mut() {
+            if let Some(obj) = tool.as_object_mut()
+                && obj.contains_key("cache_control")
+                && f(obj) == CacheMarkerVisit::Stop
+            {
+                return;
+            }
+        }
+    }
+    // 2. system (SECOND in the API processing stream)
+    if let Some(arr) = body.get_mut("system").and_then(Value::as_array_mut) {
+        for block in arr.iter_mut() {
+            if let Some(obj) = block.as_object_mut()
+                && obj.contains_key("cache_control")
+                && f(obj) == CacheMarkerVisit::Stop
+            {
+                return;
+            }
+        }
+    }
+    // 3. messages (LAST in the API processing stream)
+    if let Some(arr) = body.get_mut("messages").and_then(Value::as_array_mut) {
+        for msg in arr.iter_mut() {
+            if let Some(content) = msg.get_mut("content").and_then(Value::as_array_mut) {
+                for block in content.iter_mut() {
+                    if let Some(obj) = block.as_object_mut()
+                        && obj.contains_key("cache_control")
+                        && f(obj) == CacheMarkerVisit::Stop
+                    {
+                        return;
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[derive(PartialEq, Eq)]
+enum CacheMarkerVisit {
+    Continue,
+    Stop,
+}
+
 /// Walk the encoded body and ensure at most [`MAX_CACHE_BREAKPOINTS`]
 /// `cache_control` markers remain. Markers later in the request stream
 /// cache more content (Anthropic incremental caching includes everything
 /// before the marker), so we drop the EARLIEST markers when over the cap.
 ///
+/// "Earliest" means earliest in the API's stream processing order
+/// (`tools → system → messages`), NOT the order JSON fields appear in
+/// the body. See [`for_each_cache_marker_in_stream_order`] for the
+/// canonical traversal.
+///
 /// Returns the number of markers removed so the caller can surface a
 /// `ModelWarning::lossy` for observability.
-///
-/// Order in which markers are visited (request stream order):
-/// 1. `system` array blocks (top-down)
-/// 2. `tools` array (top-down)
-/// 3. `messages` array, each message's `content` array (top-down)
 fn enforce_cache_breakpoint_cap(body: &mut Value) -> usize {
-    // Count helper: walk all marker positions in stream order.
-    fn count_markers(body: &Value) -> usize {
-        let mut n = 0;
-        if let Some(arr) = body.get("system").and_then(Value::as_array) {
-            for block in arr {
-                if block.get("cache_control").is_some() {
-                    n += 1;
-                }
-            }
-        }
-        if let Some(arr) = body.get("tools").and_then(Value::as_array) {
-            for tool in arr {
-                if tool.get("cache_control").is_some() {
-                    n += 1;
-                }
-            }
-        }
-        if let Some(arr) = body.get("messages").and_then(Value::as_array) {
-            for msg in arr {
-                if let Some(content) = msg.get("content").and_then(Value::as_array) {
-                    for block in content {
-                        if block.get("cache_control").is_some() {
-                            n += 1;
-                        }
-                    }
-                }
-            }
-        }
-        n
-    }
-
-    let total = count_markers(body);
+    let total = count_cache_markers(body);
     if total <= MAX_CACHE_BREAKPOINTS {
         return 0;
     }
@@ -553,63 +604,121 @@ fn enforce_cache_breakpoint_cap(body: &mut Value) -> usize {
     let mut to_drop = total - MAX_CACHE_BREAKPOINTS;
     let removed = to_drop;
 
-    // Pass 2 — drop the earliest `to_drop` markers in stream order.
-    // System blocks come first, then tools, then messages content.
-    if to_drop > 0
-        && let Some(arr) = body.get_mut("system").and_then(Value::as_array_mut)
-    {
-        for block in arr.iter_mut() {
-            if to_drop == 0 {
-                break;
-            }
-            if let Some(obj) = block.as_object_mut()
-                && obj.remove("cache_control").is_some()
-            {
-                to_drop -= 1;
-            }
+    for_each_cache_marker_in_stream_order(body, |obj| {
+        if to_drop == 0 {
+            return CacheMarkerVisit::Stop;
         }
-    }
-    if to_drop > 0
-        && let Some(arr) = body.get_mut("tools").and_then(Value::as_array_mut)
-    {
-        for tool in arr.iter_mut() {
-            if to_drop == 0 {
-                break;
-            }
-            if let Some(obj) = tool.as_object_mut()
-                && obj.remove("cache_control").is_some()
-            {
-                to_drop -= 1;
-            }
-        }
-    }
-    if to_drop > 0
-        && let Some(arr) = body.get_mut("messages").and_then(Value::as_array_mut)
-    {
-        for msg in arr.iter_mut() {
-            if to_drop == 0 {
-                break;
-            }
-            if let Some(content) = msg.get_mut("content").and_then(Value::as_array_mut) {
-                for block in content.iter_mut() {
-                    if to_drop == 0 {
-                        break;
-                    }
-                    if let Some(obj) = block.as_object_mut()
-                        && obj.remove("cache_control").is_some()
-                    {
-                        to_drop -= 1;
-                    }
-                }
-            }
-        }
-    }
+        obj.remove("cache_control");
+        to_drop -= 1;
+        CacheMarkerVisit::Continue
+    });
 
     debug_assert_eq!(
         to_drop, 0,
         "enforce_cache_breakpoint_cap: failed to remove all excess markers"
     );
     removed
+}
+
+/// Total number of `cache_control` markers across the request body. Walks
+/// in wire stream order, but the count is order-independent.
+fn count_cache_markers(body: &Value) -> usize {
+    let mut n = 0;
+    if let Some(arr) = body.get("tools").and_then(Value::as_array) {
+        n += arr
+            .iter()
+            .filter(|t| t.get("cache_control").is_some())
+            .count();
+    }
+    if let Some(arr) = body.get("system").and_then(Value::as_array) {
+        n += arr
+            .iter()
+            .filter(|b| b.get("cache_control").is_some())
+            .count();
+    }
+    if let Some(arr) = body.get("messages").and_then(Value::as_array) {
+        for msg in arr {
+            if let Some(content) = msg.get("content").and_then(Value::as_array) {
+                n += content
+                    .iter()
+                    .filter(|b| b.get("cache_control").is_some())
+                    .count();
+            }
+        }
+    }
+    n
+}
+
+/// Anthropic enforces TTL ordering across the request stream: a longer
+/// TTL marker must NOT come after a shorter TTL marker (where "after"
+/// means later in the `tools → system → messages` processing order).
+/// Violating this returns
+/// `400 invalid_request_error: a ttl='1h' cache_control block must not
+/// come after a ttl='5m' cache_control block`.
+///
+/// In normal operation, both per-block markers (from
+/// `SystemBlock::cache_marker.ttl`) and `apply_cache_control` markers
+/// (from `cc.ttl`) source their TTL from
+/// `cache_config.static_ttl`, so they trivially agree. This validator
+/// exists to keep the codec robust against:
+///   - Future refactors that introduce a second TTL source
+///   - User code that constructs `SystemBlock` instances with mixed TTLs
+///   - Higher-level cache strategies that intentionally vary TTL per block
+///
+/// Strategy: walk in wire stream order, track the *minimum* TTL seen so
+/// far. If a later marker's TTL is *longer* than the running minimum,
+/// that's a violation — drop the violating marker (the safest fix that
+/// doesn't silently change a user's chosen TTL on any other marker).
+/// Returns the number of markers dropped so the caller can surface a
+/// `ModelWarning::lossy` for observability.
+fn enforce_cache_ttl_ordering(body: &mut Value) -> usize {
+    let mut min_seconds_so_far: Option<u64> = None;
+    let mut removed = 0_usize;
+
+    for_each_cache_marker_in_stream_order(body, |obj| {
+        let ttl_str = obj
+            .get("cache_control")
+            .and_then(|cc| cc.get("ttl"))
+            .and_then(Value::as_str);
+        let ttl_seconds = ttl_to_seconds(ttl_str);
+
+        match min_seconds_so_far {
+            None => {
+                min_seconds_so_far = Some(ttl_seconds);
+            }
+            Some(min) if ttl_seconds > min => {
+                // Violation: this marker has a longer TTL than an earlier
+                // marker in the stream. Drop it.
+                obj.remove("cache_control");
+                removed += 1;
+            }
+            Some(min) => {
+                // OK: ttl_seconds <= min. Tighten the running minimum.
+                if ttl_seconds < min {
+                    min_seconds_so_far = Some(ttl_seconds);
+                }
+            }
+        }
+        CacheMarkerVisit::Continue
+    });
+
+    removed
+}
+
+/// Convert a `cache_control.ttl` string into seconds for ordering
+/// comparisons. Anthropic currently accepts `"5m"` (default) and `"1h"`;
+/// missing or unknown values are treated as the API default of 5 minutes
+/// (300 seconds), matching what the API itself does when `ttl` is absent.
+fn ttl_to_seconds(ttl: Option<&str>) -> u64 {
+    match ttl {
+        None => 300, // API default when no `ttl` field is present
+        Some("5m") => 300,
+        Some("1h") => 3600,
+        // Unknown values fall back to the default. We don't error here
+        // because the API itself will reject unknown TTLs with a clearer
+        // error than anything we could produce locally.
+        Some(_) => 300,
+    }
 }
 
 fn apply_cache_control(body: &mut Value, cc: &crate::ir::CacheControl) {
@@ -1381,14 +1490,18 @@ mod tests {
                 ]}
             ]
         });
-        // 5 markers total, cap is 4 → drop 1.
+        // 5 markers total, cap is 4 → drop 1. Earliest in the API's wire
+        // stream order is `tools[0]` (the documented processing order is
+        // `tools → system → messages`), NOT `system[0]`. Dropping the
+        // earliest preserves the more valuable later markers (system
+        // blocks cache the tools section + their own content; messages
+        // cache everything before them).
         let removed = enforce_cache_breakpoint_cap(&mut body);
         assert_eq!(removed, 1);
-        // Earliest marker (system[0]) should be dropped.
-        assert!(body["system"][0].get("cache_control").is_none());
+        assert!(body["tools"][0].get("cache_control").is_none());
+        assert!(body["system"][0].get("cache_control").is_some());
         assert!(body["system"][1].get("cache_control").is_some());
         assert!(body["system"][2].get("cache_control").is_some());
-        assert!(body["tools"][0].get("cache_control").is_some());
         assert!(
             body["messages"][0]["content"][0]
                 .get("cache_control")
@@ -1445,13 +1558,16 @@ mod tests {
                 ]}
             ]
         });
-        // 6 markers total → drop 2 earliest (both system blocks).
+        // 6 markers total → drop 2. Wire stream order is `tools → system →
+        // messages`, so the 2 earliest are `tools[0]` and `tools[1]`.
+        // System and message markers are preserved (they cache more
+        // content per Anthropic incremental caching).
         let removed = enforce_cache_breakpoint_cap(&mut body);
         assert_eq!(removed, 2);
-        assert!(body["system"][0].get("cache_control").is_none());
-        assert!(body["system"][1].get("cache_control").is_none());
-        assert!(body["tools"][0].get("cache_control").is_some());
-        assert!(body["tools"][1].get("cache_control").is_some());
+        assert!(body["tools"][0].get("cache_control").is_none());
+        assert!(body["tools"][1].get("cache_control").is_none());
+        assert!(body["system"][0].get("cache_control").is_some());
+        assert!(body["system"][1].get("cache_control").is_some());
         assert!(
             body["messages"][0]["content"][0]
                 .get("cache_control")
@@ -1462,6 +1578,140 @@ mod tests {
                 .get("cache_control")
                 .is_some()
         );
+    }
+
+    // =============================================================================
+    // R12 — TTL ordering invariant enforcement
+    // =============================================================================
+    //
+    // Anthropic enforces "longer TTL must NOT come after shorter TTL" across
+    // the wire stream `tools → system → messages`. The R10 fix made
+    // `apply_cache_control` respect `cc.ttl` so all markers it adds use the
+    // same TTL — that closes the most common path. The validator
+    // `enforce_cache_ttl_ordering` is the structural backstop: it kicks in
+    // whenever ANY other source (per-block markers, future cache strategies,
+    // user-supplied SystemBlock TTLs) introduces a shorter-then-longer
+    // sequence.
+
+    #[test]
+    fn enforce_cache_ttl_ordering_no_op_when_all_same_ttl() {
+        let mut body = json!({
+            "tools": [{"name": "t0", "cache_control": {"type": "ephemeral", "ttl": "1h"}}],
+            "system": [
+                {"type": "text", "text": "s0", "cache_control": {"type": "ephemeral", "ttl": "1h"}},
+                {"type": "text", "text": "s1", "cache_control": {"type": "ephemeral", "ttl": "1h"}}
+            ],
+            "messages": [
+                {"role": "user", "content": [
+                    {"type": "text", "text": "u0", "cache_control": {"type": "ephemeral", "ttl": "1h"}}
+                ]}
+            ]
+        });
+        assert_eq!(enforce_cache_ttl_ordering(&mut body), 0);
+        // All markers preserved.
+        assert!(body["tools"][0].get("cache_control").is_some());
+        assert!(body["system"][0].get("cache_control").is_some());
+        assert!(body["system"][1].get("cache_control").is_some());
+        assert!(
+            body["messages"][0]["content"][0]
+                .get("cache_control")
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn enforce_cache_ttl_ordering_no_op_when_monotonically_non_increasing() {
+        // 1h → 1h → 5m → 5m is valid (each marker's TTL ≤ previous).
+        let mut body = json!({
+            "tools": [{"name": "t0", "cache_control": {"type": "ephemeral", "ttl": "1h"}}],
+            "system": [
+                {"type": "text", "text": "s0", "cache_control": {"type": "ephemeral", "ttl": "1h"}},
+                {"type": "text", "text": "s1", "cache_control": {"type": "ephemeral", "ttl": "5m"}}
+            ],
+            "messages": [
+                {"role": "user", "content": [
+                    {"type": "text", "text": "u0", "cache_control": {"type": "ephemeral", "ttl": "5m"}}
+                ]}
+            ]
+        });
+        assert_eq!(enforce_cache_ttl_ordering(&mut body), 0);
+    }
+
+    #[test]
+    fn enforce_cache_ttl_ordering_drops_violation_in_system() {
+        // tools=5m, system[0]=1h ← VIOLATION (1h after 5m).
+        // This is the EXACT shape of the live API failure observed in R10.
+        let mut body = json!({
+            "tools": [{"name": "t0", "cache_control": {"type": "ephemeral", "ttl": "5m"}}],
+            "system": [
+                {"type": "text", "text": "s0", "cache_control": {"type": "ephemeral", "ttl": "1h"}},
+                {"type": "text", "text": "s1", "cache_control": {"type": "ephemeral", "ttl": "1h"}}
+            ],
+            "messages": []
+        });
+        let dropped = enforce_cache_ttl_ordering(&mut body);
+        assert_eq!(dropped, 2, "both 1h markers should be dropped");
+        assert!(body["tools"][0].get("cache_control").is_some());
+        assert!(body["system"][0].get("cache_control").is_none());
+        assert!(body["system"][1].get("cache_control").is_none());
+    }
+
+    #[test]
+    fn enforce_cache_ttl_ordering_drops_violation_in_messages() {
+        // system=5m, messages[0]=1h ← VIOLATION.
+        let mut body = json!({
+            "system": [{"type": "text", "text": "s0", "cache_control": {"type": "ephemeral", "ttl": "5m"}}],
+            "messages": [
+                {"role": "user", "content": [
+                    {"type": "text", "text": "u0", "cache_control": {"type": "ephemeral", "ttl": "1h"}}
+                ]}
+            ]
+        });
+        let dropped = enforce_cache_ttl_ordering(&mut body);
+        assert_eq!(dropped, 1);
+        assert!(body["system"][0].get("cache_control").is_some());
+        assert!(
+            body["messages"][0]["content"][0]
+                .get("cache_control")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn enforce_cache_ttl_ordering_treats_missing_ttl_as_default_5m() {
+        // No-ttl markers default to 5m on the API side. A 1h marker AFTER
+        // a no-ttl marker is still a violation.
+        let mut body = json!({
+            "tools": [{"name": "t0", "cache_control": {"type": "ephemeral"}}],
+            "system": [{"type": "text", "text": "s0", "cache_control": {"type": "ephemeral", "ttl": "1h"}}]
+        });
+        let dropped = enforce_cache_ttl_ordering(&mut body);
+        assert_eq!(dropped, 1);
+        assert!(body["system"][0].get("cache_control").is_none());
+    }
+
+    #[test]
+    fn enforce_cache_ttl_ordering_no_op_when_all_no_ttl() {
+        // All markers without an explicit TTL (= all default to 5m). Valid.
+        let mut body = json!({
+            "tools": [{"name": "t0", "cache_control": {"type": "ephemeral"}}],
+            "system": [{"type": "text", "text": "s0", "cache_control": {"type": "ephemeral"}}],
+            "messages": [
+                {"role": "user", "content": [
+                    {"type": "text", "text": "u0", "cache_control": {"type": "ephemeral"}}
+                ]}
+            ]
+        });
+        assert_eq!(enforce_cache_ttl_ordering(&mut body), 0);
+    }
+
+    #[test]
+    fn ttl_to_seconds_known_values() {
+        assert_eq!(ttl_to_seconds(None), 300);
+        assert_eq!(ttl_to_seconds(Some("5m")), 300);
+        assert_eq!(ttl_to_seconds(Some("1h")), 3600);
+        // Unknown values fall back to the API default (5m).
+        assert_eq!(ttl_to_seconds(Some("garbage")), 300);
     }
 
     /// R10-fix-4 — `apply_cache_control` propagates `cc.ttl` to all marker

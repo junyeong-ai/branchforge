@@ -4,7 +4,21 @@ use std::collections::HashMap;
 
 use crate::agent::BetaConfig;
 
-pub const DEFAULT_USER_AGENT: &str = "claude-cli/2.0.76 (external, cli)";
+/// User-agent sent on Claude Code OAuth requests.
+///
+/// The Anthropic OAuth-enabled endpoint validates the `claude-cli/<version>`
+/// prefix as part of the OAuth-app allowlist, so we keep the original CLI
+/// identifier first. The `branchforge/<version>` suffix follows standard
+/// HTTP user-agent chaining (RFC 9110 §10.1.5: `User-Agent = product
+/// *( RWS ( product / comment ) )`) so observers — proxies, tracing
+/// dashboards, abuse-detection — can still identify the actual SDK
+/// making the call. The branchforge version is read from
+/// `CARGO_PKG_VERSION` at compile time so the suffix stays in sync with
+/// Cargo.toml automatically.
+pub const DEFAULT_USER_AGENT: &str = concat!(
+    "claude-cli/2.0.76 (external, cli) branchforge/",
+    env!("CARGO_PKG_VERSION"),
+);
 pub const DEFAULT_APP_IDENTIFIER: &str = "cli";
 pub const CLAUDE_CODE_BETA: &str = "claude-code-20250219";
 
@@ -159,5 +173,31 @@ mod tests {
     fn test_url_params() {
         let config = OAuthConfig::default();
         assert_eq!(config.url_params.get("beta"), Some(&"true".to_string()));
+    }
+
+    /// The `claude-cli/<version>` prefix is required by the Anthropic
+    /// OAuth-enabled endpoint (it gates OAuth acceptance on the CLI
+    /// allowlist). Removing or reordering it would break the live OAuth
+    /// flow — pin the contract here so a future refactor can't silently
+    /// drop the prefix.
+    #[test]
+    fn user_agent_starts_with_claude_cli_prefix() {
+        assert!(
+            DEFAULT_USER_AGENT.starts_with("claude-cli/"),
+            "Anthropic OAuth requires the claude-cli/ prefix; got: {DEFAULT_USER_AGENT}"
+        );
+    }
+
+    /// The chained `branchforge/<version>` suffix lets observers identify
+    /// the actual SDK behind the OAuth call. The version must come from
+    /// `CARGO_PKG_VERSION` so it stays in sync with Cargo.toml — hard-
+    /// coded version strings drift the moment we bump the crate.
+    #[test]
+    fn user_agent_includes_branchforge_version_from_cargo() {
+        let expected_suffix = format!("branchforge/{}", env!("CARGO_PKG_VERSION"));
+        assert!(
+            DEFAULT_USER_AGENT.contains(&expected_suffix),
+            "expected `{expected_suffix}` in DEFAULT_USER_AGENT, got: {DEFAULT_USER_AGENT}"
+        );
     }
 }
