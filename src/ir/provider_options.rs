@@ -64,24 +64,68 @@ pub struct AnthropicOptions {
     pub service_tier: Option<String>,
 }
 
-/// How prompt caching markers are applied across the request.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+/// Request-level cache breakpoint configuration.
+///
+/// Each flag controls a separate cache breakpoint that the codec inserts
+/// at encode time. Combinations are independent: any subset is valid.
+/// The 8 named cache strategies in the agent layer map directly to flag
+/// combinations here.
+///
+/// For per-block cache markers (e.g., on a specific [`crate::ir::SystemBlock`]),
+/// use [`CacheMarker`] instead.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CacheControl {
-    pub mode: CacheControlMode,
+    /// Mark the last block of the system prompt as a cache breakpoint.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub system: bool,
+    /// Mark the last tool definition as a cache breakpoint.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub tools: bool,
+    /// Mark the last content block of the last message as a cache breakpoint
+    /// (the conversation tail).
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub conversation: bool,
     /// TTL hint (`"5m"`, `"1h"`). Provider may ignore.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ttl: Option<String>,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum CacheControlMode {
-    /// Mark the system prompt as cacheable.
-    System,
-    /// Mark each tool definition as cacheable.
-    Tools,
-    /// Mark the system prompt and the most recent user turn boundary.
-    SystemAndConversation,
+impl CacheControl {
+    /// `true` if any cache breakpoint is enabled.
+    pub fn is_active(&self) -> bool {
+        self.system || self.tools || self.conversation
+    }
+}
+
+/// Per-block cache marker.
+///
+/// Attached to an individual content block (e.g. [`crate::ir::SystemBlock`])
+/// to mark it as a cache point. The presence of `Some(CacheMarker)` is the
+/// signal; the `ttl` is an optional hint.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CacheMarker {
+    /// TTL hint (`"5m"`, `"1h"`). Provider may ignore.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ttl: Option<String>,
+}
+
+impl CacheMarker {
+    /// Create a marker with no explicit TTL (provider default).
+    pub fn ephemeral() -> Self {
+        Self { ttl: None }
+    }
+
+    /// Create a marker with the given TTL hint (`"5m"`, `"1h"`).
+    pub fn with_ttl(ttl: impl Into<String>) -> Self {
+        Self {
+            ttl: Some(ttl.into()),
+        }
+    }
+}
+
+#[inline]
+fn is_false(b: &bool) -> bool {
+    !*b
 }
 
 // =============================================================================
@@ -208,8 +252,10 @@ mod tests {
     fn anthropic_options_round_trip() {
         let opts = AnthropicOptions {
             cache_control: Some(CacheControl {
-                mode: CacheControlMode::SystemAndConversation,
+                system: true,
+                conversation: true,
                 ttl: Some("5m".into()),
+                ..Default::default()
             }),
             beta_features: vec!["context-1m-2025-08-07".into()],
             service_tier: None,
@@ -234,11 +280,32 @@ mod tests {
     }
 
     #[test]
-    fn cache_control_mode_snake_case() {
-        let m = CacheControlMode::SystemAndConversation;
-        assert_eq!(
-            serde_json::to_string(&m).unwrap(),
-            "\"system_and_conversation\""
-        );
+    fn cache_control_default_is_inactive() {
+        let cc = CacheControl::default();
+        assert!(!cc.is_active());
+        let cc = CacheControl {
+            system: true,
+            ..Default::default()
+        };
+        assert!(cc.is_active());
+    }
+
+    #[test]
+    fn cache_control_serde_omits_false_flags() {
+        let cc = CacheControl {
+            system: true,
+            ..Default::default()
+        };
+        let j = serde_json::to_string(&cc).unwrap();
+        // Only `system: true` should appear; tools/conversation default to false.
+        assert_eq!(j, r#"{"system":true}"#);
+    }
+
+    #[test]
+    fn cache_marker_round_trip() {
+        let m = CacheMarker::with_ttl("1h");
+        let j = serde_json::to_string(&m).unwrap();
+        let back: CacheMarker = serde_json::from_str(&j).unwrap();
+        assert_eq!(m, back);
     }
 }

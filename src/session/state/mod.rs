@@ -63,6 +63,22 @@ impl ContentOverrides {
 
 const MAX_COMPACT_HISTORY_SIZE: usize = 50;
 
+/// Compute the total context window tokens consumed by a usage record.
+///
+/// Counts every token that occupies the model's context window:
+/// fresh input plus cache reads plus cache writes. Used for compaction
+/// triggering — when this value exceeds the configured threshold, the
+/// session is compacted.
+///
+/// Note: this differs from `ir::Usage::billable_input_tokens()` which
+/// returns only the fresh input portion (used for cost calculation).
+#[inline]
+fn context_window_usage(usage: &crate::ir::Usage) -> u64 {
+    usage.input_tokens
+        + usage.cached_input_tokens.unwrap_or(0)
+        + usage.cache_creation_tokens.unwrap_or(0)
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Session {
     pub id: SessionId,
@@ -532,9 +548,7 @@ impl Session {
         let mut msg = SessionMessage::assistant(content);
         msg.metadata = metadata;
         if let Some(u) = usage {
-            self.current_input_tokens = u.input_tokens
-                + u.cached_input_tokens.unwrap_or(0)
-                + u.cache_creation_tokens.unwrap_or(0);
+            self.current_input_tokens = context_window_usage(&u);
             msg = msg.usage(u);
         }
         self.add_message(msg)
@@ -575,7 +589,7 @@ impl Session {
     }
 
     pub fn update_usage(&mut self, usage: &crate::ir::Usage) {
-        self.current_input_tokens = usage.input_tokens + usage.cached_input_tokens.unwrap_or(0);
+        self.current_input_tokens = context_window_usage(usage);
         self.total_usage.add(usage);
     }
 

@@ -135,8 +135,8 @@ impl ModelCodec for BedrockConverseCodec {
         if let Some(sp) = &request.system {
             if sp.has_block_metadata() {
                 warnings.push(ModelWarning::lossy(
-                    "system.cache_control",
-                    "bedrock-converse routes cache_control through additionalModelRequestFields",
+                    "system.cache_marker",
+                    "bedrock-converse does not preserve per-block cache markers",
                 ));
             }
             body["system"] = json!([{"text": sp.flatten()}]);

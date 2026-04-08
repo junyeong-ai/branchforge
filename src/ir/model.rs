@@ -257,7 +257,7 @@ impl SystemPrompt {
     pub fn has_block_metadata(&self) -> bool {
         match self {
             SystemPrompt::Text(_) => false,
-            SystemPrompt::Blocks(blocks) => blocks.iter().any(|b| b.cache_control.is_some()),
+            SystemPrompt::Blocks(blocks) => blocks.iter().any(|b| b.cache_marker.is_some()),
         }
     }
 }
@@ -278,20 +278,18 @@ impl From<&str> for SystemPrompt {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SystemBlock {
     pub text: String,
-    /// Anthropic `cache_control` marker. Lossy on every other codec.
+    /// Per-block cache marker. Lossy on every codec that does not support
+    /// per-block caching (currently only Anthropic Messages does).
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub cache_control: Option<super::provider_options::CacheControl>,
+    pub cache_marker: Option<super::provider_options::CacheMarker>,
 }
 
 impl SystemBlock {
-    /// Create a block with caching enabled (default TTL).
+    /// Create a block with caching enabled (provider-default TTL).
     pub fn cached(text: impl Into<String>) -> Self {
         Self {
             text: text.into(),
-            cache_control: Some(super::provider_options::CacheControl {
-                mode: super::provider_options::CacheControlMode::System,
-                ttl: None,
-            }),
+            cache_marker: Some(super::provider_options::CacheMarker::ephemeral()),
         }
     }
 
@@ -299,10 +297,7 @@ impl SystemBlock {
     pub fn cached_with_ttl(text: impl Into<String>, ttl: impl Into<String>) -> Self {
         Self {
             text: text.into(),
-            cache_control: Some(super::provider_options::CacheControl {
-                mode: super::provider_options::CacheControlMode::System,
-                ttl: Some(ttl.into()),
-            }),
+            cache_marker: Some(super::provider_options::CacheMarker::with_ttl(ttl)),
         }
     }
 
@@ -310,7 +305,7 @@ impl SystemBlock {
     pub fn uncached(text: impl Into<String>) -> Self {
         Self {
             text: text.into(),
-            cache_control: None,
+            cache_marker: None,
         }
     }
 }
@@ -416,11 +411,11 @@ mod tests {
         let sp = SystemPrompt::Blocks(vec![
             SystemBlock {
                 text: "first".into(),
-                cache_control: None,
+                cache_marker: None,
             },
             SystemBlock {
                 text: "second".into(),
-                cache_control: None,
+                cache_marker: None,
             },
         ]);
         assert_eq!(sp.flatten(), "first\n\nsecond");
@@ -428,14 +423,11 @@ mod tests {
     }
 
     #[test]
-    fn system_prompt_has_block_metadata_when_cache_control_set() {
-        use super::super::provider_options::{CacheControl, CacheControlMode};
+    fn system_prompt_has_block_metadata_when_cache_marker_set() {
+        use super::super::provider_options::CacheMarker;
         let sp = SystemPrompt::Blocks(vec![SystemBlock {
             text: "x".into(),
-            cache_control: Some(CacheControl {
-                mode: CacheControlMode::System,
-                ttl: None,
-            }),
+            cache_marker: Some(CacheMarker::ephemeral()),
         }]);
         assert!(sp.has_block_metadata());
     }

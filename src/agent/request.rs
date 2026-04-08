@@ -112,10 +112,15 @@ impl RequestBuilder {
             }
         }
 
-        // Build cache control from config
-        let cache_control = if self.cache_config.strategy.cache_static() {
+        // Map agent CacheStrategy → IR CacheControl flag set.
+        // Each flag controls a separate cache breakpoint; all 8 named
+        // strategies are expressible as flag combinations.
+        let strategy = self.cache_config.strategy;
+        let cache_control = if strategy.is_enabled() {
             Some(ir::CacheControl {
-                mode: ir::CacheControlMode::SystemAndConversation,
+                system: strategy.cache_static(),
+                tools: strategy.cache_tools(),
+                conversation: strategy.cache_conversation(),
                 ttl: Some(self.cache_config.static_ttl.clone()),
             })
         } else {
@@ -394,10 +399,10 @@ mod tests {
         match system {
             SystemPrompt::Blocks(blocks) => {
                 assert!(blocks.iter().any(|block| {
-                    block.text.contains("Built-in Tools") && block.cache_control.is_some()
+                    block.text.contains("Built-in Tools") && block.cache_marker.is_some()
                 }));
                 assert!(blocks.iter().any(|block| {
-                    !block.text.contains("Built-in Tools") && block.cache_control.is_none()
+                    !block.text.contains("Built-in Tools") && block.cache_marker.is_none()
                 }));
             }
             _ => panic!("expected system prompt blocks"),
@@ -426,16 +431,16 @@ mod tests {
         match system {
             SystemPrompt::Blocks(blocks) => {
                 assert!(blocks.iter().any(|block| {
-                    block.text.contains("Project Memory") && block.cache_control.is_some()
+                    block.text.contains("Project Memory") && block.cache_marker.is_some()
                 }));
                 assert!(blocks.iter().any(|block| {
-                    block.text.contains("Available Skills") && block.cache_control.is_some()
+                    block.text.contains("Available Skills") && block.cache_marker.is_some()
                 }));
                 assert!(blocks.iter().any(|block| {
-                    block.text.contains("Built-in Tools") && block.cache_control.is_some()
+                    block.text.contains("Built-in Tools") && block.cache_marker.is_some()
                 }));
                 assert!(blocks.iter().any(|block| {
-                    block.text.contains("Active Rules") && block.cache_control.is_none()
+                    block.text.contains("Active Rules") && block.cache_marker.is_none()
                 }));
             }
             _ => panic!("expected system prompt blocks"),

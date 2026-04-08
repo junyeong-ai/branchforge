@@ -424,8 +424,12 @@ fn encode_system_prompt(sp: &SystemPrompt) -> Value {
                 .iter()
                 .map(|b| {
                     let mut obj = json!({"type": "text", "text": b.text});
-                    if let Some(_cc) = &b.cache_control {
-                        obj["cache_control"] = json!({"type": "ephemeral"});
+                    if let Some(marker) = &b.cache_marker {
+                        let mut cc = json!({"type": "ephemeral"});
+                        if let Some(ttl) = &marker.ttl {
+                            cc["ttl"] = json!(ttl);
+                        }
+                        obj["cache_control"] = cc;
                     }
                     obj
                 })
@@ -455,13 +459,9 @@ fn encode_tool_choice(choice: &crate::ir::ToolChoice) -> Value {
 }
 
 fn apply_cache_control(body: &mut Value, cc: &crate::ir::CacheControl) {
-    use crate::ir::CacheControlMode;
     let marker = json!({"type": "ephemeral"});
-    let target_messages = matches!(cc.mode, CacheControlMode::SystemAndConversation);
-    let target_system = !matches!(cc.mode, CacheControlMode::Tools);
-    let target_tools = matches!(cc.mode, CacheControlMode::Tools);
 
-    if target_system
+    if cc.system
         && let Some(system) = body.get_mut("system")
         && let Some(arr) = system.as_array_mut()
         && let Some(last) = arr.last_mut()
@@ -469,14 +469,14 @@ fn apply_cache_control(body: &mut Value, cc: &crate::ir::CacheControl) {
     {
         obj.insert("cache_control".into(), marker.clone());
     }
-    if target_tools
+    if cc.tools
         && let Some(tools) = body.get_mut("tools").and_then(Value::as_array_mut)
         && let Some(last) = tools.last_mut()
         && let Some(obj) = last.as_object_mut()
     {
         obj.insert("cache_control".into(), marker.clone());
     }
-    if target_messages
+    if cc.conversation
         && let Some(messages) = body.get_mut("messages").and_then(Value::as_array_mut)
         && let Some(last) = messages.last_mut()
         && let Some(content) = last.get_mut("content").and_then(Value::as_array_mut)
@@ -773,8 +773,8 @@ fn decode_error_event(v: &Value) -> Vec<ModelStreamChunk> {
 mod tests {
     use super::*;
     use crate::ir::{
-        AnthropicOptions, CacheControl, CacheControlMode, Continuation, ModelSettings,
-        ProviderOptions, ReasoningSettings,
+        AnthropicOptions, CacheControl, Continuation, ModelSettings, ProviderOptions,
+        ReasoningSettings,
     };
 
     fn req(messages: Vec<Message>) -> ModelRequest {
@@ -926,12 +926,12 @@ mod tests {
         let mut r = req(vec![Message::user("hi")]);
         r.system = Some(SystemPrompt::Blocks(vec![crate::ir::SystemBlock {
             text: "sys".into(),
-            cache_control: None,
+            cache_marker: None,
         }]));
         r.provider_options.anthropic = Some(AnthropicOptions {
             cache_control: Some(CacheControl {
-                mode: CacheControlMode::System,
-                ttl: None,
+                system: true,
+                ..Default::default()
             }),
             ..Default::default()
         });

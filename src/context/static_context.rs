@@ -175,9 +175,9 @@ mod tests {
     #[test]
     fn test_system_block_cached_with_ttl() {
         let block = SystemBlock::cached_with_ttl("Hello", "1h");
-        assert!(block.cache_control.is_some());
-        let cache_ctrl = block.cache_control.unwrap();
-        assert_eq!(cache_ctrl.ttl, Some("1h".to_string()));
+        assert!(block.cache_marker.is_some());
+        let marker = block.cache_marker.unwrap();
+        assert_eq!(marker.ttl, Some("1h".to_string()));
         assert_eq!(block.text, "Hello");
     }
 

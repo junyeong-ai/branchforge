@@ -128,8 +128,8 @@ impl ModelCodec for GeminiGenerateCodec {
         if let Some(sp) = &request.system {
             if sp.has_block_metadata() {
                 warnings.push(ModelWarning::lossy(
-                    "system.cache_control",
-                    "gemini-generate does not support per-block cache_control",
+                    "system.cache_marker",
+                    "gemini-generate does not support per-block cache markers",
                 ));
             }
             body["systemInstruction"] = json!({
@@ -774,21 +774,18 @@ mod tests {
 
     #[test]
     fn encode_system_block_metadata_emits_lossy_warning() {
-        use crate::ir::{CacheControl, CacheControlMode, SystemBlock};
+        use crate::ir::{CacheMarker, SystemBlock};
         let c = GeminiGenerateCodec::new();
         let mut r = req(vec![Message::user("hi")]);
         r.system = Some(SystemPrompt::Blocks(vec![SystemBlock {
             text: "x".into(),
-            cache_control: Some(CacheControl {
-                mode: CacheControlMode::System,
-                ttl: None,
-            }),
+            cache_marker: Some(CacheMarker::ephemeral()),
         }]));
         let enc = c.encode_request(&r, InvocationMode::Unary).unwrap();
         assert!(enc
             .warnings
             .iter()
-            .any(|w| matches!(w, ModelWarning::LossyEncode { field, .. } if field == "system.cache_control")));
+            .any(|w| matches!(w, ModelWarning::LossyEncode { field, .. } if field == "system.cache_marker")));
     }
 
     #[test]

@@ -330,10 +330,10 @@ fn legacy_system_to_ir(sp: &types::SystemPrompt) -> ir::SystemPrompt {
                 .iter()
                 .map(|b| ir::SystemBlock {
                     text: b.text.clone(),
-                    cache_control: b.cache_control.as_ref().map(|_| ir::CacheControl {
-                        mode: ir::CacheControlMode::System,
-                        ttl: None,
-                    }),
+                    cache_marker: b
+                        .cache_control
+                        .as_ref()
+                        .map(|_| ir::CacheMarker::ephemeral()),
                 })
                 .collect(),
         ),

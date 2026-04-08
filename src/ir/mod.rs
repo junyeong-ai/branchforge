@@ -65,8 +65,8 @@ pub use model::{
     SystemPrompt, ToolChoice, ToolDefinition,
 };
 pub use provider_options::{
-    AnthropicOptions, BedrockGuardrail, BedrockOptions, CacheControl, CacheControlMode,
-    GeminiOptions, OpenAiOptions, ProviderOptions, ReasoningEffort, SafetySetting, VertexOptions,
+    AnthropicOptions, BedrockGuardrail, BedrockOptions, CacheControl, CacheMarker, GeminiOptions,
+    OpenAiOptions, ProviderOptions, ReasoningEffort, SafetySetting, VertexOptions,
 };
 pub use settings::{ModelSettings, ReasoningSettings};
 pub use stream::{ModelStreamChunk, PartialUsage, StreamDecodeState, StreamFraming};
