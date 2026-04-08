@@ -68,7 +68,12 @@ const CAPABILITIES: ProviderCapabilities = ProviderCapabilities {
     reasoning: ReasoningSupport {
         mode: Support::Native,
         exposes_text: true,
-        exposes_tokens: true,
+        // The Anthropic Messages API bills extended-thinking tokens as
+        // part of `output_tokens` — there is no separate
+        // `reasoning_tokens` field on the response. `decode_usage`
+        // therefore sets `usage.reasoning_tokens = None`, and this
+        // capability flag must report the same.
+        exposes_tokens: false,
         requires_signature_passthrough: true,
     },
     system_prompt: SystemPromptShape::TopLevel,

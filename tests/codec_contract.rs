@@ -1408,3 +1408,128 @@ mod capability_honesty_reasoning {
         assert_reasoning_honesty(&BedrockConverseCodec::new());
     }
 }
+
+// =============================================================================
+// Capability Honesty (decode-side: reasoning.exposes_tokens)
+// =============================================================================
+//
+// The encode-side honesty matrix above only tests that codecs emit the
+// right wire field on the request side. The `exposes_tokens` flag is a
+// claim about the *response* side: whether the provider reports a
+// separate reasoning token count that the decoder can put into
+// `usage.reasoning_tokens`.
+//
+// R9 found that AnthropicMessagesCodec and BedrockConverseCodec both
+// declared `exposes_tokens: true` even though their `decode_usage`
+// hardcodes `reasoning_tokens: None` (because the underlying APIs
+// roll thinking tokens into `output_tokens` with no separate field).
+// These tests pin the bidirectional consistency so the same lie cannot
+// be reintroduced.
+
+mod capability_honesty_decode_reasoning_tokens {
+    use super::*;
+
+    /// Best-effort response payload that exercises every codec's
+    /// reasoning-token decode path (where the wire format actually has
+    /// such a field). For codecs whose wire format has no reasoning
+    /// token field (Anthropic, Bedrock), the payload simply omits it
+    /// and the test asserts both sides agree on `false / None`.
+    fn assert_decode_exposes_tokens<C: ModelCodec>(codec: &C, response: Value) {
+        let resp = codec
+            .decode_response(response, InvocationMode::Unary)
+            .unwrap_or_else(|e| panic!("{} decode failed: {e}", codec.id()));
+        let cap_says_exposed = codec.capabilities().reasoning.exposes_tokens;
+        let decoder_emitted = resp.usage.reasoning_tokens.is_some();
+        assert_eq!(
+            cap_says_exposed,
+            decoder_emitted,
+            "{}: reasoning.exposes_tokens={} but decode_usage emitted reasoning_tokens={:?}",
+            codec.id(),
+            cap_says_exposed,
+            resp.usage.reasoning_tokens
+        );
+    }
+
+    #[test]
+    fn anthropic_decode_exposes_tokens_consistency() {
+        // Anthropic Messages API has no reasoning_tokens wire field —
+        // thinking is billed as part of output_tokens.
+        assert_decode_exposes_tokens(
+            &AnthropicMessagesCodec::new(),
+            json!({
+                "id": "msg_1",
+                "model": "x",
+                "content": [{"type": "text", "text": "ok"}],
+                "stop_reason": "end_turn",
+                "usage": {"input_tokens": 10, "output_tokens": 5}
+            }),
+        );
+    }
+
+    #[test]
+    fn openai_chat_decode_exposes_tokens_consistency() {
+        // o-series exposes `completion_tokens_details.reasoning_tokens`.
+        assert_decode_exposes_tokens(
+            &OpenAiChatCodec::new(),
+            json!({
+                "id": "x",
+                "model": "x",
+                "choices": [{"message": {"role": "assistant", "content": "ok"}, "finish_reason": "stop"}],
+                "usage": {
+                    "prompt_tokens": 100,
+                    "completion_tokens": 20,
+                    "completion_tokens_details": {"reasoning_tokens": 50}
+                }
+            }),
+        );
+    }
+
+    #[test]
+    fn openai_responses_decode_exposes_tokens_consistency() {
+        // o-series Responses exposes `output_tokens_details.reasoning_tokens`.
+        assert_decode_exposes_tokens(
+            &OpenAiResponsesCodec::new(),
+            json!({
+                "id": "resp_1",
+                "model": "o3",
+                "status": "completed",
+                "output": [{"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "ok"}]}],
+                "usage": {
+                    "input_tokens": 50,
+                    "output_tokens": 10,
+                    "output_tokens_details": {"reasoning_tokens": 200}
+                }
+            }),
+        );
+    }
+
+    #[test]
+    fn gemini_decode_exposes_tokens_consistency() {
+        // Gemini exposes `usageMetadata.thoughtsTokenCount`.
+        assert_decode_exposes_tokens(
+            &GeminiGenerateCodec::new(),
+            json!({
+                "candidates": [{"content": {"parts": [{"text": "ok"}]}, "finishReason": "STOP"}],
+                "usageMetadata": {
+                    "promptTokenCount": 8,
+                    "candidatesTokenCount": 4,
+                    "thoughtsTokenCount": 99
+                }
+            }),
+        );
+    }
+
+    #[test]
+    fn bedrock_decode_exposes_tokens_consistency() {
+        // Bedrock Converse has no reasoning_tokens wire field — thinking
+        // is billed as part of outputTokens on the underlying model.
+        assert_decode_exposes_tokens(
+            &BedrockConverseCodec::new(),
+            json!({
+                "output": {"message": {"role": "assistant", "content": [{"text": "ok"}]}},
+                "stopReason": "end_turn",
+                "usage": {"inputTokens": 10, "outputTokens": 5}
+            }),
+        );
+    }
+}

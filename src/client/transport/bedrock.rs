@@ -363,7 +363,7 @@ mod tests {
     }
 
     #[test]
-    fn classify_error_throttling_exception() {
+    fn classify_error_throttling() {
         let t = fake_transport("us-east-1");
         let (kind, hint) = t.classify_error(
             429,
@@ -415,7 +415,7 @@ mod tests {
     }
 
     #[test]
-    fn classify_error_validation_exception() {
+    fn classify_error_validation() {
         let t = fake_transport("us-east-1");
         let (kind, hint) = t.classify_error(
             400,

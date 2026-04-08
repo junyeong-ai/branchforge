@@ -82,7 +82,12 @@ const CAPABILITIES: ProviderCapabilities = ProviderCapabilities {
         // Bedrock supports thinking via additionalModelRequestFields).
         mode: Support::Emulated,
         exposes_text: true,
-        exposes_tokens: true,
+        // Bedrock Converse routes Anthropic Claude requests to the same
+        // model that bills thinking tokens as part of `output_tokens`.
+        // There is no separate `reasoningTokens` field on the Converse
+        // response, so `decode_usage` sets `usage.reasoning_tokens = None`
+        // and this capability flag must agree.
+        exposes_tokens: false,
         requires_signature_passthrough: true,
     },
     system_prompt: SystemPromptShape::TopLevel,

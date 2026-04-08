@@ -41,9 +41,20 @@ impl CredentialProvider for EnvironmentProvider {
     }
 
     async fn resolve(&self) -> Result<Credential> {
-        std::env::var(&self.env_var)
-            .map(Credential::api_key)
-            .map_err(|_| Error::auth(format!("{} not set", self.env_var)))
+        match std::env::var(&self.env_var) {
+            Ok(value) => Ok(Credential::api_key(value)),
+            // `VarError::NotPresent` and `NotUnicode` are very different
+            // failure modes — preserve the distinction so the user knows
+            // whether to set the variable or fix its encoding.
+            Err(std::env::VarError::NotPresent) => {
+                Err(Error::auth(format!("{} not set", self.env_var)))
+            }
+            Err(std::env::VarError::NotUnicode(raw)) => Err(Error::auth(format!(
+                "{} contains invalid UTF-8 ({} bytes)",
+                self.env_var,
+                raw.len()
+            ))),
+        }
     }
 }
 
