@@ -797,11 +797,17 @@ fn ttl_to_seconds(ttl: Option<&str>) -> u64 {
         Ok(n) => n,
         Err(_) => return DEFAULT_SECONDS,
     };
+    // Use `saturating_mul` so absurdly large `n` (e.g. `"99999999999999999d"`
+    // ≈ 1.7e17 days) clamps to `u64::MAX` instead of panicking on
+    // arithmetic overflow in debug mode (or silently wrapping in
+    // release). Saturated values are still strictly larger than any
+    // realistic Anthropic TTL, so the comparison logic in
+    // `normalize_cache_ttl_ordering` keeps producing the right answer.
     match unit_char {
         's' => n,
-        'm' => n * 60,
-        'h' => n * 3600,
-        'd' => n * 86_400,
+        'm' => n.saturating_mul(60),
+        'h' => n.saturating_mul(3600),
+        'd' => n.saturating_mul(86_400),
         // Unknown unit — fall back. The API will reject unknown TTLs
         // with a clearer error than anything we could produce locally.
         _ => DEFAULT_SECONDS,
@@ -1987,6 +1993,43 @@ mod tests {
         // Sanity: the ASCII path still works after the rewrite.
         assert_eq!(ttl_to_seconds(Some("1h")), 3600);
         assert_eq!(ttl_to_seconds(Some("30s")), 30);
+    }
+
+    /// R15 — `ttl_to_seconds` must be **panic-free on arithmetic
+    /// overflow**, not just on UTF-8 boundaries. The R13/R14
+    /// implementation used raw `n * 86_400` which panics in debug
+    /// builds when `n` is large enough that the multiplication
+    /// overflows `u64::MAX` (≈ 1.84e19). For unit `'d'` the threshold
+    /// is `u64::MAX / 86_400 ≈ 2.13e14` days — easily reachable with
+    /// a malicious or copy-paste-typoed input like
+    /// `"99999999999999999d"` (1.7e17). Defensive code must not panic
+    /// on any parseable input.
+    ///
+    /// Fix is `saturating_mul`, which clamps to `u64::MAX` instead of
+    /// panicking. Saturated values are still strictly larger than any
+    /// realistic Anthropic TTL, so the ordering comparison in
+    /// `normalize_cache_ttl_ordering` keeps producing the right answer.
+    #[test]
+    fn ttl_to_seconds_does_not_panic_on_arithmetic_overflow() {
+        // Days unit — overflow threshold ≈ 2.13e14. 1e17 well exceeds.
+        assert_eq!(
+            ttl_to_seconds(Some("99999999999999999d")),
+            u64::MAX,
+            "huge day count must saturate, not panic"
+        );
+
+        // Hours unit — overflow threshold ≈ 5.12e15.
+        assert_eq!(ttl_to_seconds(Some("99999999999999999h")), u64::MAX);
+
+        // Minutes unit — overflow threshold ≈ 3.07e17.
+        assert_eq!(ttl_to_seconds(Some("999999999999999999m")), u64::MAX);
+
+        // Seconds unit cannot overflow (n * 1 = n, always fits in u64).
+        assert_eq!(ttl_to_seconds(Some("18446744073709551615s")), u64::MAX);
+
+        // Realistic-but-large values still produce exact results.
+        assert_eq!(ttl_to_seconds(Some("1000d")), 1000 * 86_400);
+        assert_eq!(ttl_to_seconds(Some("8760h")), 8760 * 3600); // 1 year in hours
     }
 
     /// R10-fix-4 — `apply_cache_control` propagates `cc.ttl` to all marker
