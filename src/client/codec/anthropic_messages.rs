@@ -222,27 +222,33 @@ impl ModelCodec for AnthropicMessagesCodec {
         // are enforced here at the codec level so the agent runtime
         // doesn't have to know about Anthropic-specific limits:
         //
-        // 1. **TTL ordering** must be enforced FIRST. Anthropic rejects
+        // 1. **TTL ordering normalisation** runs FIRST. Anthropic rejects
         //    requests where a longer TTL marker comes after a shorter
         //    TTL marker in the `tools → system → messages` processing
-        //    order. Dropping violators here may reduce the marker count,
-        //    so the cap enforcement runs second on the surviving set.
+        //    order. The normalizer auto-upgrades earlier markers to
+        //    match the longest later TTL — this preserves all markers
+        //    (no cache breakpoints lost) while making the stream
+        //    monotonically non-increasing. Upgrading is semantically
+        //    safe for prompt caching because longer TTL just extends
+        //    cache lifetime; cache hits only match identical prefixes,
+        //    so there is no stale-data risk and Anthropic does not bill
+        //    for cache storage time.
         //
         // 2. **Marker cap** (MAX_CACHE_BREAKPOINTS = 4). Multiple sources
         //    can contribute markers (per-block `cache_marker` on system
         //    blocks, `apply_cache_control` on system/tools/conversation),
         //    so the runtime can easily exceed the cap. Drop the EARLIEST
-        //    surviving markers since later markers cache more content
-        //    (Anthropic incremental caching includes everything before
-        //    the marker).
-        let ttl_violations = enforce_cache_ttl_ordering(&mut body);
-        if ttl_violations > 0 {
+        //    markers in wire stream order since later markers cache more
+        //    content (Anthropic incremental caching includes everything
+        //    before the marker).
+        let upgraded = normalize_cache_ttl_ordering(&mut body);
+        if upgraded > 0 {
             warnings.push(ModelWarning::lossy(
                 "cache_control_ttl",
                 "anthropic-messages requires cache_control TTLs to be \
                  monotonically non-increasing in `tools → system → messages` \
-                 order; dropped markers whose TTL was longer than an earlier \
-                 marker's TTL",
+                 order; auto-upgraded earlier markers to match a later \
+                 marker's longer TTL",
             ));
         }
         let removed = enforce_cache_breakpoint_cap(&mut body);
@@ -659,65 +665,130 @@ fn count_cache_markers(body: &Value) -> usize {
 /// In normal operation, both per-block markers (from
 /// `SystemBlock::cache_marker.ttl`) and `apply_cache_control` markers
 /// (from `cc.ttl`) source their TTL from
-/// `cache_config.static_ttl`, so they trivially agree. This validator
+/// `cache_config.static_ttl`, so they trivially agree. This normalizer
 /// exists to keep the codec robust against:
 ///   - Future refactors that introduce a second TTL source
 ///   - User code that constructs `SystemBlock` instances with mixed TTLs
 ///   - Higher-level cache strategies that intentionally vary TTL per block
 ///
-/// Strategy: walk in wire stream order, track the *minimum* TTL seen so
-/// far. If a later marker's TTL is *longer* than the running minimum,
-/// that's a violation — drop the violating marker (the safest fix that
-/// doesn't silently change a user's chosen TTL on any other marker).
-/// Returns the number of markers dropped so the caller can surface a
-/// `ModelWarning::lossy` for observability.
-fn enforce_cache_ttl_ordering(body: &mut Value) -> usize {
-    let mut min_seconds_so_far: Option<u64> = None;
-    let mut removed = 0_usize;
-
+/// **Strategy — auto-upgrade earlier markers** (NOT drop violators):
+///
+/// Walk in REVERSE wire stream order, tracking the running maximum TTL.
+/// When a marker's TTL is *shorter* than the running maximum, upgrade
+/// it to the maximum so the forward stream becomes monotonically
+/// non-increasing. This preserves ALL markers — high-value system and
+/// message markers (which cache more content) are not lost just because
+/// an earlier tools marker had a shorter TTL.
+///
+/// Why upgrade and not drop:
+///   - Dropping a marker LOSES a cache breakpoint entirely
+///   - Upgrading just extends the cache lifetime — semantically safe
+///     for prompt caching since cache hits only match identical
+///     prefixes (no stale-data risk)
+///   - Anthropic does not bill for cache storage time, only cache
+///     creation and reads, so longer TTL has no cost penalty
+///   - Auto-upgrade honours more user intent: the markers chosen for
+///     specific positions stay where they were, just with a longer
+///     lifetime that satisfies the API constraint
+///
+/// Returns the number of markers whose TTL was upgraded so the caller
+/// can surface a `ModelWarning::lossy` for observability.
+fn normalize_cache_ttl_ordering(body: &mut Value) -> usize {
+    // Pass 1 — collect current TTL strings in wire stream order. We need
+    // two passes because Rust's borrow checker won't let us hold mutable
+    // references across the iterator's reverse walk.
+    let mut current_ttls: Vec<Option<String>> = Vec::new();
     for_each_cache_marker_in_stream_order(body, |obj| {
-        let ttl_str = obj
+        let ttl = obj
             .get("cache_control")
             .and_then(|cc| cc.get("ttl"))
-            .and_then(Value::as_str);
-        let ttl_seconds = ttl_to_seconds(ttl_str);
-
-        match min_seconds_so_far {
-            None => {
-                min_seconds_so_far = Some(ttl_seconds);
-            }
-            Some(min) if ttl_seconds > min => {
-                // Violation: this marker has a longer TTL than an earlier
-                // marker in the stream. Drop it.
-                obj.remove("cache_control");
-                removed += 1;
-            }
-            Some(min) => {
-                // OK: ttl_seconds <= min. Tighten the running minimum.
-                if ttl_seconds < min {
-                    min_seconds_so_far = Some(ttl_seconds);
-                }
-            }
-        }
+            .and_then(Value::as_str)
+            .map(str::to_string);
+        current_ttls.push(ttl);
         CacheMarkerVisit::Continue
     });
 
-    removed
+    if current_ttls.is_empty() {
+        return 0;
+    }
+
+    // Pass 2 — compute target TTLs by walking the collected list in
+    // REVERSE, tracking the running max. Each marker that's shorter than
+    // the max gets upgraded to the max.
+    let mut target_ttls: Vec<Option<String>> = current_ttls.clone();
+    let mut running_max_seconds: u64 = 0;
+    let mut running_max_string: Option<String> = None;
+    for i in (0..target_ttls.len()).rev() {
+        let cur_seconds = ttl_to_seconds(target_ttls[i].as_deref());
+        if cur_seconds > running_max_seconds {
+            running_max_seconds = cur_seconds;
+            running_max_string = target_ttls[i].clone();
+        } else if cur_seconds < running_max_seconds {
+            // This marker's TTL is shorter than a later marker's TTL —
+            // upgrade it. Use the exact string of the longer marker so
+            // we don't introduce a TTL the API doesn't recognise.
+            target_ttls[i] = running_max_string.clone();
+        }
+        // cur_seconds == running_max_seconds → no change needed
+    }
+
+    // Pass 3 — apply target TTLs to markers in stream order.
+    let mut idx = 0_usize;
+    let mut upgraded = 0_usize;
+    for_each_cache_marker_in_stream_order(body, |obj| {
+        let target = target_ttls[idx].as_deref();
+        let current = current_ttls[idx].as_deref();
+        if target != current {
+            // Insert or replace the `ttl` field on this marker's
+            // cache_control object.
+            if let Some(cc) = obj.get_mut("cache_control").and_then(Value::as_object_mut) {
+                match target {
+                    Some(ttl) => {
+                        cc.insert("ttl".into(), Value::String(ttl.to_string()));
+                    }
+                    None => {
+                        cc.remove("ttl");
+                    }
+                }
+                upgraded += 1;
+            }
+        }
+        idx += 1;
+        CacheMarkerVisit::Continue
+    });
+
+    upgraded
 }
 
 /// Convert a `cache_control.ttl` string into seconds for ordering
-/// comparisons. Anthropic currently accepts `"5m"` (default) and `"1h"`;
-/// missing or unknown values are treated as the API default of 5 minutes
-/// (300 seconds), matching what the API itself does when `ttl` is absent.
+/// comparisons. Anthropic currently accepts `"5m"` and `"1h"`, but the
+/// parser is generic over any `<integer><unit>` form (`s` / `m` / `h` /
+/// `d`) so future-added TTL values automatically work without code
+/// changes here. Missing or malformed values fall back to the API
+/// default of 5 minutes (300 seconds).
 fn ttl_to_seconds(ttl: Option<&str>) -> u64 {
-    match ttl {
-        None => 300, // API default when no `ttl` field is present
-        Some("5m") => 300,
-        Some("1h") => 3600,
-        // Unknown values fall back to the default. We don't error here
-        // because the API itself will reject unknown TTLs with a clearer
-        // error than anything we could produce locally.
-        Some(_) => 300,
+    const DEFAULT_SECONDS: u64 = 300;
+    let Some(s) = ttl else {
+        return DEFAULT_SECONDS;
+    };
+    if s.is_empty() {
+        return DEFAULT_SECONDS;
+    }
+    // Split off the trailing unit character. Anthropic-supported units:
+    //   s = seconds, m = minutes, h = hours, d = days
+    let (num_str, unit) = s.split_at(s.len() - 1);
+    let n: u64 = match num_str.parse() {
+        Ok(n) => n,
+        Err(_) => return DEFAULT_SECONDS,
+    };
+    match unit {
+        "s" => n,
+        "m" => n * 60,
+        "h" => n * 3600,
+        "d" => n * 86_400,
+        // Unknown unit — fall back. The API will reject unknown TTLs
+        // with a clearer error than anything we could produce locally.
+        _ => DEFAULT_SECONDS,
     }
 }
 
@@ -1581,20 +1652,20 @@ mod tests {
     }
 
     // =============================================================================
-    // R12 — TTL ordering invariant enforcement
+    // R12/R13 — TTL ordering invariant enforcement (auto-upgrade strategy)
     // =============================================================================
     //
     // Anthropic enforces "longer TTL must NOT come after shorter TTL" across
     // the wire stream `tools → system → messages`. The R10 fix made
     // `apply_cache_control` respect `cc.ttl` so all markers it adds use the
-    // same TTL — that closes the most common path. The validator
-    // `enforce_cache_ttl_ordering` is the structural backstop: it kicks in
-    // whenever ANY other source (per-block markers, future cache strategies,
-    // user-supplied SystemBlock TTLs) introduces a shorter-then-longer
-    // sequence.
+    // same TTL — that closes the most common path. The R12 normalizer is the
+    // structural backstop, and the R13 strategy switch (drop → auto-upgrade)
+    // makes it preserve all cache breakpoints by upgrading earlier markers'
+    // TTLs to match later markers' longer TTLs instead of dropping the
+    // longer markers.
 
     #[test]
-    fn enforce_cache_ttl_ordering_no_op_when_all_same_ttl() {
+    fn normalize_cache_ttl_ordering_no_op_when_all_same_ttl() {
         let mut body = json!({
             "tools": [{"name": "t0", "cache_control": {"type": "ephemeral", "ttl": "1h"}}],
             "system": [
@@ -1607,20 +1678,19 @@ mod tests {
                 ]}
             ]
         });
-        assert_eq!(enforce_cache_ttl_ordering(&mut body), 0);
-        // All markers preserved.
-        assert!(body["tools"][0].get("cache_control").is_some());
-        assert!(body["system"][0].get("cache_control").is_some());
-        assert!(body["system"][1].get("cache_control").is_some());
-        assert!(
-            body["messages"][0]["content"][0]
-                .get("cache_control")
-                .is_some()
+        assert_eq!(normalize_cache_ttl_ordering(&mut body), 0);
+        // All markers preserved with their original TTL.
+        assert_eq!(body["tools"][0]["cache_control"]["ttl"], "1h");
+        assert_eq!(body["system"][0]["cache_control"]["ttl"], "1h");
+        assert_eq!(body["system"][1]["cache_control"]["ttl"], "1h");
+        assert_eq!(
+            body["messages"][0]["content"][0]["cache_control"]["ttl"],
+            "1h"
         );
     }
 
     #[test]
-    fn enforce_cache_ttl_ordering_no_op_when_monotonically_non_increasing() {
+    fn normalize_cache_ttl_ordering_no_op_when_monotonically_non_increasing() {
         // 1h → 1h → 5m → 5m is valid (each marker's TTL ≤ previous).
         let mut body = json!({
             "tools": [{"name": "t0", "cache_control": {"type": "ephemeral", "ttl": "1h"}}],
@@ -1634,13 +1704,14 @@ mod tests {
                 ]}
             ]
         });
-        assert_eq!(enforce_cache_ttl_ordering(&mut body), 0);
+        assert_eq!(normalize_cache_ttl_ordering(&mut body), 0);
     }
 
     #[test]
-    fn enforce_cache_ttl_ordering_drops_violation_in_system() {
-        // tools=5m, system[0]=1h ← VIOLATION (1h after 5m).
-        // This is the EXACT shape of the live API failure observed in R10.
+    fn normalize_cache_ttl_ordering_upgrades_earlier_markers_in_system() {
+        // tools=5m, system[0..2]=1h ← violation (1h after 5m).
+        // R13 strategy: upgrade tools to 1h instead of dropping system markers.
+        // Result: tools=1h, system[0..2]=1h. ALL markers preserved.
         let mut body = json!({
             "tools": [{"name": "t0", "cache_control": {"type": "ephemeral", "ttl": "5m"}}],
             "system": [
@@ -1649,16 +1720,17 @@ mod tests {
             ],
             "messages": []
         });
-        let dropped = enforce_cache_ttl_ordering(&mut body);
-        assert_eq!(dropped, 2, "both 1h markers should be dropped");
-        assert!(body["tools"][0].get("cache_control").is_some());
-        assert!(body["system"][0].get("cache_control").is_none());
-        assert!(body["system"][1].get("cache_control").is_none());
+        let upgraded = normalize_cache_ttl_ordering(&mut body);
+        assert_eq!(upgraded, 1, "only tools[0] should be upgraded");
+        assert_eq!(body["tools"][0]["cache_control"]["ttl"], "1h");
+        assert_eq!(body["system"][0]["cache_control"]["ttl"], "1h");
+        assert_eq!(body["system"][1]["cache_control"]["ttl"], "1h");
     }
 
     #[test]
-    fn enforce_cache_ttl_ordering_drops_violation_in_messages() {
-        // system=5m, messages[0]=1h ← VIOLATION.
+    fn normalize_cache_ttl_ordering_upgrades_earlier_markers_in_messages() {
+        // system=5m, messages[0]=1h ← violation.
+        // Upgrade system to 1h. All markers preserved.
         let mut body = json!({
             "system": [{"type": "text", "text": "s0", "cache_control": {"type": "ephemeral", "ttl": "5m"}}],
             "messages": [
@@ -1667,31 +1739,33 @@ mod tests {
                 ]}
             ]
         });
-        let dropped = enforce_cache_ttl_ordering(&mut body);
-        assert_eq!(dropped, 1);
-        assert!(body["system"][0].get("cache_control").is_some());
-        assert!(
-            body["messages"][0]["content"][0]
-                .get("cache_control")
-                .is_none()
+        let upgraded = normalize_cache_ttl_ordering(&mut body);
+        assert_eq!(upgraded, 1);
+        assert_eq!(body["system"][0]["cache_control"]["ttl"], "1h");
+        assert_eq!(
+            body["messages"][0]["content"][0]["cache_control"]["ttl"],
+            "1h"
         );
     }
 
     #[test]
-    fn enforce_cache_ttl_ordering_treats_missing_ttl_as_default_5m() {
+    fn normalize_cache_ttl_ordering_treats_missing_ttl_as_default_5m() {
         // No-ttl markers default to 5m on the API side. A 1h marker AFTER
-        // a no-ttl marker is still a violation.
+        // a no-ttl marker is still a violation; auto-upgrade rewrites the
+        // earlier no-ttl marker with an explicit "1h" so the wire stream
+        // is monotonically non-increasing.
         let mut body = json!({
             "tools": [{"name": "t0", "cache_control": {"type": "ephemeral"}}],
             "system": [{"type": "text", "text": "s0", "cache_control": {"type": "ephemeral", "ttl": "1h"}}]
         });
-        let dropped = enforce_cache_ttl_ordering(&mut body);
-        assert_eq!(dropped, 1);
-        assert!(body["system"][0].get("cache_control").is_none());
+        let upgraded = normalize_cache_ttl_ordering(&mut body);
+        assert_eq!(upgraded, 1);
+        assert_eq!(body["tools"][0]["cache_control"]["ttl"], "1h");
+        assert_eq!(body["system"][0]["cache_control"]["ttl"], "1h");
     }
 
     #[test]
-    fn enforce_cache_ttl_ordering_no_op_when_all_no_ttl() {
+    fn normalize_cache_ttl_ordering_no_op_when_all_no_ttl() {
         // All markers without an explicit TTL (= all default to 5m). Valid.
         let mut body = json!({
             "tools": [{"name": "t0", "cache_control": {"type": "ephemeral"}}],
@@ -1702,16 +1776,65 @@ mod tests {
                 ]}
             ]
         });
-        assert_eq!(enforce_cache_ttl_ordering(&mut body), 0);
+        assert_eq!(normalize_cache_ttl_ordering(&mut body), 0);
+        // Markers untouched — none of them have a `ttl` field.
+        assert!(body["tools"][0]["cache_control"].get("ttl").is_none());
+        assert!(body["system"][0]["cache_control"].get("ttl").is_none());
     }
 
     #[test]
-    fn ttl_to_seconds_known_values() {
+    fn normalize_cache_ttl_ordering_handles_multiple_violations() {
+        // Multiple violations across the stream. All earlier short-TTL
+        // markers should be upgraded to the longest later TTL.
+        // tools=5m, system[0]=5m, system[1]=1h, messages[0]=5m
+        // Walking reverse: msg=5m → max=5m. system[1]=1h>5m → max=1h.
+        //   system[0]=5m<1h → upgrade. tools=5m<1h → upgrade.
+        // Result: 1h, 1h, 1h, 5m (forward, valid non-increasing).
+        let mut body = json!({
+            "tools": [{"name": "t0", "cache_control": {"type": "ephemeral", "ttl": "5m"}}],
+            "system": [
+                {"type": "text", "text": "s0", "cache_control": {"type": "ephemeral", "ttl": "5m"}},
+                {"type": "text", "text": "s1", "cache_control": {"type": "ephemeral", "ttl": "1h"}}
+            ],
+            "messages": [
+                {"role": "user", "content": [
+                    {"type": "text", "text": "u0", "cache_control": {"type": "ephemeral", "ttl": "5m"}}
+                ]}
+            ]
+        });
+        let upgraded = normalize_cache_ttl_ordering(&mut body);
+        assert_eq!(upgraded, 2, "tools[0] and system[0] should be upgraded");
+        assert_eq!(body["tools"][0]["cache_control"]["ttl"], "1h");
+        assert_eq!(body["system"][0]["cache_control"]["ttl"], "1h");
+        assert_eq!(body["system"][1]["cache_control"]["ttl"], "1h");
+        assert_eq!(
+            body["messages"][0]["content"][0]["cache_control"]["ttl"],
+            "5m"
+        );
+    }
+
+    #[test]
+    fn ttl_to_seconds_known_and_future_values() {
+        // Known values (currently accepted by Anthropic).
         assert_eq!(ttl_to_seconds(None), 300);
         assert_eq!(ttl_to_seconds(Some("5m")), 300);
         assert_eq!(ttl_to_seconds(Some("1h")), 3600);
-        // Unknown values fall back to the API default (5m).
+
+        // Generic parser handles forms Anthropic might add in the future
+        // without code changes here. The unit codes are SI-style: s, m,
+        // h, d.
+        assert_eq!(ttl_to_seconds(Some("30s")), 30);
+        assert_eq!(ttl_to_seconds(Some("10m")), 600);
+        assert_eq!(ttl_to_seconds(Some("2h")), 7200);
+        assert_eq!(ttl_to_seconds(Some("1d")), 86_400);
+
+        // Malformed input falls back to the API default (5m). We don't
+        // error here because the API itself will reject unknown TTLs
+        // with a clearer error than anything we could produce locally.
         assert_eq!(ttl_to_seconds(Some("garbage")), 300);
+        assert_eq!(ttl_to_seconds(Some("")), 300);
+        assert_eq!(ttl_to_seconds(Some("h")), 300); // no number
+        assert_eq!(ttl_to_seconds(Some("5")), 300); // no unit
     }
 
     /// R10-fix-4 — `apply_cache_control` propagates `cc.ttl` to all marker
