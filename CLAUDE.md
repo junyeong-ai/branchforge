@@ -33,34 +33,17 @@ cargo build --all-features                      # full + multimedia
 - Retry (same model, backoff) and Fallback (different model) are separate concerns in `Client`.
 - Tool cancellation uses `ExecutionContext.cancel_token` (opt-in, same pattern as `progress_tx`).
 - **Provider abstraction uses a 3-axis design**: `ModelCodec` (wire format) × `ModelTransport` (auth + endpoint) × `EndpointShape` (URL pattern bridge). This makes new provider combinations (e.g. Gemini-on-Vertex) fall out as free compositions.
-- Provider capabilities are declared via `ProviderCapabilities` (in `src/ir/capabilities.rs`) with `Unsupported` defaults. Each codec returns a `const` value.
-- The internal IR (`src/ir/`) is provider-neutral. Codecs translate between IR and wire format, emitting `ModelWarning` for lossy encodes. The old `src/types/` and `src/client/adapter/` are legacy and will be removed once all consumers migrate to IR.
+- Provider capabilities are declared via `ProviderCapabilities` (in `src/ir/capabilities.rs`) with `Unsupported` defaults. Each codec returns a `const` value. Capability declarations must be honest — if a codec advertises `json_schema: Native` it must actually emit `response_format` in `encode_request`.
+- The internal IR (`src/ir/`) is provider-neutral. Codecs translate between IR and wire format, emitting `ModelWarning` for lossy encodes.
 - Errors use typed enums (`SessionError`, `McpError`, `GraphError`). `Error::Provider { kind, hint }` carries actionable hints for well-known failures. `Error::Config(String)` is intentional for developer-facing messages.
+- HTTP error classification is distributed: each `ModelTransport` implements `classify_error(status, body)` for vendor-specific patterns (Vertex quota project, Bedrock throttling, Foundry Entra refresh hints). The central `provider_client::classify_response_error` only delegates — adding a new transport never requires editing the central function.
 - Feature flags gate optional dependencies. Core SDK has zero cloud/DB deps.
-- **Token counts are `u64` end-to-end** (Phase 1b-γ). `ir::Usage`, `AgentMetrics.{input,output,cache_*}_tokens`, `ExecutionMetadata.usage`, `TaskExecutionSummary.usage`, and `pricing::PricingTable::calculate` all operate on `u64` / `ir::Usage`. Legacy `types::Usage` (u32) survives only as the on-the-wire DTO for the legacy adapter response shape and is converted at the boundary via `From<&types::Usage> for ir::Usage` in `src/ir/compat.rs` (deleted with the rest of compat in Phase θ).
-- **Tool call linkage uses `tool_call_id`** (Phase 1b-δ). The legacy `tool_use_id` field name lives only in `src/types/` and on-the-wire Anthropic payloads. New code (`ToolCallRecord`, `ToolResultMeta`, graph node payloads, OTel spans) all use `tool_call_id`.
-- **Session/agent layer uses IR types end-to-end** (Phase 1b-δ). `SessionMessage`, `Session::to_api_messages()`, `AgentResult.messages`, `ReplayInput.messages`, and all content overrides/compaction use `ir::Message`, `ir::ContentPart`, `ir::Role`. Legacy `types::Message`/`types::ContentBlock` survive only in `src/types/`, `src/client/`, `src/ir/compat.rs`, and the on-the-wire DTO. The boundary conversion lives in `ir::compat::{ir_message_to_legacy, legacy_block_to_ir}`. Cache breakpoints moved from per-message `cache_control` to the codec/transport layer.
-
-## Phase 1b migration status
-
-The migration of the agent runtime / session layer to the new IR is in progress.
-
-| Phase | Status | Notes |
-|---|---|---|
-| α Setup | ✅ | baseline 1396 lib + 48 codec_contract pass |
-| β IR defect prepass | ✅ | u64 unification, `Continuation::OpenAiResponses` rename, `idempotency_key`, `Usage::billable_input_tokens`, `Usage::add` invariant guard, `ToolIdSemantics::SynthesizedByName` removed |
-| γ-1 pricing IR-native | ✅ | `pricing.calculate(&ir::Usage)`, `BudgetTracker::record(&ir::Usage)`, `TenantBudget::record(&ir::Usage)` |
-| γ-2 truncation fix | ✅ | `ExecutionMetadata.usage` and `TaskExecutionSummary.usage` migrated to `ir::Usage` (u64). The CRITICAL u64→u32 truncation at the old `task_registry::execution_summary` is gone. |
-| γ-3 AgentMetrics widen | ✅ | `AgentMetrics.{input,output,cache_*}_tokens` widened to u64. |
-| δ naming alignment | ✅ | `tool_use_id` → `tool_call_id` rename through `ToolCallRecord`, `ToolResultMeta`, `record_tool` param, graph node JSON payloads, `tool_execute_span`. |
-| δ Message/ContentPart cascade | ✅ | `SessionMessage`, `Session::to_api_messages()`, `AgentResult.messages`, `ReplayInput`, compaction, graph replay all use `ir::Message`/`ir::ContentPart`/`ir::Role`. Legacy→IR conversion at `RequestBuilder::build()` boundary via `ir::compat::ir_message_to_legacy`. 1569 lib + 48 codec_contract pass. |
-| ε FinishReason cascade | ✅ | `types::StopReason` → `ir::FinishReason` in agent/session. `From<StopReason> for FinishReason` boundary conversion in compat.rs. |
-| ζ LlmCall + full agent migration | ✅ | `LlmCall` trait (`send` + `send_stream`) + `RetryingClient`, `FallingBackClient`, `CircuitBrokenClient`. `AgentRuntime` holds only `Arc<dyn LlmCall>` — no `Client`. Execution loop, streaming agent, RequestBuilder, and compaction all use IR types directly. `LegacyBridgeClient` deleted. |
-| η–θ legacy public API cleanup | ⏳ | `Client`/`ClientBuilder` remain in `client/mod.rs` for `lib.rs` public API. `client/adapter/`, `client/messages/`, `types/{message,response,content,document}`, `ir/compat.rs` are self-contained legacy — do not affect agent runtime. Cleaned up when public API migrates to `Preset`+`LlmCall`. |
-| ι UX polish | ⏳ | `Agent::quick`, `provider_from_env`, `tracing` span standardisation, `examples/quickstart.rs`. |
-| κ Final verification | ✅ | 1570 lib + 48 codec_contract pass, clippy 0 warnings, `--no-default-features` green. |
-
-The locked plan lives in `/Users/mac/.claude/plans/phase1b-final.md`.
+- **Token counts are `u64` end-to-end**. `ir::Usage`, `AgentMetrics.{input,output,cache_*}_tokens`, `ExecutionMetadata.usage`, `TaskExecutionSummary.usage`, and `pricing::PricingTable::calculate` all operate on `u64` / `ir::Usage`. There is no longer a u32 wire DTO in the public surface.
+- **Tool call linkage uses `tool_call_id`** end-to-end (`ToolCallRecord`, `ToolResultMeta`, graph node payloads, OTel spans).
+- **Session/agent layer uses IR types end-to-end**. `SessionMessage`, `Session::current_branch_messages()`, `AgentResult.messages`, `ReplayInput.messages`, and all content overrides/compaction use `ir::Message`, `ir::ContentPart`, `ir::Role`. Cache breakpoints live at the codec/transport layer.
+- **`SessionGraph` is the single source of truth** — and the compiler enforces it. `Session.messages` no longer exists as a cached field; `Session::current_branch_messages()` always rebuilds from the graph. `Session.graph` is `pub(crate)` so external code cannot mutate the SSoT directly; use `Session::graph()` for read access and the `add_message`/`fork_at`/`bookmark_*`/`checkpoint_*` methods for mutations.
+- **`ToolDefinition` is the wire-format IR type** (`ir::ToolDefinition`). The local runtime spec (with `defer_loading` and token estimation) is `types::ToolSpec` — distinct name, distinct purpose. Conversion happens in `RequestBuilder::build()`.
+- **Cancellation propagation**: The agent execution loop wires `runtime.shutdown.child_token()` into `ToolRegistry::execute_with_cancel`, so graceful shutdown aborts in-flight tools instead of waiting for their natural completion. Streaming execution already used the same pattern.
 
 ## Key Areas
 
@@ -71,9 +54,9 @@ The locked plan lives in `/Users/mac/.claude/plans/phase1b-final.md`.
 - `src/client/preset.rs`: `Preset` enum — 8 named (codec × transport) presets with `build_from_env()` factories. `BRANCHFORGE_PROVIDER` env var selects preset.
 - `src/graph/`: session graph, replay, export, materialization, validation
 - `src/session/`: session facade, persistence (memory, JSONL, postgres, redis), compaction, queueing, locking
-- `src/agent/`: runtime loop, execution + streaming, task orchestration, delegation, builder. `AgentBuilder::provider_client(pc)` wires the new stack.
-- `src/client/`: (legacy) provider adapters, RetryPolicy, FallbackConfig, CircuitBreaker, streaming, batch, files. `Client::with_provider_client(pc)` bridges old Client to new stack via `ir/compat.rs`.
-- `src/auth/`: credential resolution, OAuth token refresh, CLI credential storage, caching
+- `src/agent/`: runtime loop, execution + streaming, task orchestration, delegation, builder. `AgentBuilder::provider_client(pc)` wires a `ProviderClient` directly into the runtime.
+- `src/client/`: provider stack — `codec/`, `transport/`, `provider_client.rs`, `preset.rs`, `llm_call.rs` (with `RetryingClient`/`FallingBackClient`/`CircuitBrokenClient` decorators). No monolithic `Client` type exists.
+- `src/auth/`: credential resolution, OAuth token refresh (wired into `DirectTransport::refresh()` via `CredentialProvider`), CLI credential storage, caching
 - `src/tools/`: Tool/SchemaTool traits, registry, execution context, progress, cancellation
 - `src/authorization/`: execution modes (auto/plan/supervised), tool policy rules, input extractors
 - `src/security/`: SecureFs (TOCTOU-safe), bash AST analysis, Landlock/Seatbelt sandbox, resource limits
@@ -90,5 +73,5 @@ The locked plan lives in `/Users/mac/.claude/plans/phase1b-final.md`.
 - `src/context/`: PromptOrchestrator, static context, memory loading, rule index
 - `src/models/`: model registry, specs, builtin model definitions
 - `src/config/`: file/env/memory config sources, composite config, validation
-- `src/types/`: (legacy) Message, ContentBlock, ToolDefinition, ApiResponse, Usage — being replaced by `src/ir/`
+- `src/types/`: tool executor contract — `ToolError`, `ToolInput`, `ToolOutput`, `ToolResult`, `ToolOutputBlock`, `ToolSpec` (local runtime spec, distinct from `ir::ToolDefinition`), plus `ModelUsage`/`UsageProvider` for rolled-up cost reporting and `ServerToolUse` for builtin-tool tracking.
 - `src/common/`: IndexRegistry, ContentSource, frontmatter parsing, named traits
