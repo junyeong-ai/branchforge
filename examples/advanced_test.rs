@@ -363,7 +363,9 @@ async fn test_session_update() -> Result<(), String> {
         .map_err(|e| e.to_string())?;
     let id = session.id;
 
-    session.update_summary("Updated summary").map_err(|e| e.to_string())?;
+    session
+        .update_summary("Updated summary")
+        .map_err(|e| e.to_string())?;
     scoped.update(&session).await.map_err(|e| e.to_string())?;
 
     let restored = scoped.get(&id).await.map_err(|e| e.to_string())?;

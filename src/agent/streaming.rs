@@ -19,13 +19,13 @@ use super::executor::Agent;
 use super::request::RequestBuilder;
 use super::run_config::RunConfig;
 use super::runtime::AgentRuntime;
+use crate::authorization::AuthorizationDenied;
 use crate::client::provider_client::ChunkStream;
 use crate::hooks::{HookContext, HookEvent, HookInput};
 use crate::ir::ContentPart;
 use crate::ir::ModelStreamChunk;
 use crate::session::ToolExecution;
 use crate::session::{MessageMetadata, SessionAccessScope, SessionManager, ToolState};
-use crate::authorization::AuthorizationDenied;
 use crate::types::context_window;
 
 impl Agent {
@@ -1410,9 +1410,8 @@ impl StreamState {
                 )
                 .await?;
 
-            all_tool_results.push(
-                ContentPart::from_tool_result(&id, &result).with_tool_name(&name),
-            );
+            all_tool_results
+                .push(ContentPart::from_tool_result(&id, &result).with_tool_name(&name));
             events.push_back(AgentEvent::ToolComplete {
                 id,
                 name,

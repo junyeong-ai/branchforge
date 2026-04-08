@@ -1013,9 +1013,7 @@ mod tests {
         // System cache point appended to the system array.
         let system = enc.body["system"].as_array().unwrap();
         assert!(
-            system
-                .iter()
-                .any(|item| item.get("cachePoint").is_some()),
+            system.iter().any(|item| item.get("cachePoint").is_some()),
             "system array missing cachePoint"
         );
 

@@ -839,7 +839,10 @@ mod tests {
         let mut r = req(vec![Message::user("hi")]);
         r.response_format = Some(ResponseFormat::Text);
         let enc = c.encode_request(&r, InvocationMode::Unary).unwrap();
-        assert_eq!(enc.body["generationConfig"]["responseMimeType"], "text/plain");
+        assert_eq!(
+            enc.body["generationConfig"]["responseMimeType"],
+            "text/plain"
+        );
     }
 
     #[test]

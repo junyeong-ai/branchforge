@@ -51,7 +51,11 @@ impl Tool for SlowTool {
             }
         } else {
             tokio::time::sleep(Duration::from_millis(ms)).await;
-            ToolResult { output: ToolOutput::Success(format!("slept {ms}ms")), inner_usage: None, inner_model: None }
+            ToolResult {
+                output: ToolOutput::Success(format!("slept {ms}ms")),
+                inner_usage: None,
+                inner_model: None,
+            }
         }
     }
 }
@@ -121,7 +125,10 @@ async fn child_token_cancels_when_parent_runtime_shuts_down() {
     parent.cancel(); // simulate runtime.shutdown()
 
     let result = tokio::time::timeout(Duration::from_millis(500), handle).await;
-    assert!(result.is_ok(), "child token did not propagate parent cancel");
+    assert!(
+        result.is_ok(),
+        "child token did not propagate parent cancel"
+    );
 }
 
 #[tokio::test]

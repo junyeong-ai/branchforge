@@ -27,9 +27,9 @@ pub use compact::recovery::{
     ContextRecovery, RecoveryAction, RecoveryContext, RecoveryErrorKind, RecoveryStrategy,
 };
 pub use compact::{
-    CompactConfig, Compactor, CompactionChain, CompactionChainBuilder, CompactionContext,
-    CompactionPlan, CompactionStrategy, ContentOverrideEntry, DEFAULT_COMPACT_THRESHOLD,
-    FullCompaction, MicroCompaction, TimeBasedCompaction,
+    CompactConfig, CompactionChain, CompactionChainBuilder, CompactionContext, CompactionPlan,
+    CompactionStrategy, Compactor, ContentOverrideEntry, DEFAULT_COMPACT_THRESHOLD, FullCompaction,
+    MicroCompaction, TimeBasedCompaction,
 };
 pub use export::{AuditBundle, ExportPolicy, SessionExporter};
 #[cfg(feature = "postgres")]

@@ -13,11 +13,11 @@
 use std::sync::Arc;
 
 use branchforge::ir::ContentPart;
+#[cfg(feature = "jsonl")]
+use branchforge::session::{JsonlConfig, JsonlPersistence};
 use branchforge::session::{
     MemoryPersistence, Persistence, Session, SessionConfig, SessionMessage,
 };
-#[cfg(feature = "jsonl")]
-use branchforge::session::{JsonlConfig, JsonlPersistence};
 
 fn fresh_session(label: &str) -> Session {
     let mut s = Session::new(SessionConfig::default());
@@ -25,9 +25,9 @@ fn fresh_session(label: &str) -> Session {
         "{label} user 1"
     ))]))
     .unwrap();
-    s.add_message(SessionMessage::assistant(vec![ContentPart::text(
-        format!("{label} asst 1"),
-    )]))
+    s.add_message(SessionMessage::assistant(vec![ContentPart::text(format!(
+        "{label} asst 1"
+    ))]))
     .unwrap();
     s
 }
@@ -65,7 +65,11 @@ async fn scenario_list_and_delete(p: Arc<dyn Persistence>) {
     assert!(deleted, "{} delete should report success", p.name());
 
     let after = p.load(&s2.id).await.unwrap();
-    assert!(after.is_none(), "{} session lingered after delete", p.name());
+    assert!(
+        after.is_none(),
+        "{} session lingered after delete",
+        p.name()
+    );
 }
 
 /// Append a graph node, save, load — graph events round trip.

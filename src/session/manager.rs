@@ -409,10 +409,7 @@ impl SessionManager {
         query: &crate::graph::GraphSearchQuery,
     ) -> SessionResult<Vec<crate::graph::NodeSummary>> {
         let session = self.get(id).await?;
-        Ok(crate::graph::GraphSearcher::search(
-            &session.graph,
-            query,
-        ))
+        Ok(crate::graph::GraphSearcher::search(&session.graph, query))
     }
 
     pub async fn graph_search_scoped(
@@ -422,10 +419,7 @@ impl SessionManager {
         query: &crate::graph::GraphSearchQuery,
     ) -> SessionResult<Vec<crate::graph::NodeSummary>> {
         let session = self.get_scoped(id, scope).await?;
-        Ok(crate::graph::GraphSearcher::search(
-            &session.graph,
-            query,
-        ))
+        Ok(crate::graph::GraphSearcher::search(&session.graph, query))
     }
 
     #[cfg(test)]
@@ -981,11 +975,8 @@ impl ScopedSessionManager {
             });
         }
 
-        crate::session::SessionArchiver::restore_into(
-            bundle,
-            self.manager.persistence.as_ref(),
-        )
-        .await
+        crate::session::SessionArchiver::restore_into(bundle, self.manager.persistence.as_ref())
+            .await
     }
 
     pub async fn bookmark_current_head(

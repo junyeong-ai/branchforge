@@ -662,8 +662,8 @@ mod tests {
         node.provenance = None;
         node.created_by_principal_id = Some("user-1".to_string());
 
-        let error = SessionArchiver::import_bundle(&bundle)
-            .expect_err("invalid graph should fail import");
+        let error =
+            SessionArchiver::import_bundle(&bundle).expect_err("invalid graph should fail import");
         assert!(error.to_string().contains("Invalid archive bundle graph"));
     }
 
@@ -966,8 +966,8 @@ mod tests {
         .expect("bundle should be created");
         bundle.session_id = "not-a-uuid".to_string();
 
-        let error = SessionArchiver::import_bundle(&bundle)
-            .expect_err("invalid session id should fail");
+        let error =
+            SessionArchiver::import_bundle(&bundle).expect_err("invalid session id should fail");
         assert!(
             error
                 .to_string()

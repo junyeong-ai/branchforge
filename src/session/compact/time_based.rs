@@ -9,9 +9,9 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 
+use super::CompactResult;
 use super::micro::MicroCompaction;
 use super::strategy::{CompactionContext, CompactionPlan, CompactionStrategy};
-use super::CompactResult;
 use crate::session::SessionResult;
 use crate::session::state::Session;
 

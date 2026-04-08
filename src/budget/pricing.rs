@@ -276,8 +276,10 @@ impl PricingTableBuilder {
     /// - o3: $10.00/M input, $40.00/M output
     /// - o3-mini: $1.10/M input, $4.40/M output
     pub fn with_openai_models(mut self) -> Self {
-        self.models
-            .insert("gpt-5".into(), ModelPricing::from_base(dec!(1.25), dec!(10)));
+        self.models.insert(
+            "gpt-5".into(),
+            ModelPricing::from_base(dec!(1.25), dec!(10)),
+        );
         self.models.insert(
             "gpt-5-mini".into(),
             ModelPricing::from_base(dec!(0.25), dec!(2)),
@@ -892,7 +894,11 @@ mod tests {
     #[test]
     fn gemini_2_5_family_models_are_registered() {
         let table = global_pricing_table();
-        for model in ["gemini-2.5-pro", "gemini-2.5-flash", "gemini-2.5-flash-lite"] {
+        for model in [
+            "gemini-2.5-pro",
+            "gemini-2.5-flash",
+            "gemini-2.5-flash-lite",
+        ] {
             let pricing = table.get(model);
             assert!(
                 pricing.input_per_mtok > Decimal::ZERO,

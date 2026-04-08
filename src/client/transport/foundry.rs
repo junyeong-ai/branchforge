@@ -215,7 +215,9 @@ impl ModelTransport for FoundryTransport {
         if body.contains("DeploymentNotFound") || body.contains("ModelNotFound") {
             return (
                 ProviderErrorKind::BadRequest,
-                Some("Azure AI Foundry model not deployed — check AZURE_AI_RESOURCE and model name"),
+                Some(
+                    "Azure AI Foundry model not deployed — check AZURE_AI_RESOURCE and model name",
+                ),
             );
         }
         super::default_classify_status(status)
@@ -337,10 +339,7 @@ mod tests {
             404,
             r#"{"error":"DeploymentNotFound","message":"model not available"}"#,
         );
-        assert!(matches!(
-            kind,
-            crate::error::ProviderErrorKind::BadRequest
-        ));
+        assert!(matches!(kind, crate::error::ProviderErrorKind::BadRequest));
         assert!(hint.unwrap().contains("AZURE_AI_RESOURCE"));
     }
 

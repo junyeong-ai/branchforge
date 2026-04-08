@@ -290,10 +290,7 @@ impl ModelTransport for VertexTransport {
         &self,
         status: u16,
         body: &str,
-    ) -> (
-        crate::error::ProviderErrorKind,
-        Option<&'static str>,
-    ) {
+    ) -> (crate::error::ProviderErrorKind, Option<&'static str>) {
         use crate::error::ProviderErrorKind;
         match status {
             401 | 403 if body.contains("quota") || body.contains("user-project") => (

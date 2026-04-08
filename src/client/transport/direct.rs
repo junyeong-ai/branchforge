@@ -149,13 +149,12 @@ impl DirectTransport {
             (DirectAuth::Bearer(_), Cred::ApiKey(secret)) => Some(DirectAuth::Bearer(secret)),
             // Query-param auth retains the original parameter name; the
             // refreshed credential just rewrites the secret value.
-            (
-                DirectAuth::QueryParam { param, .. },
-                Cred::ApiKey(secret),
-            ) => Some(DirectAuth::QueryParam {
-                param,
-                value: secret,
-            }),
+            (DirectAuth::QueryParam { param, .. }, Cred::ApiKey(secret)) => {
+                Some(DirectAuth::QueryParam {
+                    param,
+                    value: secret,
+                })
+            }
             _ => None,
         }
     }
@@ -253,10 +252,7 @@ impl ModelTransport for DirectTransport {
         &self,
         status: u16,
         _body: &str,
-    ) -> (
-        crate::error::ProviderErrorKind,
-        Option<&'static str>,
-    ) {
+    ) -> (crate::error::ProviderErrorKind, Option<&'static str>) {
         use crate::error::ProviderErrorKind;
         match status {
             401 => (

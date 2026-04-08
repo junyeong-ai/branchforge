@@ -739,7 +739,10 @@ impl Session {
             crate::session::compact::CompactConfig::default(),
         );
         let result = executor.execute(self, llm).await?;
-        if matches!(result, crate::session::compact::CompactResult::Compacted { .. }) {
+        if matches!(
+            result,
+            crate::session::compact::CompactResult::Compacted { .. }
+        ) {
             self.current_input_tokens = 0;
         }
         Ok(result)

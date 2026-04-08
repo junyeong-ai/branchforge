@@ -394,11 +394,7 @@ fn validate_composition(codec: &dyn ModelCodec, transport: &dyn ModelTransport) 
 /// asking the transport to classify the failure. Each transport owns its
 /// own vendor-specific patterns (Vertex quota project, Bedrock throttling,
 /// …), so adding a new transport never requires editing this function.
-fn classify_response_error(
-    transport: &dyn ModelTransport,
-    status: u16,
-    body: &str,
-) -> Error {
+fn classify_response_error(transport: &dyn ModelTransport, status: u16, body: &str) -> Error {
     use crate::error::ProviderErrorKind;
     let snippet = body.chars().take(500).collect::<String>();
     let (kind, hint) = transport.classify_error(status, body);

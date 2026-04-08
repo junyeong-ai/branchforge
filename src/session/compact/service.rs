@@ -5,12 +5,12 @@
 
 use serde::{Deserialize, Serialize};
 
+use super::CompactResult;
 use crate::agent::DEFAULT_FAST_MODEL;
 use crate::ir::{ContentPart, Message, Role};
 use crate::session::state::{Session, SessionMessage};
 use crate::session::types::CompactRecord;
 use crate::session::{SessionError, SessionResult};
-use super::CompactResult;
 
 /// Context usage threshold for triggering compaction (80%).
 pub const DEFAULT_COMPACT_THRESHOLD: f32 = 0.8;

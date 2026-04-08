@@ -171,7 +171,10 @@ async fn graph_first_compaction_archive_roundtrip_preserves_identity_and_history
     assert_eq!(restored_queue.len(), 2);
     assert_eq!(restored_queue[0].content, "first follow-up");
     assert_eq!(restored_queue[1].content, "second follow-up");
-    assert_eq!(restored.current_input_tokens(), session.current_input_tokens());
+    assert_eq!(
+        restored.current_input_tokens(),
+        session.current_input_tokens()
+    );
 }
 
 #[tokio::test]

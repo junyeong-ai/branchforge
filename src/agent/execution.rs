@@ -16,12 +16,12 @@ use super::events::AgentResult;
 use super::executor::Agent;
 use super::request::RequestBuilder;
 use super::run_config::RunConfig;
+use crate::authorization::AuthorizationDenied;
 use crate::graph::ReplayInput;
 use crate::hooks::{HookContext, HookEvent, HookInput};
 use crate::ir::FinishReason;
 use crate::ir::Message;
 use crate::session::{MessageMetadata, ToolExecution};
-use crate::authorization::AuthorizationDenied;
 use crate::types::context_window;
 
 impl Agent {
@@ -511,7 +511,9 @@ impl Agent {
                         let fut = tools.execute_with_cancel(&name, input.clone(), cancel);
                         scope.wrap_tool_future(Box::pin(fut)).await
                     } else {
-                        tools.execute_with_cancel(&name, input.clone(), cancel).await
+                        tools
+                            .execute_with_cancel(&name, input.clone(), cancel)
+                            .await
                     };
                     let duration_ms = start.elapsed().as_millis() as u64;
                     (id, name, input, result, duration_ms)
@@ -576,8 +578,7 @@ impl Agent {
                     .await?;
 
                 results.push(
-                    crate::ir::ContentPart::from_tool_result(&id, &result)
-                        .with_tool_name(&name),
+                    crate::ir::ContentPart::from_tool_result(&id, &result).with_tool_name(&name),
                 );
             }
 

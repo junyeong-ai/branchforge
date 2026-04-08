@@ -19,7 +19,7 @@ use super::traits::Tool;
 use crate::agent::TaskRegistry;
 use crate::authorization::ToolPolicy;
 use crate::session::MemoryPersistence;
-use crate::types::{ToolSpec, ToolOutput, ToolResult};
+use crate::types::{ToolOutput, ToolResult, ToolSpec};
 use std::path::PathBuf;
 
 #[derive(Clone)]

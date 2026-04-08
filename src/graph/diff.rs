@@ -108,8 +108,7 @@ mod tests {
             )
             .unwrap();
 
-        let diff =
-            GraphDiffer::branch_diff(&graph, graph.primary_branch, right_branch).unwrap();
+        let diff = GraphDiffer::branch_diff(&graph, graph.primary_branch, right_branch).unwrap();
         assert_eq!(diff.common_ancestor, Some(root));
         assert_eq!(diff.left_only_count, 1);
         assert_eq!(diff.right_only_count, 1);
@@ -120,8 +119,7 @@ mod tests {
         let graph = SessionGraph::default();
         let missing = uuid::Uuid::new_v4();
 
-        let error =
-            GraphDiffer::branch_diff(&graph, graph.primary_branch, missing).unwrap_err();
+        let error = GraphDiffer::branch_diff(&graph, graph.primary_branch, missing).unwrap_err();
         assert!(matches!(
             error,
             GraphError::MissingBranch { branch_id } if branch_id == missing

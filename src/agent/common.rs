@@ -13,8 +13,8 @@ use crate::ToolRegistry;
 use crate::budget::{BudgetTracker, TenantBudget};
 use crate::context::PromptOrchestrator;
 use crate::hooks::{HookContext, HookEvent, HookInput, HookManager};
-use crate::session::{ToolExecution, ToolState};
 use crate::session::compact::CompactResult;
+use crate::session::{ToolExecution, ToolState};
 use crate::types::ToolResult;
 
 use super::config::BudgetConfig;

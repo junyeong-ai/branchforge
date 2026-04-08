@@ -7,7 +7,7 @@ use schemars::JsonSchema;
 use serde::de::DeserializeOwned;
 
 use super::context::ExecutionContext;
-use crate::types::{ToolSpec, ToolResult};
+use crate::types::{ToolResult, ToolSpec};
 
 /// Core tool trait for all tool implementations.
 #[async_trait]

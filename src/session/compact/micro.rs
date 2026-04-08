@@ -9,13 +9,13 @@
 
 use async_trait::async_trait;
 
+use super::CompactResult;
 use super::strategy::{
     CompactionContext, CompactionPlan, CompactionStrategy, ContentOverrideEntry,
 };
 use crate::ir::{ContentPart, ToolResultContent};
 use crate::session::SessionResult;
 use crate::session::state::Session;
-use super::CompactResult;
 
 /// Default threshold (fraction of max tokens) to trigger micro-compaction.
 const DEFAULT_MICRO_THRESHOLD: f64 = 0.6;

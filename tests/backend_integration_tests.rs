@@ -218,7 +218,10 @@ async fn test_postgres_backend_plan_clear_and_state_update() {
 
     let loaded = persistence.load(&session_id).await.unwrap().unwrap();
     assert!(loaded.current_plan().is_none());
-    assert_eq!(loaded.state(), branchforge::session::SessionState::Completed);
+    assert_eq!(
+        loaded.state(),
+        branchforge::session::SessionState::Completed
+    );
 }
 
 #[cfg(feature = "postgres")]

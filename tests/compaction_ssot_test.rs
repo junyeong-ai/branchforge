@@ -24,9 +24,9 @@ fn fresh_session_with_messages(n: usize) -> Session {
             ))]))
             .unwrap();
         session
-            .add_message(SessionMessage::assistant(vec![ContentPart::text(
-                format!("assistant reply {i}"),
-            )]))
+            .add_message(SessionMessage::assistant(vec![ContentPart::text(format!(
+                "assistant reply {i}"
+            ))]))
             .unwrap();
     }
     session
@@ -101,9 +101,9 @@ fn double_compaction_uses_latest_summary_only() {
             ))]))
             .unwrap();
         session
-            .add_message(SessionMessage::assistant(vec![ContentPart::text(
-                format!("post-1 asst {i}"),
-            )]))
+            .add_message(SessionMessage::assistant(vec![ContentPart::text(format!(
+                "post-1 asst {i}"
+            ))]))
             .unwrap();
     }
 
@@ -114,8 +114,7 @@ fn double_compaction_uses_latest_summary_only() {
     let projected = session.current_branch_messages();
     assert_eq!(projected.len(), 1);
     assert!(
-        projected[0]
-            .content[0]
+        projected[0].content[0]
             .as_text()
             .unwrap()
             .contains("second summary"),
