@@ -5,7 +5,7 @@ use crate::graph::{
 };
 use crate::session::{
     ExportPolicy, Persistence, QueueItem, Session, SessionAuthorization, SessionConfig,
-    SessionError, SessionResult, SessionState, SessionType, TokenUsage,
+    SessionError, SessionResult, SessionState, SessionType,
 };
 use rust_decimal::Decimal;
 
@@ -44,7 +44,7 @@ pub struct SessionArchiveBundle {
     pub state: SessionState,
     pub config: SessionConfig,
     pub authorization: SessionAuthorization,
-    pub total_usage: TokenUsage,
+    pub total_usage: crate::ir::Usage,
     pub current_input_tokens: u64,
     pub total_cost_usd: Decimal,
     pub created_at: chrono::DateTime<chrono::Utc>,

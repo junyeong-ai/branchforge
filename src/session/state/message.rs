@@ -6,9 +6,9 @@ use serde::{Deserialize, Serialize};
 
 use super::ids::MessageId;
 use crate::ir::FinishReason;
+use crate::ir::Usage as IrUsage;
 use crate::ir::{ContentPart, Message, Role};
 use crate::session::types::EnvironmentContext;
-use crate::types::TokenUsage;
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct ExecutionMetadata {
@@ -73,7 +73,7 @@ pub struct SessionMessage {
     pub is_sidechain: bool,
     #[serde(default)]
     pub is_compact_summary: bool,
-    pub usage: Option<TokenUsage>,
+    pub usage: Option<IrUsage>,
     pub timestamp: DateTime<Utc>,
     #[serde(default)]
     pub metadata: MessageMetadata,
@@ -117,7 +117,7 @@ impl SessionMessage {
         self
     }
 
-    pub fn usage(mut self, usage: TokenUsage) -> Self {
+    pub fn usage(mut self, usage: IrUsage) -> Self {
         self.usage = Some(usage);
         self
     }

@@ -21,10 +21,11 @@ use super::run_config::RunConfig;
 use super::runtime::AgentRuntime;
 use crate::client::provider_client::ChunkStream;
 use crate::hooks::{HookContext, HookEvent, HookInput};
+use crate::ir::ContentPart;
 use crate::ir::ModelStreamChunk;
 use crate::session::ToolExecution;
 use crate::session::{MessageMetadata, SessionAccessScope, SessionManager, ToolState};
-use crate::types::{AuthorizationDenied, ToolResultBlock, ToolUseBlock, Usage, context_window};
+use crate::types::{AuthorizationDenied, context_window};
 
 impl Agent {
     pub async fn execute_stream(
@@ -194,12 +195,19 @@ struct ToolExecutionPhase {
     /// Cancellation token propagated to tool execution.
     cancel_token: tokio_util::sync::CancellationToken,
     /// Blocked tool results from pre-processing (passed to finalize).
-    blocked_results: Vec<ToolResultBlock>,
+    blocked_results: Vec<ContentPart>,
 }
 
 struct StreamingPhase {
     stream: ChunkStream,
     accumulated_usage: crate::ir::Usage,
+}
+
+/// Accumulated tool call from streaming chunks, replacing `ToolUseBlock`.
+struct PendingToolCall {
+    id: String,
+    name: String,
+    arguments: serde_json::Value,
 }
 
 struct StreamState {
@@ -210,8 +218,8 @@ struct StreamState {
     metrics: AgentMetrics,
     start_time: Instant,
     last_chunk_time: Instant,
-    pending_tool_results: Vec<ToolResultBlock>,
-    pending_tool_uses: Vec<ToolUseBlock>,
+    pending_tool_results: Vec<ContentPart>,
+    pending_tool_uses: Vec<PendingToolCall>,
     recovery_attempts: u32,
     /// Accumulator for tool_use content blocks being streamed.
     /// Codecs emit ToolCallStart, ToolCallArgsDelta, ToolCallEnd.
@@ -222,7 +230,7 @@ struct StreamState {
     final_thinking: String,
     thinking_signature: Option<crate::ir::ReasoningSignature>,
     finish_reason: Option<crate::ir::FinishReason>,
-    total_usage: Usage,
+    total_usage: crate::ir::Usage,
     phase: Phase,
     all_non_retryable: bool,
     session_started: bool,
@@ -256,7 +264,7 @@ impl StreamState {
             final_thinking: String::new(),
             thinking_signature: None,
             finish_reason: None,
-            total_usage: Usage::default(),
+            total_usage: crate::ir::Usage::default(),
             phase: Phase::StartRequest,
             all_non_retryable: false,
             session_started: false,
@@ -287,7 +295,7 @@ impl StreamState {
         let structured_output = self.extract_structured_output(&self.final_text);
         AgentResult::new(
             self.final_text.clone(),
-            self.total_usage,
+            self.total_usage.clone(),
             iterations,
             stop_reason,
             self.metrics.clone(),
@@ -856,10 +864,10 @@ impl StreamState {
                             serde_json::json!({})
                         }
                     };
-                    let tool_use = ToolUseBlock {
+                    let tool_call = PendingToolCall {
                         id,
                         name: name.clone(),
-                        input,
+                        arguments: input,
                     };
                     self.fire_post_stream_chunk_sync(&name, "tool_use");
                     if let Some(ref bus) = self.cfg.runtime.event_bus {
@@ -867,11 +875,11 @@ impl StreamState {
                             crate::events::EventKind::StreamChunk,
                             serde_json::json!({
                                 "chunk_type": "tool_use",
-                                "tool_name": &tool_use.name,
+                                "tool_name": &tool_call.name,
                             }),
                         );
                     }
-                    self.pending_tool_uses.push(tool_use);
+                    self.pending_tool_uses.push(tool_call);
                 } else {
                     tracing::warn!("ToolCallEnd received without matching ToolCallStart — dropped");
                 }
@@ -990,7 +998,7 @@ impl StreamState {
                     content.push(crate::ir::ContentPart::ToolCall {
                         id: tool_use.id.clone(),
                         name: tool_use.name.clone(),
-                        arguments: tool_use.input.clone(),
+                        arguments: tool_use.arguments.clone(),
                         origin: crate::ir::ToolOrigin::Local,
                     });
                 }
@@ -1074,7 +1082,7 @@ impl StreamState {
             let pre_input = HookInput::pre_tool_use(
                 &*self.cfg.session_id,
                 &tool_use.name,
-                tool_use.input.clone(),
+                tool_use.arguments.clone(),
             );
             let pre_output = self
                 .cfg
@@ -1090,10 +1098,14 @@ impl StreamState {
                     .unwrap_or_else(|| "Blocked by hook".into());
                 debug!(tool = %tool_use.name, "Tool blocked by hook");
 
-                all_tool_results.push(ToolResultBlock::error(&tool_use.id, reason.clone()));
+                all_tool_results.push(ContentPart::tool_error(&tool_use.id, reason.clone()));
                 self.metrics.record_authorization_denial(
-                    AuthorizationDenied::new(&tool_use.name, &tool_use.id, tool_use.input.clone())
-                        .reason(reason.clone()),
+                    AuthorizationDenied::new(
+                        &tool_use.name,
+                        &tool_use.id,
+                        tool_use.arguments.clone(),
+                    )
+                    .reason(reason.clone()),
                 );
                 events.push(AgentEvent::ToolBlocked {
                     id: tool_use.id.clone(),
@@ -1101,7 +1113,9 @@ impl StreamState {
                     reason,
                 });
             } else {
-                let actual_input = pre_output.updated_input.unwrap_or(tool_use.input.clone());
+                let actual_input = pre_output
+                    .updated_input
+                    .unwrap_or(tool_use.arguments.clone());
 
                 // ExecutionMode: Plan mode blocks non-plan tools
                 if self.cfg.runtime.execution_mode.is_plan()
@@ -1111,7 +1125,7 @@ impl StreamState {
                         "Tool '{}' is not available in plan mode. Only read/navigation tools are allowed.",
                         tool_use.name
                     );
-                    all_tool_results.push(ToolResultBlock::error(&tool_use.id, reason.clone()));
+                    all_tool_results.push(ContentPart::tool_error(&tool_use.id, reason.clone()));
                     events.push(AgentEvent::ToolBlocked {
                         id: tool_use.id.clone(),
                         name: tool_use.name.clone(),
@@ -1132,7 +1146,7 @@ impl StreamState {
                         name: tool_use.name.clone(),
                         input: actual_input.clone(),
                     });
-                    all_tool_results.push(ToolResultBlock::error(
+                    all_tool_results.push(ContentPart::tool_error(
                         &tool_use.id,
                         format!(
                             "Tool '{}' requires user review. Use execute_stream() to handle ToolReview events.",
@@ -1309,7 +1323,7 @@ impl StreamState {
     async fn finalize_tool_execution(
         &mut self,
         completed: Vec<ToolExecResult>,
-        blocked: Vec<ToolResultBlock>,
+        blocked: Vec<ContentPart>,
     ) -> crate::Result<VecDeque<AgentEvent>> {
         let mut events = VecDeque::new();
         let mut all_tool_results = blocked;
@@ -1370,7 +1384,7 @@ impl StreamState {
                 )
                 .await?;
 
-            all_tool_results.push(ToolResultBlock::from_tool_result(&id, &result));
+            all_tool_results.push(ContentPart::from_tool_result(&id, &result));
             events.push_back(AgentEvent::ToolComplete {
                 id,
                 name,

@@ -495,6 +495,28 @@ impl ModelUsage {
         }
     }
 
+    pub fn add_ir_usage(&mut self, usage: &crate::ir::Usage, model: &str) {
+        self.input_tokens = self.input_tokens.saturating_add(usage.input_tokens as u32);
+        self.output_tokens = self
+            .output_tokens
+            .saturating_add(usage.output_tokens as u32);
+        self.cache_read_input_tokens = self
+            .cache_read_input_tokens
+            .saturating_add(usage.cached_input_tokens.unwrap_or(0) as u32);
+        self.cache_creation_input_tokens = self
+            .cache_creation_input_tokens
+            .saturating_add(usage.cache_creation_tokens.unwrap_or(0) as u32);
+        self.cost_usd += crate::budget::pricing::global_pricing_table().calculate(model, usage);
+        if let Some(ref invocations) = usage.server_tool_invocations {
+            if let Some(ws) = invocations.web_search {
+                self.web_search_requests = self.web_search_requests.saturating_add(ws as u32);
+            }
+            if let Some(wf) = invocations.web_fetch {
+                self.web_fetch_requests = self.web_fetch_requests.saturating_add(wf as u32);
+            }
+        }
+    }
+
     pub fn total_tokens(&self) -> u32 {
         self.input_tokens + self.output_tokens
     }

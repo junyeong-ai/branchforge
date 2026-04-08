@@ -19,7 +19,6 @@ pub mod session_state;
 pub mod state;
 pub mod types;
 
-pub use crate::types::TokenUsage;
 pub use archive::{
     ArchivePolicy, RestoreVerificationReport, RestoreVerifier, SessionArchiveBundle,
     SessionArchiveService,

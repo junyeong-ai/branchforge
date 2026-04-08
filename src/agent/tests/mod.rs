@@ -17,7 +17,6 @@ use crate::session::types::TodoItem;
 use crate::session::{Session, SessionAccessScope, SessionConfig, SessionId, SessionManager};
 use crate::skills::{SkillIndex, SkillRuntime};
 use crate::tools::{ExecutionContext, ToolOutput, ToolRegistry, ToolResult, ToolSurface};
-use crate::types::{ToolResultBlock, Usage};
 
 use async_trait::async_trait;
 use std::sync::Arc;
@@ -34,7 +33,7 @@ fn test_agent_result() {
 
     let result = AgentResult {
         text: "Hello".to_string(),
-        usage: Usage {
+        usage: crate::ir::Usage {
             input_tokens: 100,
             output_tokens: 50,
             ..Default::default()
@@ -60,7 +59,7 @@ fn test_agent_result() {
 fn test_agent_result_session_id() {
     let result = AgentResult {
         text: String::new(),
-        usage: Usage::default(),
+        usage: crate::ir::Usage::default(),
         tool_calls: 0,
         iterations: 1,
         stop_reason: FinishReason::Stop,
@@ -84,7 +83,7 @@ fn test_agent_result_extract_success() {
 
     let result = AgentResult {
         text: String::new(),
-        usage: Usage::default(),
+        usage: crate::ir::Usage::default(),
         tool_calls: 0,
         iterations: 1,
         stop_reason: FinishReason::Stop,
@@ -104,7 +103,7 @@ fn test_agent_result_extract_success() {
 fn test_agent_result_extract_no_output() {
     let result = AgentResult {
         text: String::new(),
-        usage: Usage::default(),
+        usage: crate::ir::Usage::default(),
         tool_calls: 0,
         iterations: 1,
         stop_reason: FinishReason::Stop,
@@ -289,11 +288,20 @@ fn test_stop_reason_variants() {
 }
 
 #[test]
-fn test_tool_result_block_from_tool_result() {
+fn test_content_part_from_tool_result() {
     let result = ToolResult::success("content");
-    let block = ToolResultBlock::from_tool_result("tool_123", &result);
-    assert_eq!(block.tool_use_id, "tool_123");
-    assert!(!block.is_error.unwrap_or(false));
+    let part = ContentPart::from_tool_result("tool_123", &result);
+    match part {
+        ContentPart::ToolResult {
+            tool_call_id,
+            is_error,
+            ..
+        } => {
+            assert_eq!(tool_call_id, "tool_123");
+            assert!(!is_error);
+        }
+        other => panic!("Expected ToolResult, got {:?}", other),
+    }
 }
 
 #[test]
@@ -310,11 +318,11 @@ fn test_session_usage_update() {
     let mut session = Session::new(SessionConfig::default());
     session.add_user_message("Test").unwrap();
 
-    session.update_usage(&Usage {
+    session.update_usage(&ir::Usage {
         input_tokens: 100,
         output_tokens: 50,
-        cache_read_input_tokens: Some(10),
-        cache_creation_input_tokens: None,
+        cached_input_tokens: Some(10),
+        cache_creation_tokens: None,
         ..Default::default()
     });
 
@@ -641,12 +649,12 @@ fn test_agent_config_default_values() {
 
 #[test]
 fn test_usage_accumulation() {
-    let mut usage = Usage::default();
-    assert_eq!(usage.total(), 0);
+    let mut usage = ir::Usage::default();
+    assert_eq!(usage.input_tokens + usage.output_tokens, 0);
 
     usage.input_tokens = 100;
     usage.output_tokens = 50;
-    assert_eq!(usage.total(), 150);
+    assert_eq!(usage.input_tokens + usage.output_tokens, 150);
 }
 
 #[test]

@@ -181,7 +181,7 @@ mod tests {
     fn mock_result(session_id: &str) -> AgentResult {
         AgentResult {
             text: "Completed successfully".to_string(),
-            usage: Usage::default(),
+            usage: crate::ir::Usage::default(),
             tool_calls: 0,
             iterations: 1,
             stop_reason: FinishReason::Stop,
@@ -414,12 +414,12 @@ mod tests {
         result.uuid = "result-uuid".to_string();
         result.tool_calls = 3;
         result.iterations = 4;
-        result.usage = Usage {
+        result.usage = crate::ir::Usage {
             input_tokens: 7,
             output_tokens: 9,
-            cache_read_input_tokens: Some(2),
-            cache_creation_input_tokens: Some(1),
-            server_tool_use: None,
+            cached_input_tokens: Some(2),
+            cache_creation_tokens: Some(1),
+            ..Default::default()
         };
         result.metrics.execution_time_ms = 125;
         result.metrics.api_calls = 2;

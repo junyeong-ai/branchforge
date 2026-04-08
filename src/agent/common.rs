@@ -14,7 +14,7 @@ use crate::budget::{BudgetTracker, TenantBudget};
 use crate::context::PromptOrchestrator;
 use crate::hooks::{HookContext, HookEvent, HookInput, HookManager};
 use crate::session::{ToolExecution, ToolState};
-use crate::types::{CompactResult, ToolResult, ToolResultBlock, Usage};
+use crate::types::{CompactResult, ToolResult};
 
 use super::config::BudgetConfig;
 use super::state::AgentMetrics;
@@ -78,30 +78,17 @@ impl BudgetContext<'_> {
 
 /// Accumulate usage from an API response into total_usage, metrics, and budget.
 pub(crate) fn accumulate_response_usage(
-    total_usage: &mut Usage,
+    total_usage: &mut crate::ir::Usage,
     metrics: &mut AgentMetrics,
     budget_tracker: &BudgetTracker,
     tenant_budget: Option<&TenantBudget>,
     model: &str,
     ir_usage: &crate::ir::Usage,
 ) -> Decimal {
-    total_usage.input_tokens = total_usage
-        .input_tokens
-        .saturating_add(ir_usage.input_tokens as u32);
-    total_usage.output_tokens = total_usage
-        .output_tokens
-        .saturating_add(ir_usage.output_tokens as u32);
+    total_usage.add(ir_usage);
 
-    // Bridge to legacy metrics (still on types::Usage)
-    let legacy = Usage {
-        input_tokens: ir_usage.input_tokens as u32,
-        output_tokens: ir_usage.output_tokens as u32,
-        cache_read_input_tokens: ir_usage.cached_input_tokens.map(|v| v as u32),
-        cache_creation_input_tokens: ir_usage.cache_creation_tokens.map(|v| v as u32),
-        server_tool_use: None,
-    };
-    metrics.add_usage_with_cache(&legacy);
-    metrics.record_model_usage(model, &legacy);
+    metrics.add_usage_with_cache(ir_usage);
+    metrics.record_model_usage(model, ir_usage);
 
     let cost = budget_tracker.record(model, ir_usage);
     metrics.add_cost(cost);
@@ -224,40 +211,35 @@ pub(crate) fn maybe_emit_budget_alert(
 /// Accumulate inner usage from a tool result (e.g., subagent calls).
 pub(crate) async fn accumulate_inner_usage(
     tool_state: &ToolState,
-    total_usage: &mut Usage,
+    total_usage: &mut crate::ir::Usage,
     metrics: &mut AgentMetrics,
     budget_tracker: &BudgetTracker,
     result: &ToolResult,
     tool_name: &str,
 ) {
     if let Some(ref inner_usage) = result.inner_usage {
+        let inner_ir_usage: crate::ir::Usage = inner_usage.into();
         tool_state
             .with_session_mut(|session| {
-                session.update_usage(inner_usage);
+                session.update_usage(&inner_ir_usage);
             })
             .await;
-        total_usage.input_tokens = total_usage
-            .input_tokens
-            .saturating_add(inner_usage.input_tokens);
-        total_usage.output_tokens = total_usage
-            .output_tokens
-            .saturating_add(inner_usage.output_tokens);
-        metrics.add_usage_with_cache(inner_usage);
+        total_usage.add(&inner_ir_usage);
+        metrics.add_usage_with_cache(&inner_ir_usage);
         let inner_model = result
             .inner_model
             .as_deref()
             .unwrap_or(DEFAULT_FALLBACK_MODEL);
-        metrics.record_model_usage(inner_model, inner_usage);
+        metrics.record_model_usage(inner_model, &inner_ir_usage);
 
-        let inner_ir_usage: crate::ir::Usage = inner_usage.into();
         let inner_cost = budget_tracker.record(inner_model, &inner_ir_usage);
         metrics.add_cost(inner_cost);
 
         debug!(
             tool = %tool_name,
             model = %inner_model,
-            input_tokens = inner_usage.input_tokens,
-            output_tokens = inner_usage.output_tokens,
+            input_tokens = inner_ir_usage.input_tokens,
+            output_tokens = inner_ir_usage.output_tokens,
             cost_usd = %inner_cost,
             "Accumulated inner usage from tool"
         );
@@ -341,7 +323,7 @@ pub(crate) async fn maybe_invoke_explicit_skill_command(
                 }],
                 None,
             )?;
-            session.add_tool_results(vec![ToolResultBlock::from_tool_result(
+            session.add_tool_results(vec![crate::ir::ContentPart::from_tool_result(
                 &tool_call_id,
                 &result,
             )])?;

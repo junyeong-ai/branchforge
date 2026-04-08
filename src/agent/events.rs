@@ -5,7 +5,6 @@ use serde::{Deserialize, Serialize};
 use super::state::{AgentMetrics, AgentState};
 use crate::ir::FinishReason;
 use crate::ir::Message;
-use crate::types::Usage;
 
 /// Events emitted during agent execution.
 ///
@@ -121,7 +120,7 @@ impl AgentEvent {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentResult {
     pub text: String,
-    pub usage: Usage,
+    pub usage: crate::ir::Usage,
     pub tool_calls: usize,
     pub iterations: usize,
     pub stop_reason: FinishReason,
@@ -138,7 +137,7 @@ pub struct AgentResult {
 impl AgentResult {
     pub(crate) fn new(
         text: String,
-        usage: Usage,
+        usage: crate::ir::Usage,
         iterations: usize,
         stop_reason: FinishReason,
         metrics: AgentMetrics,
@@ -167,8 +166,8 @@ impl AgentResult {
     }
 
     #[must_use]
-    pub fn total_tokens(&self) -> u32 {
-        self.usage.total()
+    pub fn total_tokens(&self) -> u64 {
+        self.usage.input_tokens + self.usage.total_output_tokens()
     }
 
     #[must_use]

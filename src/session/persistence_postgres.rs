@@ -411,7 +411,7 @@ fn reconstruct_session_from_row(
         messages: Vec::new(),
         current_leaf_id: current_leaf_id.clone(),
         summary: row.try_get("summary").ok(),
-        total_usage: crate::types::TokenUsage {
+        total_usage: crate::ir::Usage {
             input_tokens: row.try_get::<i64, _>("total_input_tokens").unwrap_or(0) as u64,
             output_tokens: row.try_get::<i64, _>("total_output_tokens").unwrap_or(0) as u64,
             ..Default::default()

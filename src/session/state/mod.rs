@@ -26,7 +26,7 @@ use crate::graph::{GraphNode, NodeId, NodeKind, NodeProvenance, SessionGraph};
 use crate::ir::{ContentPart, Message, Role};
 use crate::session::types::{CompactRecord, Plan, TodoItem, TodoStatus};
 use crate::session::{SessionError, SessionResult};
-use crate::types::{CacheTtl, TokenUsage, Usage};
+use crate::types::CacheTtl;
 
 /// Transient content overrides for micro-compaction.
 ///
@@ -77,7 +77,7 @@ pub struct Session {
     pub messages: Vec<SessionMessage>,
     pub current_leaf_id: Option<MessageId>,
     pub summary: Option<String>,
-    pub total_usage: TokenUsage,
+    pub total_usage: crate::ir::Usage,
     #[serde(default)]
     pub current_input_tokens: u64,
     pub total_cost_usd: Decimal,
@@ -161,7 +161,7 @@ impl Session {
             messages: Vec::with_capacity(32),
             current_leaf_id: None,
             summary: None,
-            total_usage: TokenUsage::default(),
+            total_usage: crate::ir::Usage::default(),
             current_input_tokens: 0,
             total_cost_usd: Decimal::ZERO,
             static_context_hash: None,
@@ -545,48 +545,13 @@ impl Session {
             self.current_input_tokens = u.input_tokens
                 + u.cached_input_tokens.unwrap_or(0)
                 + u.cache_creation_tokens.unwrap_or(0);
-            msg = msg.usage(TokenUsage {
-                input_tokens: u.input_tokens,
-                output_tokens: u.output_tokens,
-                cache_read_input_tokens: u.cached_input_tokens.unwrap_or(0),
-                cache_creation_input_tokens: u.cache_creation_tokens.unwrap_or(0),
-                ..Default::default()
-            });
+            msg = msg.usage(u);
         }
         self.add_message(msg)
     }
 
-    pub fn add_tool_results(
-        &mut self,
-        results: Vec<crate::types::ToolResultBlock>,
-    ) -> SessionResult<()> {
-        let content: Vec<ContentPart> = results
-            .into_iter()
-            .map(|tr| ContentPart::ToolResult {
-                tool_call_id: tr.tool_use_id,
-                content: match tr.content {
-                    Some(crate::types::ToolResultContent::Text(s)) => {
-                        crate::ir::ToolResultContent::Text(s)
-                    }
-                    Some(crate::types::ToolResultContent::Blocks(blocks)) => {
-                        let text = blocks
-                            .iter()
-                            .filter_map(|b| match b {
-                                crate::types::ToolResultContentBlock::Text { text } => {
-                                    Some(text.as_str())
-                                }
-                                _ => None,
-                            })
-                            .collect::<Vec<_>>()
-                            .join("\n");
-                        crate::ir::ToolResultContent::Text(text)
-                    }
-                    None => crate::ir::ToolResultContent::Text(String::new()),
-                },
-                is_error: tr.is_error.unwrap_or(false),
-            })
-            .collect();
-        let msg = SessionMessage::user(content);
+    pub fn add_tool_results(&mut self, results: Vec<crate::ir::ContentPart>) -> SessionResult<()> {
+        let msg = SessionMessage::user(results);
         self.add_message(msg)
     }
 
@@ -619,9 +584,9 @@ impl Session {
             && self.current_input_tokens as f64 > max_tokens as f64 * threshold as f64
     }
 
-    pub fn update_usage(&mut self, usage: &Usage) {
-        self.current_input_tokens = usage.context_usage() as u64;
-        self.total_usage.add_usage(usage);
+    pub fn update_usage(&mut self, usage: &crate::ir::Usage) {
+        self.current_input_tokens = usage.input_tokens + usage.cached_input_tokens.unwrap_or(0);
+        self.total_usage.add(usage);
     }
 
     pub async fn compact(
@@ -934,20 +899,22 @@ mod tests {
     fn test_token_usage_accumulation() {
         let mut session = Session::new(SessionConfig::default());
 
-        let msg1 =
-            SessionMessage::assistant(vec![ContentPart::text("Response 1")]).usage(TokenUsage {
+        let msg1 = SessionMessage::assistant(vec![ContentPart::text("Response 1")]).usage(
+            crate::ir::Usage {
                 input_tokens: 100,
                 output_tokens: 50,
                 ..Default::default()
-            });
+            },
+        );
         session.add_message(msg1).unwrap();
 
-        let msg2 =
-            SessionMessage::assistant(vec![ContentPart::text("Response 2")]).usage(TokenUsage {
+        let msg2 = SessionMessage::assistant(vec![ContentPart::text("Response 2")]).usage(
+            crate::ir::Usage {
                 input_tokens: 150,
                 output_tokens: 75,
                 ..Default::default()
-            });
+            },
+        );
         session.add_message(msg2).unwrap();
 
         assert_eq!(session.total_usage.input_tokens, 250);

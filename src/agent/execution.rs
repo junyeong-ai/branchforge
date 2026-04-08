@@ -21,7 +21,7 @@ use crate::hooks::{HookContext, HookEvent, HookInput};
 use crate::ir::FinishReason;
 use crate::ir::Message;
 use crate::session::{MessageMetadata, ToolExecution};
-use crate::types::{AuthorizationDenied, ToolResultBlock, Usage, context_window};
+use crate::types::{AuthorizationDenied, context_window};
 
 impl Agent {
     fn check_budget(&self) -> crate::Result<()> {
@@ -189,7 +189,7 @@ impl Agent {
         let mut final_text = String::new();
         let mut final_stop_reason = FinishReason::Stop;
         let mut dynamic_rules_context = String::new();
-        let mut total_usage = Usage::default();
+        let mut total_usage = crate::ir::Usage::default();
 
         if maybe_invoke_explicit_skill_command(
             &self.runtime.tools,
@@ -474,7 +474,7 @@ impl Agent {
                         .stop_reason
                         .clone()
                         .unwrap_or_else(|| "Blocked by hook".into());
-                    blocked.push(ToolResultBlock::error(tool_id, reason.clone()));
+                    blocked.push(crate::ir::ContentPart::tool_error(tool_id, reason.clone()));
                     metrics.record_authorization_denial(
                         AuthorizationDenied::new(tool_name, tool_id, tool_input.clone())
                             .reason(reason),
@@ -569,7 +569,7 @@ impl Agent {
                     )
                     .await?;
 
-                results.push(ToolResultBlock::from_tool_result(&id, &result));
+                results.push(crate::ir::ContentPart::from_tool_result(&id, &result));
             }
 
             self.state

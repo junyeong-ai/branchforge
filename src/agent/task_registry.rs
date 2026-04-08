@@ -800,17 +800,7 @@ impl TaskRegistry {
         let execution = message.metadata.execution.as_ref();
         let usage = execution
             .and_then(|metadata| metadata.usage.clone())
-            .or_else(|| {
-                message.usage.as_ref().map(|usage| crate::ir::Usage {
-                    input_tokens: usage.input_tokens,
-                    output_tokens: usage.output_tokens,
-                    cached_input_tokens: (usage.cache_read_input_tokens > 0)
-                        .then_some(usage.cache_read_input_tokens),
-                    cache_creation_tokens: (usage.cache_creation_input_tokens > 0)
-                        .then_some(usage.cache_creation_input_tokens),
-                    ..Default::default()
-                })
-            });
+            .or_else(|| message.usage.clone());
 
         (execution.is_some() || usage.is_some()).then(|| TaskExecutionSummary {
             result_uuid: execution.and_then(|metadata| metadata.result_uuid.clone()),
@@ -844,7 +834,7 @@ impl TaskRegistry {
                 stop_reason: Some(result.stop_reason.clone()),
                 iterations: Some(result.iterations),
                 tool_calls: Some(result.tool_calls),
-                usage: Some((&result.usage).into()),
+                usage: Some(result.usage.clone()),
                 execution_time_ms: Some(result.metrics.execution_time_ms),
                 api_calls: Some(result.metrics.api_calls),
                 compactions: Some(result.metrics.compactions),
@@ -956,7 +946,6 @@ mod tests {
     use crate::ir::FinishReason;
     use crate::ir::Role;
     use crate::session::{MemoryPersistence, QueueItem, SessionMessage};
-    use crate::types::Usage;
     use std::sync::atomic::{AtomicBool, Ordering};
     use uuid::Uuid;
 
@@ -1072,7 +1061,7 @@ mod tests {
     fn mock_result(session_id: &str) -> AgentResult {
         AgentResult {
             text: "Test result".to_string(),
-            usage: Usage::default(),
+            usage: crate::ir::Usage::default(),
             tool_calls: 0,
             iterations: 1,
             stop_reason: FinishReason::Stop,
@@ -1511,12 +1500,12 @@ mod tests {
         result.uuid = "result-uuid".to_string();
         result.tool_calls = 3;
         result.iterations = 4;
-        result.usage = Usage {
+        result.usage = crate::ir::Usage {
             input_tokens: 10,
             output_tokens: 20,
-            cache_read_input_tokens: Some(3),
-            cache_creation_input_tokens: Some(1),
-            server_tool_use: None,
+            cached_input_tokens: Some(3),
+            cache_creation_tokens: Some(1),
+            ..Default::default()
         };
         result.metrics.execution_time_ms = 250;
         result.metrics.api_calls = 2;

@@ -34,7 +34,7 @@ impl AgentState {
     }
 }
 
-use crate::types::{AuthorizationDenied, ModelUsage, ServerToolUse, ServerToolUseUsage, Usage};
+use crate::types::{AuthorizationDenied, ModelUsage, ServerToolUse, ServerToolUseUsage};
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct AgentMetrics {
@@ -83,17 +83,15 @@ impl AgentMetrics {
         self.input_tokens.saturating_add(self.output_tokens)
     }
 
-    pub fn add_usage_with_cache(&mut self, usage: &Usage) {
-        self.input_tokens = self.input_tokens.saturating_add(usage.input_tokens as u64);
-        self.output_tokens = self
-            .output_tokens
-            .saturating_add(usage.output_tokens as u64);
+    pub fn add_usage_with_cache(&mut self, usage: &crate::ir::Usage) {
+        self.input_tokens = self.input_tokens.saturating_add(usage.input_tokens);
+        self.output_tokens = self.output_tokens.saturating_add(usage.output_tokens);
         self.cache_read_tokens = self
             .cache_read_tokens
-            .saturating_add(usage.cache_read_input_tokens.unwrap_or(0) as u64);
+            .saturating_add(usage.cached_input_tokens.unwrap_or(0));
         self.cache_creation_tokens = self
             .cache_creation_tokens
-            .saturating_add(usage.cache_creation_input_tokens.unwrap_or(0) as u64);
+            .saturating_add(usage.cache_creation_tokens.unwrap_or(0));
     }
 
     /// Calculate cache hit rate as a proportion of input tokens.
@@ -199,9 +197,9 @@ impl AgentMetrics {
     /// Record usage for a specific model.
     ///
     /// This enables per-model cost tracking like CLI's modelUsage field.
-    pub fn record_model_usage(&mut self, model: &str, usage: &Usage) {
+    pub fn record_model_usage(&mut self, model: &str, usage: &crate::ir::Usage) {
         let entry = self.model_usage.entry(model.to_string()).or_default();
-        entry.add_usage(usage, model);
+        entry.add_ir_usage(usage, model);
     }
 
     /// Record an API call with timing information.
@@ -280,15 +278,15 @@ mod tests {
     #[test]
     fn test_agent_metrics() {
         let mut metrics = AgentMetrics::default();
-        metrics.add_usage_with_cache(&Usage {
+        metrics.add_usage_with_cache(&crate::ir::Usage {
             input_tokens: 100,
             output_tokens: 50,
             ..Default::default()
         });
-        metrics.add_usage_with_cache(&Usage {
+        metrics.add_usage_with_cache(&crate::ir::Usage {
             input_tokens: 200,
             output_tokens: 100,
-            cache_read_input_tokens: Some(30),
+            cached_input_tokens: Some(30),
             ..Default::default()
         });
 

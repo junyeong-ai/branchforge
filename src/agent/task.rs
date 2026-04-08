@@ -307,7 +307,7 @@ fn completed_task_output(agent_id: String, result: &super::AgentResult) -> TaskO
             stop_reason: Some(result.stop_reason.clone()),
             iterations: Some(result.iterations),
             tool_calls: Some(result.tool_calls),
-            usage: Some((&result.usage).into()),
+            usage: Some(result.usage.clone()),
             execution_time_ms: Some(result.metrics.execution_time_ms),
             api_calls: Some(result.metrics.api_calls),
             compactions: Some(result.metrics.compactions),
@@ -588,7 +588,6 @@ mod tests {
     use crate::ir::{ContentPart, Role};
     use crate::session::{MemoryPersistence, SessionConfig, SessionManager};
     use crate::tools::{ExecutionContext, Tool};
-    use crate::types::Usage;
 
     fn test_context() -> ExecutionContext {
         ExecutionContext::default()
@@ -667,12 +666,12 @@ mod tests {
     fn test_completed_task_output_preserves_full_assistant_content() {
         let result = AgentResult {
             text: "primary text".to_string(),
-            usage: Usage {
+            usage: crate::ir::Usage {
                 input_tokens: 5,
                 output_tokens: 8,
-                cache_read_input_tokens: Some(2),
-                cache_creation_input_tokens: Some(1),
-                server_tool_use: None,
+                cached_input_tokens: Some(2),
+                cache_creation_tokens: Some(1),
+                ..Default::default()
             },
             tool_calls: 2,
             iterations: 3,

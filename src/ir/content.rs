@@ -122,6 +122,47 @@ impl ContentPart {
         }
     }
 
+    /// Build an IR `ToolResult` content part from a legacy `types::ToolResult`.
+    ///
+    /// This is the canonical conversion point used by the agent layer to
+    /// avoid depending on `types::ToolResultBlock`.
+    pub fn from_tool_result(call_id: impl Into<String>, result: &crate::types::ToolResult) -> Self {
+        use crate::types::{ToolOutput, ToolOutputBlock};
+        let call_id = call_id.into();
+        match &result.output {
+            ToolOutput::Success(text) => ContentPart::ToolResult {
+                tool_call_id: call_id,
+                content: ToolResultContent::Text(text.clone()),
+                is_error: false,
+            },
+            ToolOutput::SuccessBlocks(blocks) => {
+                let text = blocks
+                    .iter()
+                    .filter_map(|b| match b {
+                        ToolOutputBlock::Text { text } => Some(text.as_str()),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                ContentPart::ToolResult {
+                    tool_call_id: call_id,
+                    content: ToolResultContent::Text(text),
+                    is_error: false,
+                }
+            }
+            ToolOutput::Error(e) => ContentPart::ToolResult {
+                tool_call_id: call_id,
+                content: ToolResultContent::Text(e.to_string()),
+                is_error: true,
+            },
+            ToolOutput::Empty => ContentPart::ToolResult {
+                tool_call_id: call_id,
+                content: ToolResultContent::Text(String::new()),
+                is_error: false,
+            },
+        }
+    }
+
     /// Extract the text content if this is a `Text` part.
     pub fn as_text(&self) -> Option<&str> {
         match self {

@@ -43,7 +43,7 @@ use super::state::{
 use super::types::{CompactRecord, Plan, QueueItem, QueueOperation, QueueStatus, TodoItem};
 use super::{Persistence, SessionError, SessionResult};
 use crate::graph::{GraphEvent, GraphMaterializer, GraphValidator, SessionGraph};
-use crate::types::TokenUsage;
+use crate::ir::Usage as IrUsage;
 
 // ============================================================================
 // Enum Serialization Helpers (consistent with persistence_postgres.rs)
@@ -239,24 +239,32 @@ pub struct UsageInfo {
     pub cache_read_input_tokens: u64,
 }
 
-impl From<&TokenUsage> for UsageInfo {
-    fn from(u: &TokenUsage) -> Self {
+impl From<&IrUsage> for UsageInfo {
+    fn from(u: &IrUsage) -> Self {
         Self {
             input_tokens: u.input_tokens,
             output_tokens: u.output_tokens,
-            cache_creation_input_tokens: u.cache_creation_input_tokens,
-            cache_read_input_tokens: u.cache_read_input_tokens,
+            cache_creation_input_tokens: u.cache_creation_tokens.unwrap_or(0),
+            cache_read_input_tokens: u.cached_input_tokens.unwrap_or(0),
         }
     }
 }
 
-impl From<&UsageInfo> for TokenUsage {
+impl From<&UsageInfo> for IrUsage {
     fn from(u: &UsageInfo) -> Self {
         Self {
             input_tokens: u.input_tokens,
             output_tokens: u.output_tokens,
-            cache_creation_input_tokens: u.cache_creation_input_tokens,
-            cache_read_input_tokens: u.cache_read_input_tokens,
+            cached_input_tokens: if u.cache_read_input_tokens > 0 {
+                Some(u.cache_read_input_tokens)
+            } else {
+                None
+            },
+            cache_creation_tokens: if u.cache_creation_input_tokens > 0 {
+                Some(u.cache_creation_input_tokens)
+            } else {
+                None
+            },
             ..Default::default()
         }
     }
@@ -996,13 +1004,13 @@ impl JsonlPersistence {
         }
     }
 
-    fn usage_info_with_increment(base: &UsageInfo, usage: &Option<TokenUsage>) -> UsageInfo {
+    fn usage_info_with_increment(base: &UsageInfo, usage: &Option<IrUsage>) -> UsageInfo {
         let mut next = base.clone();
         if let Some(usage) = usage {
             next.input_tokens += usage.input_tokens;
             next.output_tokens += usage.output_tokens;
-            next.cache_creation_input_tokens += usage.cache_creation_input_tokens;
-            next.cache_read_input_tokens += usage.cache_read_input_tokens;
+            next.cache_creation_input_tokens += usage.cache_creation_tokens.unwrap_or(0);
+            next.cache_read_input_tokens += usage.cached_input_tokens.unwrap_or(0);
         }
         next
     }
@@ -1395,7 +1403,7 @@ impl JsonlPersistence {
                             );
                             Default::default()
                         });
-                    session.total_usage = TokenUsage::from(&m.total_usage);
+                    session.total_usage = IrUsage::from(&m.total_usage);
                     session.total_cost_usd = m.total_cost_usd;
                     session.static_context_hash = m.static_context_hash;
                     session.error = m.error;
