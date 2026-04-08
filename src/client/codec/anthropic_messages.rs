@@ -619,9 +619,16 @@ fn enforce_cache_breakpoint_cap(body: &mut Value) -> usize {
         CacheMarkerVisit::Continue
     });
 
-    debug_assert_eq!(
+    // This is a correctness invariant, not a perf diagnostic — if
+    // `for_each_cache_marker_in_stream_order` failed to visit all markers
+    // the request would go out with too many cache_control blocks and the
+    // API would reject it. Use `assert!` so release builds catch the
+    // mismatch too (the cost is a single comparison on a hot path that
+    // runs at most once per LLM call).
+    assert_eq!(
         to_drop, 0,
-        "enforce_cache_breakpoint_cap: failed to remove all excess markers"
+        "enforce_cache_breakpoint_cap: failed to remove all excess markers \
+         (to_drop={to_drop}, removed={removed})"
     );
     removed
 }
