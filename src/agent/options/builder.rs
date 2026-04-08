@@ -1231,4 +1231,155 @@ mod tests {
         let error = result.err().unwrap();
         assert!(error.to_string().contains("Invalid session ID"));
     }
+
+    // =========================================================================
+    // R10 fix regression guards — Auth wiring + OAuth header injection
+    // =========================================================================
+
+    /// R10-fix-1 — `Auth::ApiKey` resolves to a real credential and the
+    /// builder constructs an explicit `ProviderClient` instead of falling
+    /// through to `preset.build_from_env()`. Pre-fix: build_llm() ignored
+    /// `self.credential` and tried to load `ANTHROPIC_API_KEY` from env.
+    #[tokio::test]
+    async fn test_auth_api_key_wires_provider_client() {
+        let builder = AgentBuilder::new()
+            .auth(crate::auth::Auth::api_key("sk-test-static-key"))
+            .await
+            .expect("api_key auth resolves");
+        assert!(
+            builder.provider_client.is_some(),
+            "auth(ApiKey) must wire a ProviderClient so build_llm doesn't \
+             fall back to env-var preset loading"
+        );
+        let pc = builder.provider_client.as_ref().unwrap();
+        assert_eq!(pc.codec_id(), "anthropic-messages");
+    }
+
+    /// R10-fix-2 — `Auth::OAuth` (and `Auth::ClaudeCli` under cli-auth)
+    /// resolves a Bearer credential and the resulting `DirectTransport`
+    /// must include the Claude Code OAuth headers + `?beta=true` URL
+    /// flag. Without these, the Anthropic API rejects with "OAuth
+    /// authentication is currently not supported".
+    #[tokio::test]
+    async fn test_auth_oauth_wires_oauth_headers() {
+        let builder = AgentBuilder::new()
+            .auth(crate::auth::Auth::oauth("oat_test_token"))
+            .await
+            .expect("oauth auth resolves");
+        assert!(builder.provider_client.is_some());
+
+        let pc = builder.provider_client.as_ref().unwrap();
+        // Resolve the endpoint via the codec shape so we observe the
+        // headers + URL the transport will actually emit on every call.
+        use crate::client::codec::{InvocationMode, ModelCodec};
+        let codec = crate::client::codec::AnthropicMessagesCodec::new();
+        let endpoint = pc
+            .transport()
+            .resolve_endpoint(
+                codec.endpoint_shape(),
+                "claude-haiku-4-5",
+                InvocationMode::Unary,
+            )
+            .await
+            .expect("resolve_endpoint succeeds");
+
+        // The `?beta=true` query flag is REQUIRED for OAuth acceptance.
+        assert!(
+            endpoint.url.contains("beta=true"),
+            "expected ?beta=true in OAuth URL: {}",
+            endpoint.url
+        );
+
+        // Required OAuth headers from `OAuthConfig::default()`.
+        let header_names: Vec<&str> = endpoint.headers.iter().map(|(k, _)| k.as_str()).collect();
+        for required in [
+            "user-agent",
+            "x-app",
+            "anthropic-dangerous-direct-browser-access",
+            "anthropic-beta",
+        ] {
+            assert!(
+                header_names.contains(&required),
+                "expected header `{required}` in OAuth endpoint, got: {header_names:?}"
+            );
+        }
+
+        // The anthropic-beta header must contain BOTH the OAuth marker
+        // (`oauth-2025-04-20`) and the Claude Code marker
+        // (`claude-code-20250219`).
+        let beta_header = endpoint
+            .headers
+            .iter()
+            .find(|(k, _)| k == "anthropic-beta")
+            .map(|(_, v)| v.as_str())
+            .unwrap();
+        assert!(
+            beta_header.contains("oauth-2025-04-20"),
+            "expected oauth-2025-04-20 in anthropic-beta: {beta_header}"
+        );
+        assert!(
+            beta_header.contains("claude-code-20250219"),
+            "expected claude-code-20250219 in anthropic-beta: {beta_header}"
+        );
+    }
+
+    /// R10-fix-1 — `Auth::ApiKey` (no OAuth) must NOT inject the OAuth
+    /// headers nor `?beta=true`. The bug we'd avoid: a static API key
+    /// going out with `claude-cli/2.0.76` user-agent, which is wrong.
+    #[tokio::test]
+    async fn test_auth_api_key_does_not_inject_oauth_headers() {
+        let builder = AgentBuilder::new()
+            .auth(crate::auth::Auth::api_key("sk-test-key"))
+            .await
+            .unwrap();
+        let pc = builder.provider_client.as_ref().unwrap();
+        use crate::client::codec::{InvocationMode, ModelCodec};
+        let codec = crate::client::codec::AnthropicMessagesCodec::new();
+        let endpoint = pc
+            .transport()
+            .resolve_endpoint(
+                codec.endpoint_shape(),
+                "claude-haiku-4-5",
+                InvocationMode::Unary,
+            )
+            .await
+            .unwrap();
+        assert!(
+            !endpoint.url.contains("beta=true"),
+            "ApiKey path must not append ?beta=true: {}",
+            endpoint.url
+        );
+        let header_names: Vec<&str> = endpoint.headers.iter().map(|(k, _)| k.as_str()).collect();
+        assert!(
+            !header_names.contains(&"x-app"),
+            "ApiKey path must not inject x-app header (Claude Code only)"
+        );
+    }
+
+    #[test]
+    fn auth_targets_direct_anthropic_covers_all_direct_variants() {
+        // ApiKey, FromEnv, OAuth, Resolved → all direct.
+        assert!(AgentBuilder::auth_targets_direct_anthropic(
+            &crate::auth::Auth::api_key("k")
+        ));
+        assert!(AgentBuilder::auth_targets_direct_anthropic(
+            &crate::auth::Auth::from_env()
+        ));
+        assert!(AgentBuilder::auth_targets_direct_anthropic(
+            &crate::auth::Auth::oauth("t")
+        ));
+        // Resolved with an api-key credential.
+        assert!(AgentBuilder::auth_targets_direct_anthropic(
+            &crate::auth::Auth::Resolved(crate::auth::Credential::api_key("k"))
+        ));
+
+        // Cloud-provider variants must NOT be routed here.
+        #[cfg(feature = "aws")]
+        {
+            let bedrock = crate::auth::Auth::Bedrock {
+                region: "us-east-1".into(),
+            };
+            assert!(!AgentBuilder::auth_targets_direct_anthropic(&bedrock));
+        }
+    }
 }

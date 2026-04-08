@@ -1352,4 +1352,234 @@ mod tests {
             FinishReason::Other("weird".into())
         );
     }
+
+    // =============================================================================
+    // R10 fix regression guards
+    //
+    // Each function below pins one of the five fixes added in R10 after live
+    // testing exposed bugs the static audits had missed. Without these unit
+    // tests the fixes were only validated by the live integration test, which
+    // does not run in CI.
+    // =============================================================================
+
+    /// R10-fix-3 — `enforce_cache_breakpoint_cap` drops the EARLIEST markers
+    /// when the request stream contains more than `MAX_CACHE_BREAKPOINTS=4`.
+    #[test]
+    fn enforce_cache_cap_drops_earliest_when_over() {
+        let mut body = json!({
+            "system": [
+                {"type": "text", "text": "s0", "cache_control": {"type": "ephemeral", "ttl": "1h"}},
+                {"type": "text", "text": "s1", "cache_control": {"type": "ephemeral", "ttl": "1h"}},
+                {"type": "text", "text": "s2", "cache_control": {"type": "ephemeral", "ttl": "1h"}},
+            ],
+            "tools": [
+                {"name": "t0", "cache_control": {"type": "ephemeral", "ttl": "1h"}}
+            ],
+            "messages": [
+                {"role": "user", "content": [
+                    {"type": "text", "text": "u0", "cache_control": {"type": "ephemeral", "ttl": "1h"}}
+                ]}
+            ]
+        });
+        // 5 markers total, cap is 4 → drop 1.
+        let removed = enforce_cache_breakpoint_cap(&mut body);
+        assert_eq!(removed, 1);
+        // Earliest marker (system[0]) should be dropped.
+        assert!(body["system"][0].get("cache_control").is_none());
+        assert!(body["system"][1].get("cache_control").is_some());
+        assert!(body["system"][2].get("cache_control").is_some());
+        assert!(body["tools"][0].get("cache_control").is_some());
+        assert!(
+            body["messages"][0]["content"][0]
+                .get("cache_control")
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn enforce_cache_cap_no_op_when_at_or_under_limit() {
+        let mut body = json!({
+            "system": [
+                {"type": "text", "text": "s0", "cache_control": {"type": "ephemeral", "ttl": "1h"}},
+                {"type": "text", "text": "s1", "cache_control": {"type": "ephemeral", "ttl": "1h"}},
+            ],
+            "tools": [{"name": "t0", "cache_control": {"type": "ephemeral", "ttl": "1h"}}],
+            "messages": [
+                {"role": "user", "content": [{"type": "text", "text": "u0", "cache_control": {"type": "ephemeral", "ttl": "1h"}}]}
+            ]
+        });
+        // Exactly 4 markers — no drop.
+        assert_eq!(enforce_cache_breakpoint_cap(&mut body), 0);
+        assert!(body["system"][0].get("cache_control").is_some());
+        assert!(body["system"][1].get("cache_control").is_some());
+    }
+
+    #[test]
+    fn enforce_cache_cap_handles_string_system_prompt() {
+        // SystemPrompt::Text encodes `system` as a JSON string, not an array.
+        // The cap function must skip it without panicking.
+        let mut body = json!({
+            "system": "plain string system",
+            "messages": []
+        });
+        assert_eq!(enforce_cache_breakpoint_cap(&mut body), 0);
+        assert_eq!(body["system"], "plain string system");
+    }
+
+    #[test]
+    fn enforce_cache_cap_drops_across_all_three_positions() {
+        // 6 markers split across system + tools + messages.
+        let mut body = json!({
+            "system": [
+                {"type": "text", "text": "s0", "cache_control": {"type": "ephemeral"}},
+                {"type": "text", "text": "s1", "cache_control": {"type": "ephemeral"}}
+            ],
+            "tools": [
+                {"name": "t0", "cache_control": {"type": "ephemeral"}},
+                {"name": "t1", "cache_control": {"type": "ephemeral"}}
+            ],
+            "messages": [
+                {"role": "user", "content": [
+                    {"type": "text", "text": "u0", "cache_control": {"type": "ephemeral"}},
+                    {"type": "text", "text": "u1", "cache_control": {"type": "ephemeral"}}
+                ]}
+            ]
+        });
+        // 6 markers total → drop 2 earliest (both system blocks).
+        let removed = enforce_cache_breakpoint_cap(&mut body);
+        assert_eq!(removed, 2);
+        assert!(body["system"][0].get("cache_control").is_none());
+        assert!(body["system"][1].get("cache_control").is_none());
+        assert!(body["tools"][0].get("cache_control").is_some());
+        assert!(body["tools"][1].get("cache_control").is_some());
+        assert!(
+            body["messages"][0]["content"][0]
+                .get("cache_control")
+                .is_some()
+        );
+        assert!(
+            body["messages"][0]["content"][1]
+                .get("cache_control")
+                .is_some()
+        );
+    }
+
+    /// R10-fix-4 — `apply_cache_control` propagates `cc.ttl` to all marker
+    /// positions so the request stream is monotonically non-increasing in
+    /// TTL (Anthropic API enforces this).
+    #[test]
+    fn apply_cache_control_propagates_ttl_to_all_positions() {
+        let mut body = json!({
+            "system": [{"type": "text", "text": "sys"}],
+            "tools": [{"name": "calc"}],
+            "messages": [{"role": "user", "content": [{"type": "text", "text": "hi"}]}],
+        });
+        let cc = crate::ir::CacheControl {
+            system: true,
+            tools: true,
+            conversation: true,
+            ttl: Some("1h".into()),
+        };
+        apply_cache_control(&mut body, &cc);
+        assert_eq!(body["system"][0]["cache_control"]["ttl"], "1h");
+        assert_eq!(body["tools"][0]["cache_control"]["ttl"], "1h");
+        assert_eq!(
+            body["messages"][0]["content"][0]["cache_control"]["ttl"],
+            "1h"
+        );
+    }
+
+    #[test]
+    fn apply_cache_control_omits_ttl_when_none() {
+        let mut body = json!({
+            "system": [{"type": "text", "text": "sys"}],
+        });
+        let cc = crate::ir::CacheControl {
+            system: true,
+            tools: false,
+            conversation: false,
+            ttl: None,
+        };
+        apply_cache_control(&mut body, &cc);
+        // No `ttl` field — defaults to 5m on the API side.
+        assert!(body["system"][0]["cache_control"].get("ttl").is_none());
+        assert_eq!(body["system"][0]["cache_control"]["type"], "ephemeral");
+    }
+
+    /// R10-fix-5 — `decode_usage` reconstructs total `input_tokens` from
+    /// fresh + cache_read + cache_creation so cached stays a subset (the
+    /// IR invariant). The previous behaviour panicked under heavy caching
+    /// with `cached(5253) > input(2)`.
+    #[test]
+    fn decode_usage_heavy_cache_reconstruct_total() {
+        // Simulates the exact live-API failure observed during R10:
+        // fresh=2, cache_read=5253. Pre-fix: input=2, cached=5253 → panic.
+        // Post-fix: input=5255, cached=5253, billable=2.
+        let usage = json!({
+            "input_tokens": 2,
+            "output_tokens": 7,
+            "cache_read_input_tokens": 5253
+        });
+        let u = decode_usage(&usage);
+        assert_eq!(u.input_tokens, 5255);
+        assert_eq!(u.cached_input_tokens, Some(5253));
+        assert_eq!(u.billable_input_tokens(), 2);
+
+        // Sanity-check: feeding through `Usage::add` must not panic on
+        // the IR invariant `cached <= input`.
+        let mut acc = crate::ir::Usage::default();
+        acc.add(&u);
+        assert_eq!(acc.input_tokens, 5255);
+    }
+
+    #[test]
+    fn decode_usage_cache_read_plus_creation_both_summed() {
+        let usage = json!({
+            "input_tokens": 10,
+            "output_tokens": 20,
+            "cache_read_input_tokens": 100,
+            "cache_creation_input_tokens": 50
+        });
+        let u = decode_usage(&usage);
+        assert_eq!(u.input_tokens, 160);
+        assert_eq!(u.cached_input_tokens, Some(100));
+        assert_eq!(u.cache_creation_tokens, Some(50));
+        assert_eq!(u.billable_input_tokens(), 60);
+    }
+
+    #[test]
+    fn decode_usage_no_cache_fields_unaffected() {
+        // No cache fields → behaves identically to the pre-fix decoder.
+        let usage = json!({
+            "input_tokens": 100,
+            "output_tokens": 50
+        });
+        let u = decode_usage(&usage);
+        assert_eq!(u.input_tokens, 100);
+        assert_eq!(u.output_tokens, 50);
+        assert_eq!(u.cached_input_tokens, None);
+        assert_eq!(u.cache_creation_tokens, None);
+    }
+
+    #[test]
+    fn decode_message_delta_streaming_reconstructs_total() {
+        // Streaming variant must apply the same total-input reconstruction.
+        let v = json!({
+            "delta": {"stop_reason": "end_turn"},
+            "usage": {
+                "input_tokens": 5,
+                "output_tokens": 10,
+                "cache_read_input_tokens": 200
+            }
+        });
+        let chunks = decode_message_delta(&v);
+        // Two chunks: a UsageDelta and a Finish.
+        let usage_delta = chunks.iter().find_map(|c| match c {
+            ModelStreamChunk::UsageDelta(u) => Some(u),
+            _ => None,
+        });
+        let pu = usage_delta.expect("UsageDelta chunk emitted");
+        assert_eq!(pu.input_tokens, Some(205));
+        assert_eq!(pu.cached_input_tokens, Some(200));
+    }
 }

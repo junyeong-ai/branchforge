@@ -90,6 +90,15 @@ impl ProviderClient {
         self.codec.as_ref()
     }
 
+    /// Borrow the transport for endpoint / header inspection. Used by
+    /// agent-builder regression tests that assert OAuth-specific headers
+    /// (`x-app`, `anthropic-beta`, …) and the `?beta=true` URL flag are
+    /// applied when wired via [`crate::auth::Auth::ClaudeCli`] /
+    /// [`crate::auth::Auth::OAuth`]. Read-only by design.
+    pub fn transport(&self) -> &dyn crate::client::transport::ModelTransport {
+        self.transport.as_ref()
+    }
+
     /// Send a unary request and decode the response.
     ///
     /// Pipeline:

@@ -1279,4 +1279,36 @@ mod tests {
             Some(ModelStreamChunk::Error { kind, message }) if kind == "throttlingException" && message == "throttled"
         ));
     }
+
+    /// R10-fix-5 — `decode_usage` reconstructs total `input_tokens` to keep
+    /// `cached_input_tokens` a subset, satisfying the IR invariant. Bedrock
+    /// Converse routes to Anthropic Claude with the same accounting model
+    /// (`inputTokens` is the *non-cached* portion only).
+    #[test]
+    fn decode_usage_heavy_cache_reconstruct_total() {
+        let usage = json!({
+            "inputTokens": 2,
+            "outputTokens": 7,
+            "cacheReadInputTokens": 5253,
+            "cacheWriteInputTokens": 0
+        });
+        let u = decode_usage(&usage);
+        assert_eq!(u.input_tokens, 5255);
+        assert_eq!(u.cached_input_tokens, Some(5253));
+        assert_eq!(u.billable_input_tokens(), 2);
+
+        // Sanity-check: invariant holds under accumulation.
+        let mut acc = crate::ir::Usage::default();
+        acc.add(&u);
+        assert_eq!(acc.input_tokens, 5255);
+    }
+
+    #[test]
+    fn decode_usage_no_cache_fields_unaffected() {
+        let usage = json!({"inputTokens": 100, "outputTokens": 50});
+        let u = decode_usage(&usage);
+        assert_eq!(u.input_tokens, 100);
+        assert_eq!(u.cached_input_tokens, None);
+        assert_eq!(u.cache_creation_tokens, None);
+    }
 }
