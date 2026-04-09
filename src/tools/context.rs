@@ -7,8 +7,8 @@ use std::sync::Arc;
 use serde::{Deserialize, Serialize};
 use tokio_util::sync::CancellationToken;
 
-use crate::authorization::{ToolDecision, ToolLimits};
-use crate::hooks::{HookContext, HookEvent, HookInput, HookManager};
+use crate::authorization::{PermissionDecision, ToolLimits};
+use crate::hooks::{HookContext, HookEvent, HookInput, HookRegistry};
 #[cfg(feature = "coding-tools")]
 use crate::security::bash::{BashAnalysis, SanitizedEnv};
 use crate::security::fs::SecureFileHandle;
@@ -48,7 +48,7 @@ pub(crate) const PROGRESS_CHANNEL_CAPACITY: usize = 256;
 #[derive(Clone)]
 pub struct ExecutionContext {
     security: Arc<SecurityContext>,
-    hooks: Option<HookManager>,
+    hooks: Option<HookRegistry>,
     session_id: Option<String>,
     session_manager: Option<SessionManager>,
     session_scope: Option<SessionAccessScope>,
@@ -87,7 +87,7 @@ impl ExecutionContext {
         })
     }
 
-    pub fn with_hooks(mut self, hooks: HookManager, session_id: impl Into<String>) -> Self {
+    pub fn with_hooks(mut self, hooks: HookRegistry, session_id: impl Into<String>) -> Self {
         self.hooks = Some(hooks);
         self.session_id = Some(session_id.into());
         self
@@ -307,11 +307,15 @@ impl ExecutionContext {
         self.sanitized_env().with_vars(sandbox_env)
     }
 
-    pub fn check_tool_policy(&self, tool_name: &str, input: &serde_json::Value) -> ToolDecision {
+    pub fn check_tool_policy(
+        &self,
+        tool_name: &str,
+        input: &serde_json::Value,
+    ) -> PermissionDecision {
         self.security.policy.tool_policy.check(tool_name, input)
     }
 
-    pub fn check_explicit_skill_permission(&self, input: &serde_json::Value) -> ToolDecision {
+    pub fn check_explicit_skill_permission(&self, input: &serde_json::Value) -> PermissionDecision {
         self.security.policy.tool_policy.check_explicit_skill(input)
     }
 

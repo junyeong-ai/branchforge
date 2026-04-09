@@ -11,7 +11,7 @@ use crate::authorization::ToolPolicy;
 use crate::client::LlmCall;
 use crate::common::{ContentSource, IndexRegistry};
 use crate::context::{PromptOrchestrator, StaticContext};
-use crate::hooks::{HookContext, HookEvent, HookInput, HookManager, HookOutput};
+use crate::hooks::{HookContext, HookEvent, HookInput, HookOutput, HookRegistry};
 use crate::ir::{self, ContentPart, FinishReason};
 use crate::session::types::TodoItem;
 use crate::session::{Session, SessionAccessScope, SessionConfig, SessionId, SessionManager};
@@ -476,7 +476,7 @@ async fn test_execute_persists_live_session_when_session_manager_is_configured()
         .principal("user-1");
     let tools = Arc::new(ToolRegistry::default_tools(ToolSurface::All, None, None));
     let config = Arc::new(AgentConfig::default());
-    let hooks = Arc::new(HookManager::new());
+    let hooks = Arc::new(HookRegistry::new());
     let agent = Agent::from_parts(llm, config, tools, hooks, None)
         .session_persistence(manager.clone(), Some(scope.clone()));
 
@@ -526,7 +526,7 @@ async fn test_execute_routes_explicit_manual_only_skill_before_model_request() {
         llm,
         Arc::new(AgentConfig::default()),
         tools,
-        Arc::new(HookManager::new()),
+        Arc::new(HookRegistry::new()),
         Some(Arc::new(RwLock::new(orchestrator))),
     );
 
@@ -585,7 +585,7 @@ async fn test_execute_routes_explicit_skill_with_default_authorization_mode() {
         llm,
         Arc::new(AgentConfig::default()),
         tools,
-        Arc::new(HookManager::new()),
+        Arc::new(HookRegistry::new()),
         Some(Arc::new(RwLock::new(orchestrator))),
     );
 
@@ -631,7 +631,7 @@ async fn test_execute_by_name_skill_respects_deny_rule() {
         llm,
         Arc::new(AgentConfig::default()),
         tools,
-        Arc::new(HookManager::new()),
+        Arc::new(HookRegistry::new()),
         Some(Arc::new(RwLock::new(orchestrator))),
     );
 
@@ -687,7 +687,7 @@ fn test_format_todo_summary_with_items() {
 async fn test_hook_manager_integration() {
     use helpers::TestTrackingHook;
 
-    let mut hooks = HookManager::new();
+    let mut hooks = HookRegistry::new();
     let hook = TestTrackingHook::new("test-hook", vec![HookEvent::PreToolUse]);
     let call_count = hook.call_count.clone();
 
@@ -708,7 +708,7 @@ async fn test_hook_manager_integration() {
 async fn test_hook_blocking() {
     use helpers::BlockingHook;
 
-    let mut hooks = HookManager::new();
+    let mut hooks = HookRegistry::new();
     hooks.register(BlockingHook {
         reason: "blocked".to_string(),
     });
@@ -728,7 +728,7 @@ async fn test_hook_blocking() {
 async fn test_hook_input_modification() {
     use helpers::InputModifyingHook;
 
-    let mut hooks = HookManager::new();
+    let mut hooks = HookRegistry::new();
     hooks.register(InputModifyingHook);
 
     let input = HookInput::pre_tool_use(
@@ -789,4 +789,175 @@ async fn test_tool_registry_execute_unknown() {
 
     assert!(result.is_error());
     assert!(result.error_message().contains("unknown tool"));
+}
+
+// ── Human-in-the-loop approval tests ────────────────────────────────
+
+struct ScriptedMockLlm {
+    responses: std::sync::Mutex<std::collections::VecDeque<ir::ModelResponse>>,
+}
+
+impl ScriptedMockLlm {
+    fn new(responses: Vec<ir::ModelResponse>) -> Self {
+        Self {
+            responses: std::sync::Mutex::new(responses.into()),
+        }
+    }
+}
+
+impl std::fmt::Debug for ScriptedMockLlm {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ScriptedMockLlm").finish()
+    }
+}
+
+#[async_trait]
+impl LlmCall for ScriptedMockLlm {
+    async fn send(&self, _request: &ir::ModelRequest) -> crate::Result<ir::ModelResponse> {
+        let mut queue = self.responses.lock().unwrap();
+        Ok(queue
+            .pop_front()
+            .expect("ScriptedMockLlm: no more responses"))
+    }
+
+    async fn send_stream(
+        &self,
+        _request: &ir::ModelRequest,
+    ) -> crate::Result<crate::client::provider_client::ChunkStream> {
+        Err(crate::Error::Config("not supported".into()))
+    }
+}
+
+fn make_tool_call_response() -> ir::ModelResponse {
+    ir::ModelResponse {
+        id: "msg_1".into(),
+        model: "test-model".into(),
+        content: vec![ir::ContentPart::ToolCall {
+            id: "tc_1".into(),
+            name: "TestTool".into(),
+            arguments: serde_json::json!({}),
+            origin: Default::default(),
+        }],
+        finish_reason: ir::FinishReason::ToolCalls,
+        usage: ir::Usage {
+            input_tokens: 10,
+            output_tokens: 5,
+            ..Default::default()
+        },
+        continuation: None,
+        warnings: Vec::new(),
+        raw: None,
+    }
+}
+
+fn make_text_response(text: &str) -> ir::ModelResponse {
+    ir::ModelResponse {
+        id: "msg_2".into(),
+        model: "test-model".into(),
+        content: vec![ir::ContentPart::Text { text: text.into() }],
+        finish_reason: ir::FinishReason::Stop,
+        usage: ir::Usage {
+            input_tokens: 10,
+            output_tokens: 5,
+            ..Default::default()
+        },
+        continuation: None,
+        warnings: Vec::new(),
+        raw: None,
+    }
+}
+
+fn build_supervised_agent_with_approval(
+    approval_sender: crate::authorization::ApprovalSender,
+) -> Agent {
+    use crate::authorization::ExecutionMode;
+    use helpers::DummyTool;
+
+    let mock = ScriptedMockLlm::new(vec![
+        make_tool_call_response(),
+        make_text_response("All done."),
+    ]);
+
+    let tools =
+        ToolRegistry::from_context(ExecutionContext::try_permissive().expect("permissive context"));
+    tools.register(Arc::new(DummyTool {
+        name: "TestTool".into(),
+        output: ToolOutput::Success("test output".into()),
+    }));
+    let tools = Arc::new(tools);
+
+    let config = Arc::new(AgentConfig::default());
+    let hooks = Arc::new(HookRegistry::new());
+    let mut agent = Agent::from_parts(Arc::new(mock), config, tools, hooks, None);
+
+    agent.runtime_mut().execution_mode = ExecutionMode::Supervised;
+    agent.runtime_mut().approval_sender = Some(approval_sender);
+    agent
+}
+
+#[tokio::test]
+async fn test_approval_approve_proceeds() {
+    use crate::authorization::approval::{ApprovalResponse, approval_channel};
+
+    let (tx, mut rx) = approval_channel(16);
+
+    tokio::spawn(async move {
+        while let Some((_request, responder)) = rx.recv().await {
+            let _ = responder.send(ApprovalResponse::Approve);
+        }
+    });
+
+    let agent = build_supervised_agent_with_approval(tx);
+    let result = agent.execute("Run the tool").await.unwrap();
+
+    assert_eq!(result.text(), "All done.");
+    assert!(result.iterations >= 2);
+}
+
+#[tokio::test]
+async fn test_approval_deny_blocks() {
+    use crate::authorization::approval::{ApprovalResponse, approval_channel};
+
+    let (tx, mut rx) = approval_channel(16);
+
+    tokio::spawn(async move {
+        while let Some((_request, responder)) = rx.recv().await {
+            let _ = responder.send(ApprovalResponse::Deny {
+                reason: "User said no".into(),
+            });
+        }
+    });
+
+    let agent = build_supervised_agent_with_approval(tx);
+    let result = agent.execute("Run the tool").await.unwrap();
+
+    assert_eq!(result.text(), "All done.");
+    assert_eq!(result.metrics().authorization_denials.len(), 1);
+    assert!(
+        result.metrics().authorization_denials[0]
+            .reason
+            .as_deref()
+            .unwrap()
+            .contains("User said no")
+    );
+}
+
+#[tokio::test]
+async fn test_approval_timeout_defaults_to_deny() {
+    use crate::authorization::approval::approval_channel;
+
+    let (tx, _rx) = approval_channel(16);
+
+    let agent = build_supervised_agent_with_approval(tx);
+    let result = agent.execute("Run the tool").await.unwrap();
+
+    assert_eq!(result.text(), "All done.");
+    assert_eq!(result.metrics().authorization_denials.len(), 1);
+    assert!(
+        result.metrics().authorization_denials[0]
+            .reason
+            .as_deref()
+            .unwrap()
+            .contains("timed out")
+    );
 }

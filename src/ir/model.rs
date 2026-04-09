@@ -178,6 +178,22 @@ impl ModelResponse {
             .iter()
             .filter(|p| matches!(p, ContentPart::ToolCall { .. }))
     }
+
+    /// Construct a minimal response containing a single text part.
+    ///
+    /// Useful for tests and mocks where only the text payload matters.
+    pub fn from_text(text: impl Into<String>) -> Self {
+        Self {
+            id: String::new(),
+            model: String::new(),
+            content: vec![ContentPart::text(text)],
+            finish_reason: FinishReason::Stop,
+            usage: Usage::default(),
+            continuation: None,
+            warnings: Vec::new(),
+            raw: None,
+        }
+    }
 }
 
 /// One conversation message.

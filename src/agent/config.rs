@@ -497,6 +497,25 @@ impl ServerToolsConfig {
     }
 }
 
+/// Streaming behaviour tuning.
+#[derive(Debug, Clone)]
+pub struct StreamConfig {
+    /// Maximum number of chunks to buffer before applying backpressure.
+    pub max_buffer_chunks: usize,
+    /// If a consumer does not drain a chunk within this duration a warning
+    /// is emitted (helps diagnose slow downstream pipelines).
+    pub slow_consumer_warn_threshold: Duration,
+}
+
+impl Default for StreamConfig {
+    fn default() -> Self {
+        Self {
+            max_buffer_chunks: 256,
+            slow_consumer_warn_threshold: Duration::from_secs(5),
+        }
+    }
+}
+
 /// Complete agent configuration combining all domain configs.
 #[derive(Debug, Clone, Default)]
 pub struct AgentConfig {
@@ -507,6 +526,7 @@ pub struct AgentConfig {
     pub budget: BudgetConfig,
     pub prompt: PromptConfig,
     pub cache: CacheConfig,
+    pub stream: StreamConfig,
     pub working_dir: Option<PathBuf>,
     pub server_tools: ServerToolsConfig,
     pub coding_mode: bool,
@@ -549,6 +569,11 @@ impl AgentConfig {
 
     pub fn cache(mut self, config: CacheConfig) -> Self {
         self.cache = config;
+        self
+    }
+
+    pub fn stream(mut self, config: StreamConfig) -> Self {
+        self.stream = config;
         self
     }
 

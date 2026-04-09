@@ -540,7 +540,8 @@ fn graph_with_archive_policy(graph: &SessionGraph, policy: &ArchivePolicy) -> Se
                     *provenance = None;
                 }
                 GraphEventBody::BranchForked { .. }
-                | GraphEventBody::NodeMetadataPatched { .. } => {}
+                | GraphEventBody::NodeMetadataPatched { .. }
+                | GraphEventBody::EventsArchived { .. } => {}
             }
         }
     }

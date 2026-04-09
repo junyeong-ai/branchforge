@@ -91,11 +91,15 @@ pub mod types;
 // =========================================================================
 
 pub use agent::{
-    Agent, AgentBuilder, AgentConfig, AgentEvent, AgentResult, AgentRuntime, RunConfig,
+    Agent, AgentBuilder, AgentCheckpoint, AgentConfig, AgentEvent, AgentResult, AgentRuntime,
+    RunConfig,
 };
 pub use auth::{Auth, Credential};
 pub use auth::{CredentialKind, CredentialRecord};
-pub use authorization::{ExecutionMode, ToolPolicy};
+pub use authorization::{
+    ApprovalReceiver, ApprovalRequest, ApprovalResponse, ApprovalSender, ExecutionMode, ToolPolicy,
+    approval_channel,
+};
 
 // Provider client stack — the only LLM call surface. There is no longer
 // a monolithic `Client` type; applications either compose a
@@ -153,7 +157,7 @@ pub use common::{ContentSource, Index, IndexRegistry, Named, SourceType, ToolRes
 pub use context::{
     ContextBuilder, MemoryLoader, MemoryProvider, PromptOrchestrator, RuleIndex, StaticContext,
 };
-pub use hooks::{CommandHook, Hook, HookContext, HookEvent, HookManager, HookOutput};
+pub use hooks::{CommandHook, Hook, HookContext, HookEvent, HookOutput, HookRegistry};
 pub use output_style::OutputStyle;
 pub use session::{
     InMemoryStore, MemoryEntry, MemoryStore, ScopedSessionManager, Session, SessionConfig,
@@ -168,7 +172,7 @@ pub use auth::ClaudeCliProvider;
 pub use output_style::OutputStyleLoader;
 pub use output_style::SystemPromptGenerator;
 #[cfg(feature = "plugins")]
-pub use plugins::{PluginDescriptor, PluginDiscovery, PluginError, PluginManager, PluginManifest};
+pub use plugins::{PluginDescriptor, PluginDiscovery, PluginError, PluginLoader, PluginManifest};
 #[cfg(feature = "file-resources")]
 pub use subagents::{SubagentFrontmatter, SubagentIndexLoader};
 
@@ -178,17 +182,9 @@ pub use subagents::{SubagentFrontmatter, SubagentIndexLoader};
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum Error {
-    /// API returned an error response.
-    #[error("API error (HTTP {status}): {message}", status = status.map(|s| s.to_string()).unwrap_or_else(|| "unknown".into()))]
-    Api {
-        message: String,
-        status: Option<u16>,
-        error_type: Option<String>,
-    },
-
     /// Authentication failed.
     #[error("Authentication failed: {message}")]
-    Auth { message: String },
+    Authentication { message: String },
 
     /// Network connectivity or request failed.
     #[error("Network request failed: {0}")]
@@ -222,10 +218,6 @@ pub enum Error {
     RateLimit {
         retry_after: Option<std::time::Duration>,
     },
-
-    /// Context window token limit exceeded.
-    #[error("Context limit exceeded: {current}/{max} tokens ({:.0}% used)", (*current as f64 / *max as f64) * 100.0)]
-    ContextOverflow { current: usize, max: usize },
 
     /// Context window would be exceeded by request.
     #[error("Context window exceeded: {estimated} tokens > {limit} limit (overage: {overage})")]
@@ -347,6 +339,8 @@ pub mod error {
         Cancelled,
         /// Output blocked by a content filter / safety policy.
         ContentFilter,
+        /// 413 — request payload too large for the model's context window.
+        PayloadTooLarge,
     }
 }
 
@@ -369,18 +363,14 @@ pub enum ErrorCategory {
 
 impl Error {
     pub fn auth(message: impl Into<String>) -> Self {
-        Error::Auth {
+        Error::Authentication {
             message: message.into(),
         }
     }
 
     pub fn category(&self) -> ErrorCategory {
         match self {
-            Error::Auth { .. } => ErrorCategory::Authorization,
-            Error::Api {
-                status: Some(401 | 403),
-                ..
-            } => ErrorCategory::Authorization,
+            Error::Authentication { .. } => ErrorCategory::Authorization,
             Error::Authorization(_) | Error::HookFailed { .. } | Error::HookTimeout { .. } => {
                 ErrorCategory::Authorization
             }
@@ -393,24 +383,17 @@ impl Error {
             | Error::RateLimit { .. }
             | Error::ModelOverloaded { .. }
             | Error::CircuitOpen => ErrorCategory::Transient,
-            Error::Api {
-                status: Some(500..=599),
-                ..
-            } => ErrorCategory::Transient,
 
             Error::Session(_) | Error::Mcp(_) | Error::Stream(_) => ErrorCategory::Stateful,
 
             Error::BudgetExceeded { .. }
-            | Error::ContextOverflow { .. }
             | Error::ContextWindowExceeded { .. }
             | Error::Timeout(_)
             | Error::ResourceExhausted(_) => ErrorCategory::ResourceLimit,
 
-            Error::Io(_)
-            | Error::Json(_)
-            | Error::Tool(_)
-            | Error::Api { .. }
-            | Error::NotSupported { .. } => ErrorCategory::Internal,
+            Error::Io(_) | Error::Json(_) | Error::Tool(_) | Error::NotSupported { .. } => {
+                ErrorCategory::Internal
+            }
 
             Error::Provider { kind, .. } => match kind {
                 error::ProviderErrorKind::Auth | error::ProviderErrorKind::Quota => {
@@ -422,6 +405,7 @@ impl Error {
                 error::ProviderErrorKind::BadRequest
                 | error::ProviderErrorKind::ContentFilter
                 | error::ProviderErrorKind::Cancelled => ErrorCategory::Configuration,
+                error::ProviderErrorKind::PayloadTooLarge => ErrorCategory::ResourceLimit,
             },
             Error::InvalidComposition { .. } => ErrorCategory::Configuration,
 
@@ -431,34 +415,16 @@ impl Error {
     }
 
     pub fn is_unauthorized(&self) -> bool {
-        matches!(
-            self,
-            Error::Api {
-                status: Some(401),
-                ..
-            } | Error::Auth { .. }
-        )
+        matches!(self, Error::Authentication { .. })
     }
 
     pub fn is_overloaded(&self) -> bool {
-        match self {
-            Error::Api {
-                status: Some(529 | 503),
-                ..
-            } => true,
-            Error::Api {
-                error_type: Some(t),
-                ..
-            } if t.contains("overloaded") => true,
-            Error::Api { message, .. } if message.to_lowercase().contains("overloaded") => true,
-            Error::ModelOverloaded { .. } => true,
-            _ => false,
-        }
+        matches!(self, Error::ModelOverloaded { .. })
     }
 
     pub fn status_code(&self) -> Option<u16> {
         match self {
-            Error::Api { status, .. } => *status,
+            Error::Provider { status, .. } => *status,
             _ => None,
         }
     }
@@ -481,8 +447,8 @@ impl Error {
                 | Error::CircuitOpen
         ) || matches!(
             self,
-            Error::Api {
-                status: Some(429 | 500..=599),
+            Error::Provider {
+                retryable: true,
                 ..
             }
         )
@@ -512,9 +478,10 @@ impl From<context::ContextError> for Error {
         match err {
             context::ContextError::Source { message } => Error::Config(message),
             context::ContextError::TokenBudgetExceeded { current, limit } => {
-                Error::ContextOverflow {
-                    current: current as usize,
-                    max: limit as usize,
+                Error::ContextWindowExceeded {
+                    estimated: current,
+                    limit,
+                    overage: current.saturating_sub(limit),
                 }
             }
             context::ContextError::SkillNotFound { name } => {
@@ -637,10 +604,13 @@ mod tests {
 
     #[test]
     fn test_error_display() {
-        let err = Error::Api {
+        let err = Error::Provider {
+            provider: "anthropic",
+            kind: error::ProviderErrorKind::Auth,
             message: "Invalid API key".to_string(),
+            hint: None,
+            retryable: false,
             status: Some(401),
-            error_type: None,
         };
         assert!(err.to_string().contains("Invalid API key"));
     }
@@ -650,10 +620,13 @@ mod tests {
         let rate_limit = Error::RateLimit { retry_after: None };
         assert_eq!(rate_limit.category(), ErrorCategory::Transient);
 
-        let server_error = Error::Api {
+        let server_error = Error::Provider {
+            provider: "anthropic",
+            kind: error::ProviderErrorKind::Server,
             message: "Internal error".to_string(),
+            hint: None,
+            retryable: true,
             status: Some(500),
-            error_type: None,
         };
         assert_eq!(server_error.category(), ErrorCategory::Transient);
 

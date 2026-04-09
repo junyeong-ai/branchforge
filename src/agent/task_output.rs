@@ -117,7 +117,7 @@ impl SchemaTool for TaskOutputTool {
                 .wait_for_completion(&input.task_id, timeout)
                 .await
         } else {
-            self.registry.get_result(&input.task_id).await
+            self.registry.result(&input.task_id).await
         };
 
         let output = match result {

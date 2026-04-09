@@ -16,7 +16,8 @@ use super::events::AgentResult;
 use super::executor::Agent;
 use super::request::RequestBuilder;
 use super::run_config::RunConfig;
-use crate::authorization::AuthorizationDenied;
+use crate::authorization::approval::DEFAULT_APPROVAL_TIMEOUT_SECS;
+use crate::authorization::{ApprovalRequest, ApprovalResponse, AuthorizationDenied};
 use crate::graph::ReplayInput;
 use crate::hooks::{HookContext, HookEvent, HookInput};
 use crate::ir::FinishReason;
@@ -207,7 +208,7 @@ impl Agent {
         }
 
         let mut request_builder = {
-            let static_context = match &self.runtime.orchestration.orchestrator {
+            let static_context = match &self.runtime.orchestrator {
                 Some(orchestrator) => orchestrator.read().await.static_context().clone(),
                 None => crate::context::StaticContext::new(),
             };
@@ -481,6 +482,71 @@ impl Agent {
                     );
                 } else {
                     let input = pre_output.updated_input.unwrap_or(tool_input.clone());
+
+                    // Human-in-the-loop: check if supervised mode requires approval
+                    if self.runtime.execution_mode.requires_review(tool_name) {
+                        let approval_result = if let Some(ref sender) = self.runtime.approval_sender
+                        {
+                            let request = ApprovalRequest {
+                                tool_name: tool_name.clone(),
+                                tool_call_id: tool_id.clone(),
+                                tool_input: input.clone(),
+                                reason: format!(
+                                    "Tool '{}' requires approval in {} mode",
+                                    tool_name, self.runtime.execution_mode
+                                ),
+                            };
+                            let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
+                            if sender.send((request, resp_tx)).await.is_err() {
+                                Some(ApprovalResponse::Deny {
+                                    reason: "Approval channel closed".into(),
+                                })
+                            } else {
+                                match tokio::time::timeout(
+                                    std::time::Duration::from_secs(DEFAULT_APPROVAL_TIMEOUT_SECS),
+                                    resp_rx,
+                                )
+                                .await
+                                {
+                                    Ok(Ok(response)) => Some(response),
+                                    Ok(Err(_)) => Some(ApprovalResponse::Deny {
+                                        reason: "Approval responder dropped".into(),
+                                    }),
+                                    Err(_) => Some(ApprovalResponse::Deny {
+                                        reason: "Approval timed out".into(),
+                                    }),
+                                }
+                            }
+                        } else {
+                            // No approval channel configured - deny with guidance
+                            Some(ApprovalResponse::Deny {
+                                reason: format!(
+                                    "Tool '{}' requires review but no approval channel is configured.                                      Use AgentBuilder::approval_channel() to enable human-in-the-loop.",
+                                    tool_name
+                                ),
+                            })
+                        };
+
+                        match approval_result {
+                            Some(ApprovalResponse::Approve) => {
+                                debug!(tool = %tool_name, "Tool approved by human");
+                            }
+                            Some(ApprovalResponse::Deny { reason }) => {
+                                debug!(tool = %tool_name, %reason, "Tool denied by human");
+                                blocked.push(
+                                    crate::ir::ContentPart::tool_error(tool_id, reason.clone())
+                                        .with_tool_name(tool_name),
+                                );
+                                metrics.record_authorization_denial(
+                                    AuthorizationDenied::new(tool_name, tool_id, input.clone())
+                                        .reason(reason),
+                                );
+                                continue;
+                            }
+                            None => unreachable!("approval_result is always Some"),
+                        }
+                    }
+
                     self.state
                         .append_graph_node(
                             crate::graph::NodeKind::ToolCall,
@@ -546,7 +612,7 @@ impl Agent {
                 try_activate_dynamic_rules(
                     &name,
                     &input,
-                    &self.runtime.orchestration.orchestrator,
+                    &self.runtime.orchestrator,
                     &mut dynamic_rules_context,
                 )
                 .await;

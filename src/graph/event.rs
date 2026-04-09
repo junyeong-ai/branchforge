@@ -77,4 +77,10 @@ pub enum GraphEventBody {
         note: Option<String>,
         provenance: Option<NodeProvenance>,
     },
+    EventsArchived {
+        /// Nodes before this ID on the primary branch are archived.
+        watermark_node_id: NodeId,
+        /// Number of nodes archived.
+        archived_count: usize,
+    },
 }

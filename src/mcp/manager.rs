@@ -173,13 +173,13 @@ impl McpManager {
     }
 
     #[cfg(feature = "mcp")]
-    pub async fn get_server_state(&self, name: &str) -> Option<McpServerState> {
+    pub async fn server_state(&self, name: &str) -> Option<McpServerState> {
         let servers = self.servers.read().await;
         servers.get(name).map(|c| c.state().clone())
     }
 
     #[cfg(not(feature = "mcp"))]
-    pub async fn get_server_state(&self, _name: &str) -> Option<McpServerState> {
+    pub async fn server_state(&self, _name: &str) -> Option<McpServerState> {
         None
     }
 
@@ -431,9 +431,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_get_server_state_not_found() {
+    async fn test_server_state_not_found() {
         let manager = McpManager::new();
-        let state = manager.get_server_state("nonexistent").await;
+        let state = manager.server_state("nonexistent").await;
         assert!(state.is_none());
     }
 

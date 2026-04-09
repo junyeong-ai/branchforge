@@ -1,6 +1,6 @@
 //! Non-blocking event bus for observability.
 //!
-//! Unlike [`HookManager`](crate::hooks::HookManager) which is fail-closed and blocking
+//! Unlike [`HookRegistry`](crate::hooks::HookRegistry) which is fail-closed and blocking
 //! (security-critical hooks that can reject operations), [`EventBus`] is fire-and-forget:
 //!
 //! - Each subscriber owns a single drainer task that consumes events from a

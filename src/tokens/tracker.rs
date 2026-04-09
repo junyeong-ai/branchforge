@@ -1,6 +1,7 @@
 use rust_decimal::Decimal;
 
-use super::{ContextWindow, PricingTier, TokenBudget, WindowStatus};
+use super::{ContextWindow, PricingTier, WindowStatus};
+use crate::ir::Usage;
 use crate::models::ModelSpec;
 
 #[derive(Debug, Clone)]
@@ -52,8 +53,8 @@ impl PreflightResult {
 #[derive(Debug)]
 pub struct TokenTracker {
     context_window: ContextWindow,
-    cumulative: TokenBudget,
-    last_turn: TokenBudget,
+    cumulative: Usage,
+    last_turn: Usage,
     model_spec: ModelSpec,
 }
 
@@ -61,8 +62,8 @@ impl TokenTracker {
     pub fn new(model_spec: ModelSpec, extended_context: bool) -> Self {
         Self {
             context_window: ContextWindow::new(&model_spec, extended_context),
-            cumulative: TokenBudget::default(),
-            last_turn: TokenBudget::default(),
+            cumulative: Usage::default(),
+            last_turn: Usage::default(),
             model_spec,
         }
     }
@@ -106,11 +107,10 @@ impl TokenTracker {
         }
     }
 
-    pub fn record(&mut self, usage: &crate::ir::Usage) {
-        let budget = TokenBudget::from(usage);
-        self.last_turn = budget;
-        self.cumulative.add(&budget);
-        self.context_window.update(budget.context_usage());
+    pub fn record(&mut self, usage: &Usage) {
+        self.last_turn = usage.clone();
+        self.cumulative.add(usage);
+        self.context_window.update(usage.context_usage());
     }
 
     pub fn status(&self) -> WindowStatus {
@@ -121,11 +121,11 @@ impl TokenTracker {
         &self.context_window
     }
 
-    pub fn cumulative(&self) -> &TokenBudget {
+    pub fn cumulative(&self) -> &Usage {
         &self.cumulative
     }
 
-    pub fn last_turn(&self) -> &TokenBudget {
+    pub fn last_turn(&self) -> &Usage {
         &self.last_turn
     }
 
@@ -137,8 +137,8 @@ impl TokenTracker {
         self.model_spec.pricing.calculate_raw(
             self.cumulative.input_tokens,
             self.cumulative.output_tokens,
-            self.cumulative.cache_read_tokens,
-            self.cumulative.cache_creation_tokens,
+            self.cumulative.cached_input_tokens.unwrap_or(0),
+            self.cumulative.cache_creation_tokens.unwrap_or(0),
         )
     }
 

@@ -5,35 +5,19 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 use tokio_util::sync::CancellationToken;
 
-use crate::authorization::ExecutionMode;
+use crate::authorization::{ApprovalSender, ExecutionMode};
 use crate::budget::{BudgetTracker, TenantBudget};
 use crate::client::LlmCall;
 use crate::context::PromptOrchestrator;
 use crate::context_scope::SharedContextScope;
 use crate::events::EventBus;
-use crate::hooks::HookManager;
+use crate::hooks::HookRegistry;
 use crate::orchestration::{AgentDirectory, Coordination};
 use crate::session::compact::CompactionChain;
 use crate::session::compact::recovery::RecoveryStrategy;
-use crate::tools::{ToolRegistry, ToolSearchManager};
+use crate::tools::{ToolRegistry, ToolSearchEngine};
 
 use super::config::AgentConfig;
-
-/// Multi-agent coordination bundle.
-///
-/// Groups the three fields that are only meaningful when the agent
-/// participates in a multi-agent workflow: prompt orchestration, the
-/// pluggable [`Coordination`] strategy, and the agent directory used for
-/// inter-agent dispatch. Always present on [`AgentRuntime`] so access
-/// remains a single field hop (`runtime.orchestration.orchestrator`),
-/// but every member is `Option` so single-agent execution does not pay
-/// the cost of constructing them.
-#[derive(Default)]
-pub struct OrchestrationBundle {
-    pub(crate) orchestrator: Option<Arc<RwLock<PromptOrchestrator>>>,
-    pub(crate) coordination: Option<Arc<dyn Coordination>>,
-    pub(crate) agent_directory: Option<Arc<AgentDirectory>>,
-}
 
 /// Shared, immutable infrastructure for agent execution.
 ///
@@ -52,20 +36,21 @@ pub struct OrchestrationBundle {
 ///   that influence what tools and how many tokens the agent may consume.
 /// - **Session lifecycle** — `compaction_chain`, `recovery_strategy`. Hooks
 ///   that fire on session compaction and recovery, both optional.
-/// - **Multi-agent coordination** — bundled into [`OrchestrationBundle`]
-///   to make the responsibility boundary explicit and to keep the
-///   top-level field count manageable.
+/// - **Multi-agent coordination** — `orchestrator`, `coordination`,
+///   `agent_directory`. All `Option` so single-agent execution pays
+///   no cost.
 pub struct AgentRuntime {
     // ── Core call surface ────────────────────────────────────────────
     /// IR-native LLM call surface. All model invocations go through this.
     pub(crate) llm: Arc<dyn LlmCall>,
     pub(crate) config: Arc<AgentConfig>,
     pub(crate) tools: Arc<ToolRegistry>,
-    pub(crate) hooks: Arc<HookManager>,
+    pub(crate) hooks: Arc<HookRegistry>,
 
     // ── Operations ───────────────────────────────────────────────────
     pub(crate) event_bus: Option<Arc<EventBus>>,
     pub(crate) execution_mode: ExecutionMode,
+    pub(crate) approval_sender: Option<ApprovalSender>,
     pub(crate) context_scope: Option<SharedContextScope>,
     pub(crate) shutdown: CancellationToken,
 
@@ -73,14 +58,16 @@ pub struct AgentRuntime {
     pub(crate) budget_tracker: Arc<BudgetTracker>,
     pub(crate) tenant_budget: Option<Arc<TenantBudget>>,
     pub(crate) mcp_manager: Option<Arc<crate::mcp::McpManager>>,
-    pub(crate) tool_search_manager: Option<Arc<ToolSearchManager>>,
+    pub(crate) tool_search_manager: Option<Arc<ToolSearchEngine>>,
 
     // ── Session lifecycle ────────────────────────────────────────────
     pub(crate) compaction_chain: Option<Arc<CompactionChain>>,
     pub(crate) recovery_strategy: Option<Arc<dyn RecoveryStrategy>>,
 
     // ── Multi-agent coordination ─────────────────────────────────────
-    pub(crate) orchestration: OrchestrationBundle,
+    pub(crate) orchestrator: Option<Arc<RwLock<PromptOrchestrator>>>,
+    pub(crate) coordination: Option<Arc<dyn Coordination>>,
+    pub(crate) agent_directory: Option<Arc<AgentDirectory>>,
 }
 
 impl AgentRuntime {
@@ -104,14 +91,14 @@ impl AgentRuntime {
 
     /// Returns a reference to the hook manager.
     #[must_use]
-    pub fn hooks(&self) -> &Arc<HookManager> {
+    pub fn hooks(&self) -> &Arc<HookRegistry> {
         &self.hooks
     }
 
     /// Returns a reference to the prompt orchestrator, if configured.
     #[must_use]
     pub fn orchestrator(&self) -> Option<&Arc<RwLock<PromptOrchestrator>>> {
-        self.orchestration.orchestrator.as_ref()
+        self.orchestrator.as_ref()
     }
 
     /// Returns the event bus, if one was configured.
@@ -129,7 +116,7 @@ impl AgentRuntime {
     /// Invalidate cached context after compaction so subsequent iterations
     /// rebuild prompts from the compacted session state.
     pub(crate) async fn invalidate_caches_after_compact(&self) {
-        if let Some(ref orchestrator) = self.orchestration.orchestrator {
+        if let Some(ref orchestrator) = self.orchestrator {
             let mut orch = orchestrator.write().await;
             orch.invalidate_static_cache();
         }

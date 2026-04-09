@@ -987,7 +987,8 @@ impl JsonlPersistence {
             | crate::graph::GraphEventBody::BranchForked { branch_id, .. }
             | crate::graph::GraphEventBody::CheckpointCreated { branch_id, .. }
             | crate::graph::GraphEventBody::BookmarkCreated { branch_id, .. } => Some(*branch_id),
-            crate::graph::GraphEventBody::NodeMetadataPatched { .. } => None,
+            crate::graph::GraphEventBody::NodeMetadataPatched { .. }
+            | crate::graph::GraphEventBody::EventsArchived { .. } => None,
         }
     }
 

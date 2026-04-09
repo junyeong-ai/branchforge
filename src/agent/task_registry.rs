@@ -669,7 +669,7 @@ impl TaskRegistry {
         Ok(cancelled)
     }
 
-    pub async fn get_status(&self, id: &str) -> Option<SessionState> {
+    pub async fn status(&self, id: &str) -> Option<SessionState> {
         self.refresh_runtime_state().await;
         self.load_reconciled(id).await.map(|s| s.state)
     }
@@ -767,7 +767,7 @@ impl TaskRegistry {
         }
     }
 
-    pub async fn get_result(&self, id: &str) -> Option<TaskResultSnapshot> {
+    pub async fn result(&self, id: &str) -> Option<TaskResultSnapshot> {
         self.refresh_runtime_state().await;
         self.load_reconciled(id).await.map(Self::result_snapshot)
     }
@@ -781,7 +781,7 @@ impl TaskRegistry {
         let poll_interval = Duration::from_millis(100);
 
         loop {
-            if let Some(snapshot) = self.get_result(id).await {
+            if let Some(snapshot) = self.result(id).await {
                 if !snapshot.status.is_running() && !snapshot.status.is_finalizing() {
                     return Some(snapshot);
                 }
@@ -790,7 +790,7 @@ impl TaskRegistry {
             }
 
             if std::time::Instant::now() >= deadline {
-                return self.get_result(id).await;
+                return self.result(id).await;
             }
 
             tokio::time::sleep(poll_interval).await;
@@ -850,12 +850,12 @@ impl TaskRegistry {
             .count()
     }
 
-    pub async fn get_messages(&self, id: &str) -> Option<Vec<Message>> {
+    pub async fn messages(&self, id: &str) -> Option<Vec<Message>> {
         self.refresh_runtime_state().await;
         self.load_reconciled(id).await.map(|s| s.to_api_messages())
     }
 
-    pub async fn get_session(&self, id: &str) -> Option<Session> {
+    pub async fn session(&self, id: &str) -> Option<Session> {
         self.refresh_runtime_state().await;
         self.load_reconciled(id).await
     }
@@ -1004,7 +1004,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(
-            registry.get_status(TASK_1_UUID).await,
+            registry.status(TASK_1_UUID).await,
             Some(SessionState::Active)
         );
 
@@ -1013,7 +1013,7 @@ mod tests {
             .await
             .unwrap();
 
-        let result = registry.get_result(TASK_1_UUID).await.unwrap();
+        let result = registry.result(TASK_1_UUID).await.unwrap();
         assert_eq!(result.status, SessionState::Completed);
     }
 
@@ -1039,7 +1039,7 @@ mod tests {
         );
         assert_eq!(registry.running_count().await, 0);
         assert_eq!(
-            registry.get_status(TASK_1_UUID).await,
+            registry.status(TASK_1_UUID).await,
             Some(SessionState::Completing)
         );
 
@@ -1068,14 +1068,14 @@ mod tests {
             .await
             .expect_err("terminal persistence failure should surface");
         assert_eq!(
-            registry.get_status(TASK_1_UUID).await,
+            registry.status(TASK_1_UUID).await,
             Some(SessionState::Completing)
         );
 
         persistence.set_fail_terminal_save(false);
         let restarted = TaskRegistry::new(persistence);
         assert_eq!(
-            restarted.get_status(TASK_1_UUID).await,
+            restarted.status(TASK_1_UUID).await,
             Some(SessionState::Completed)
         );
     }
@@ -1091,10 +1091,10 @@ mod tests {
             .await
             .unwrap();
 
-        let status = restarted.get_status(TASK_2_UUID).await;
+        let status = restarted.status(TASK_2_UUID).await;
         assert_eq!(status, Some(SessionState::Failed));
 
-        let result = restarted.get_result(TASK_2_UUID).await.unwrap();
+        let result = restarted.result(TASK_2_UUID).await.unwrap();
         assert_eq!(result.error, Some(TaskRegistry::orphaned_task_error()));
     }
 
@@ -1112,10 +1112,10 @@ mod tests {
         registry.set_handle(TASK_2_UUID, handle).await;
         tokio::task::yield_now().await;
 
-        let status = registry.get_status(TASK_2_UUID).await;
+        let status = registry.status(TASK_2_UUID).await;
         assert_eq!(status, Some(SessionState::Failed));
 
-        let result = registry.get_result(TASK_2_UUID).await.unwrap();
+        let result = registry.result(TASK_2_UUID).await.unwrap();
         assert_eq!(result.error, Some(TaskRegistry::orphaned_task_error()));
     }
 
@@ -1135,7 +1135,7 @@ mod tests {
         assert_eq!(registry.running_count().await, 0);
         assert!(registry.list_running().await.is_empty());
         assert_eq!(
-            registry.get_status(TASK_3_UUID).await,
+            registry.status(TASK_3_UUID).await,
             Some(SessionState::Failed)
         );
     }
@@ -1186,7 +1186,7 @@ mod tests {
             .await
             .unwrap();
 
-        let result = registry.get_result(TASK_2_UUID).await.unwrap();
+        let result = registry.result(TASK_2_UUID).await.unwrap();
         assert_eq!(result.status, SessionState::Failed);
         assert_eq!(result.error, Some("Something went wrong".to_string()));
     }
@@ -1205,7 +1205,7 @@ mod tests {
 
         assert!(registry.cancel(TASK_3_UUID).await.unwrap());
         assert_eq!(
-            registry.get_status(TASK_3_UUID).await,
+            registry.status(TASK_3_UUID).await,
             Some(SessionState::Cancelled)
         );
 
@@ -1215,8 +1215,8 @@ mod tests {
     #[tokio::test]
     async fn test_not_found() {
         let registry = test_registry();
-        assert!(registry.get_status("nonexistent").await.is_none());
-        assert!(registry.get_result("nonexistent").await.is_none());
+        assert!(registry.status("nonexistent").await.is_none());
+        assert!(registry.result("nonexistent").await.is_none());
     }
 
     #[tokio::test]
@@ -1244,7 +1244,7 @@ mod tests {
             .await
             .unwrap();
 
-        let loaded = registry.get_messages(TASK_4_UUID).await.unwrap();
+        let loaded = registry.messages(TASK_4_UUID).await.unwrap();
         assert_eq!(loaded.len(), 2);
     }
 
@@ -1282,7 +1282,7 @@ mod tests {
             .await
             .unwrap();
 
-        let loaded = registry.get_messages(TASK_1_UUID).await.unwrap();
+        let loaded = registry.messages(TASK_1_UUID).await.unwrap();
         assert_eq!(loaded.len(), 2);
         assert_eq!(loaded[0].role, Role::User);
         assert_eq!(loaded[1].role, Role::Assistant);
@@ -1301,7 +1301,7 @@ mod tests {
                 .to_string()
                 .contains("Task IDs must be valid session UUIDs")
         );
-        assert!(registry.get_status("not-a-uuid").await.is_none());
+        assert!(registry.status("not-a-uuid").await.is_none());
     }
 
     #[tokio::test]
@@ -1322,13 +1322,13 @@ mod tests {
             .unwrap();
 
         assert_eq!(
-            registry.get_status(TASK_1_UUID).await,
+            registry.status(TASK_1_UUID).await,
             Some(SessionState::Active)
         );
     }
 
     #[tokio::test]
-    async fn test_get_result_preserves_structured_output() {
+    async fn test_result_preserves_structured_output() {
         let registry = test_registry();
         registry
             .register_or_resume(TASK_1_UUID.into(), "explore".into(), "Structured".into())
@@ -1355,7 +1355,7 @@ mod tests {
             .await
             .unwrap();
 
-        let snapshot = registry.get_result(TASK_1_UUID).await.unwrap();
+        let snapshot = registry.result(TASK_1_UUID).await.unwrap();
         assert_eq!(
             snapshot.structured_output,
             Some(serde_json::json!({"value": 42}))
@@ -1363,7 +1363,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_get_result_preserves_full_assistant_content() {
+    async fn test_result_preserves_full_assistant_content() {
         let registry = test_registry();
         registry
             .register_or_resume(TASK_1_UUID.into(), "explore".into(), "Rich".into())
@@ -1388,13 +1388,13 @@ mod tests {
             .await
             .unwrap();
 
-        let snapshot = registry.get_result(TASK_1_UUID).await.unwrap();
+        let snapshot = registry.result(TASK_1_UUID).await.unwrap();
         assert_eq!(snapshot.text.as_deref(), Some("first second"));
         assert_eq!(snapshot.content.as_ref().map(Vec::len), Some(2));
     }
 
     #[tokio::test]
-    async fn test_get_result_includes_response_and_execution_metadata() {
+    async fn test_result_includes_response_and_execution_metadata() {
         let registry = test_registry();
         registry
             .register_or_resume(TASK_1_UUID.into(), "explore".into(), "Observed".into())
@@ -1434,7 +1434,7 @@ mod tests {
         result.metrics.errors = 0;
         registry.complete(TASK_1_UUID, result).await.unwrap();
 
-        let snapshot = registry.get_result(TASK_1_UUID).await.unwrap();
+        let snapshot = registry.result(TASK_1_UUID).await.unwrap();
         assert_eq!(
             snapshot
                 .response_metadata
@@ -1492,7 +1492,7 @@ mod tests {
         result.session_id = TASK_2_UUID.to_string();
         registry.complete(TASK_1_UUID, result).await.unwrap();
 
-        let snapshot = registry.get_result(TASK_1_UUID).await.unwrap();
+        let snapshot = registry.result(TASK_1_UUID).await.unwrap();
         assert_eq!(snapshot.status, SessionState::Failed);
         assert!(
             snapshot

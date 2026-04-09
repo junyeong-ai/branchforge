@@ -18,7 +18,7 @@ use branchforge::session::{MemoryPersistence, SessionId, SessionState, ToolState
 use branchforge::skills::{SkillIndex, SkillRuntime};
 use branchforge::tools::{
     BashTool, EditTool, ExecutionContext, GlobTool, GrepTool, KillShellTool, PlanTool,
-    ProcessManager, ReadTool, TodoWriteTool, Tool, WriteTool,
+    ProcessScheduler, ReadTool, TodoWriteTool, Tool, WriteTool,
 };
 use std::sync::Arc;
 
@@ -74,7 +74,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let session_id = SessionId::new();
     let session_ctx = ToolState::new(session_id);
-    let process_manager = Arc::new(ProcessManager::new());
+    let process_manager = Arc::new(ProcessScheduler::new());
 
     let mut runner = TestRunner::new();
 
@@ -411,7 +411,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .await
         .unwrap();
     runner.check("TaskRegistry (register)", {
-        let status = task_registry.get_status(&task_id).await;
+        let status = task_registry.status(&task_id).await;
         if status == Some(SessionState::Active) {
             Ok(())
         } else {
@@ -445,7 +445,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
     task_registry.complete(&complete_id, result).await?;
     runner.check("TaskRegistry (complete)", {
-        let status = task_registry.get_status(&complete_id).await;
+        let status = task_registry.status(&complete_id).await;
         if status == Some(SessionState::Completed) {
             Ok(())
         } else {
@@ -464,7 +464,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .fail(&fail_id, "Simulated error".to_string())
         .await?;
     runner.check("TaskRegistry (fail)", {
-        let status = task_registry.get_status(&fail_id).await;
+        let status = task_registry.status(&fail_id).await;
         if status == Some(SessionState::Failed) {
             Ok(())
         } else {
@@ -486,7 +486,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cancelled = task_registry.cancel(&cancel_id).await?;
     runner.check("TaskRegistry (cancel)", {
         if cancelled {
-            let status = task_registry.get_status(&cancel_id).await;
+            let status = task_registry.status(&cancel_id).await;
             if status == Some(SessionState::Cancelled) {
                 Ok(())
             } else {

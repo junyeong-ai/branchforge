@@ -10,7 +10,7 @@ use tokio_util::sync::CancellationToken;
 const DEFAULT_TOOL_TIMEOUT_MS: u64 = 120_000;
 
 #[cfg(feature = "coding-tools")]
-use super::ProcessManager;
+use super::ProcessScheduler;
 use super::builder::ToolRegistryBuilder;
 use super::context::ExecutionContext;
 use super::env::ToolExecutionEnv;
@@ -85,7 +85,7 @@ impl ToolRegistry {
 
     #[cfg(feature = "coding-tools")]
     #[inline]
-    pub fn process_manager(&self) -> Option<&Arc<ProcessManager>> {
+    pub fn process_manager(&self) -> Option<&Arc<ProcessScheduler>> {
         self.env.process_manager()
     }
 

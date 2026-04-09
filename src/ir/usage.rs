@@ -96,6 +96,25 @@ impl Usage {
         self.input_tokens
             .saturating_sub(self.cached_input_tokens.unwrap_or(0))
     }
+
+    /// Tokens that count against the context window (input + cache reads +
+    /// cache creation). Used by the token tracker for window-utilisation
+    /// checks.
+    pub fn context_usage(&self) -> u64 {
+        self.input_tokens
+            + self.cached_input_tokens.unwrap_or(0)
+            + self.cache_creation_tokens.unwrap_or(0)
+    }
+
+    /// Total across both context and output tokens.
+    pub fn total(&self) -> u64 {
+        self.context_usage() + self.output_tokens
+    }
+
+    /// Whether all token counts are zero.
+    pub fn is_empty(&self) -> bool {
+        self.context_usage() == 0 && self.output_tokens == 0
+    }
 }
 
 fn add_opt(target: &mut Option<u64>, other: Option<u64>) {

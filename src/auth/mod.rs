@@ -24,7 +24,7 @@ pub use cache::CachedProvider;
 pub use config::{CLAUDE_CODE_BETA, OAuthConfig, OAuthConfigBuilder};
 pub use credential::{Credential, OAuthCredential};
 pub use credentials::{CredentialKind, CredentialRecord};
-pub use helper::{ApiKeyHelper, AwsCredentialRefresh, AwsCredentials, CredentialManager};
+pub use helper::{ApiKeyHelper, AwsCredentialRefresh, AwsCredentials, CredentialResolver};
 pub use provider::CredentialProvider;
 #[cfg(feature = "cli-auth")]
 pub use providers::ClaudeCliProvider;

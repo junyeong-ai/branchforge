@@ -2,7 +2,7 @@
 //!
 //! Verifies advanced SDK features:
 //! - Authorization Modes (AllowAll, AutoApproveFiles, allow_tool, Default)
-//! - Hook System (HookManager, HookEvent, HookOutput)
+//! - Hook System (HookRegistry, HookEvent, HookOutput)
 //! - Session Manager (create, update, fork, lifecycle, tenant)
 //! - Subagent System (SubagentIndex, builtin_subagents)
 //!
@@ -13,7 +13,7 @@ use branchforge::{
     Agent, Auth, Hook, ToolSurface,
     authorization::ToolPolicy,
     common::ContentSource,
-    hooks::{HookContext, HookEvent, HookInput, HookManager, HookOutput},
+    hooks::{HookContext, HookEvent, HookInput, HookOutput, HookRegistry},
     ir::ContentPart,
     session::{SessionAccessScope, SessionConfig, SessionManager, SessionState},
     subagents::{SubagentIndex, builtin_subagents},
@@ -68,7 +68,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("\nSection 2: Hook System");
     println!("------------------------------------------------------------------------");
     test!("HookEvent types", test_hook_events());
-    test!("HookManager registration", test_hook_manager());
+    test!("HookRegistry registration", test_hook_manager());
     test!("Hook priority ordering", test_hook_priority());
 
     println!("\nSection 3: Session Manager");
@@ -279,7 +279,7 @@ fn test_hook_events() -> Result<(), String> {
 }
 
 fn test_hook_manager() -> Result<(), String> {
-    let mut manager = HookManager::new();
+    let mut manager = HookRegistry::new();
 
     manager.register(TestHook::new("hook-1", vec![HookEvent::PreToolUse], 0));
     manager.register(TestHook::new("hook-2", vec![HookEvent::PostToolUse], 0));
@@ -308,7 +308,7 @@ fn test_hook_manager() -> Result<(), String> {
 }
 
 fn test_hook_priority() -> Result<(), String> {
-    let mut manager = HookManager::new();
+    let mut manager = HookRegistry::new();
 
     manager.register(TestHook::new("low", vec![HookEvent::PreToolUse], 1));
     manager.register(TestHook::new("high", vec![HookEvent::PreToolUse], 100));

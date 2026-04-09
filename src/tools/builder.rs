@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 #[cfg(feature = "coding-tools")]
-use super::ProcessManager;
+use super::ProcessScheduler;
 use super::context::ExecutionContext;
 use super::env::ToolExecutionEnv;
 use super::registry::ToolRegistry;
@@ -13,7 +13,7 @@ use super::traits::Tool;
 use crate::agent::{TaskOutputTool, TaskRegistry, TaskTool};
 use crate::authorization::ToolPolicy;
 use crate::common::IndexRegistry;
-use crate::hooks::HookManager;
+use crate::hooks::HookRegistry;
 use crate::session::session_state::ToolState;
 use crate::session::{MemoryPersistence, SessionAccessScope, SessionId, SessionManager};
 use crate::subagents::SubagentIndex;
@@ -29,7 +29,7 @@ pub struct ToolRegistryBuilder {
     tool_state: Option<ToolState>,
     session_id: Option<SessionId>,
     session_manager: Option<SessionManager>,
-    hooks: Option<HookManager>,
+    hooks: Option<HookRegistry>,
     scope: Option<SessionAccessScope>,
     delegation_runtime: Option<crate::agent::DelegationRuntime>,
     custom_tools: Vec<Arc<dyn Tool>>,
@@ -124,7 +124,7 @@ impl ToolRegistryBuilder {
         self
     }
 
-    pub fn hooks(mut self, hooks: HookManager) -> Self {
+    pub fn hooks(mut self, hooks: HookRegistry) -> Self {
         self.hooks = Some(hooks);
         self
     }
@@ -216,7 +216,7 @@ impl ToolRegistryBuilder {
 
         #[cfg(feature = "coding-tools")]
         let process_manager = {
-            let pm = Arc::new(ProcessManager::new());
+            let pm = Arc::new(ProcessScheduler::new());
             all_tools.push(Arc::new(super::ReadTool));
             all_tools.push(Arc::new(super::WriteTool));
             all_tools.push(Arc::new(super::EditTool));
@@ -313,7 +313,10 @@ mod tests {
             "explicit default policy should remain fail-closed"
         );
         assert!(
-            result.error_message().contains("No matching rule"),
+            result
+                .error_message()
+                .to_lowercase()
+                .contains("no matching rule"),
             "expected permission-denied error, got {}",
             result.error_message()
         );

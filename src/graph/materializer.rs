@@ -198,6 +198,11 @@ impl GraphMaterializer {
                         },
                     );
                 }
+                GraphEventBody::EventsArchived {
+                    watermark_node_id, ..
+                } => {
+                    graph.archived_watermark = Some(*watermark_node_id);
+                }
             }
             graph.events.push(event.clone());
         }

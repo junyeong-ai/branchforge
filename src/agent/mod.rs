@@ -1,5 +1,6 @@
 //! Agent execution engine.
 
+mod checkpoint;
 mod common;
 mod config;
 mod delegation;
@@ -16,6 +17,7 @@ mod state;
 mod state_formatter;
 mod streaming;
 mod task;
+mod task_budget;
 mod task_output;
 mod task_registry;
 mod task_registry_types;
@@ -24,6 +26,7 @@ pub mod types;
 #[cfg(test)]
 mod tests;
 
+pub use checkpoint::AgentCheckpoint;
 pub use config::{
     AgentConfig, AgentModelConfig, BudgetConfig, CacheConfig, CacheStrategy, ExecutionConfig,
     PromptConfig, SecurityConfig, SystemPromptMode,
@@ -43,6 +46,7 @@ pub use server_tools::{
 };
 pub use state::{AgentMetrics, AgentState, ToolCallRecord, ToolStats};
 pub use task::{TaskInput, TaskOutput, TaskTool};
+pub use task_budget::TaskBudget;
 pub use task_output::{TaskOutputInput, TaskOutputResult, TaskOutputTool, TaskStatus};
 pub use task_registry::{
     TaskAssistantMetadata, TaskExecutionSummary, TaskRegistry, TaskResultSnapshot,

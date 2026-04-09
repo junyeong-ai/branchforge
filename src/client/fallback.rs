@@ -74,17 +74,18 @@ mod tests {
     fn test_fallback_trigger_overloaded() {
         let config = FallbackConfig::new("claude-haiku-4-5-20251001");
 
-        let overloaded_error = crate::Error::Api {
-            message: "Model is overloaded".to_string(),
-            status: Some(529),
-            error_type: None,
+        let overloaded_error = crate::Error::ModelOverloaded {
+            model: "claude-sonnet-4-5".to_string(),
         };
         assert!(config.should_fallback(&overloaded_error));
 
-        let auth_error = crate::Error::Api {
+        let auth_error = crate::Error::Provider {
+            provider: "anthropic",
+            kind: crate::error::ProviderErrorKind::Auth,
             message: "Invalid API key".to_string(),
+            hint: None,
+            retryable: false,
             status: Some(401),
-            error_type: None,
         };
         assert!(!config.should_fallback(&auth_error));
     }
@@ -121,10 +122,13 @@ mod tests {
         let timeout_error = crate::Error::Timeout(std::time::Duration::from_secs(30));
         assert!(config.should_fallback(&timeout_error));
 
-        let server_error = crate::Error::Api {
+        let server_error = crate::Error::Provider {
+            provider: "anthropic",
+            kind: crate::error::ProviderErrorKind::Server,
             message: "Internal server error".to_string(),
+            hint: None,
+            retryable: true,
             status: Some(500),
-            error_type: None,
         };
         assert!(config.should_fallback(&server_error));
     }

@@ -12,7 +12,7 @@ use tracing::{debug, info, warn};
 use crate::ToolRegistry;
 use crate::budget::{BudgetTracker, TenantBudget};
 use crate::context::PromptOrchestrator;
-use crate::hooks::{HookContext, HookEvent, HookInput, HookManager};
+use crate::hooks::{HookContext, HookEvent, HookInput, HookRegistry};
 use crate::session::compact::CompactResult;
 use crate::session::{ToolExecution, ToolState};
 use crate::types::ToolResult;
@@ -250,7 +250,7 @@ pub(crate) async fn accumulate_inner_usage(
 pub(crate) async fn maybe_invoke_explicit_skill_command(
     tools: &ToolRegistry,
     tool_state: &ToolState,
-    hooks: &HookManager,
+    hooks: &HookRegistry,
     hook_ctx: &HookContext,
     session_id: &str,
     prompt: &str,
@@ -337,7 +337,7 @@ pub(crate) async fn maybe_invoke_explicit_skill_command(
 
 /// Run post-tool hooks (PostToolUse on success, PostToolUseFailure on error).
 pub(crate) async fn run_post_tool_hooks(
-    hooks: &HookManager,
+    hooks: &HookRegistry,
     hook_ctx: &HookContext,
     session_id: &str,
     tool_name: &str,
@@ -409,7 +409,7 @@ pub(crate) fn emit_cost_report(
 }
 
 /// Run Stop and SessionEnd hooks in sequence.
-pub(crate) async fn run_stop_hooks(hooks: &HookManager, hook_ctx: &HookContext, session_id: &str) {
+pub(crate) async fn run_stop_hooks(hooks: &HookRegistry, hook_ctx: &HookContext, session_id: &str) {
     let stop_input = HookInput::stop(session_id);
     if let Err(e) = hooks.execute(HookEvent::Stop, stop_input, hook_ctx).await {
         warn!(error = %e, "Stop hook failed");
@@ -513,9 +513,8 @@ pub(crate) fn is_context_overflow_error(err: &crate::Error) -> bool {
     matches!(
         err,
         crate::Error::ContextWindowExceeded { .. }
-            | crate::Error::ContextOverflow { .. }
-            | crate::Error::Api {
-                status: Some(413),
+            | crate::Error::Provider {
+                kind: crate::error::ProviderErrorKind::PayloadTooLarge,
                 ..
             }
     )
@@ -543,13 +542,9 @@ pub(crate) async fn try_recover(
             estimated: *estimated,
             limit: *limit,
         },
-        crate::Error::ContextOverflow { current, max } => RecoveryErrorKind::ContextOverflow {
-            estimated: *current as u64,
-            limit: *max as u64,
-        },
-        crate::Error::Api {
+        crate::Error::Provider {
+            kind: crate::error::ProviderErrorKind::PayloadTooLarge,
             message,
-            status: Some(413),
             ..
         } => RecoveryErrorKind::ApiPayloadTooLarge {
             message: message.clone(),

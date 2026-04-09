@@ -49,11 +49,11 @@ pub use kill::KillShellTool;
 pub use mcp::{McpToolWrapper, create_mcp_tools, create_mcp_tools_with_access};
 pub use plan::PlanTool;
 #[cfg(feature = "coding-tools")]
-pub use process::{ProcessId, ProcessInfo, ProcessManager};
+pub use process::{ProcessId, ProcessInfo, ProcessScheduler};
 #[cfg(feature = "coding-tools")]
 pub use read::ReadTool;
 pub use registry::ToolRegistry;
-pub use search::{PreparedTools, SearchMode, ToolSearchConfig, ToolSearchManager};
+pub use search::{PreparedTools, SearchMode, ToolSearchConfig, ToolSearchEngine};
 pub use surface::ToolSurface;
 pub use todo::TodoWriteTool;
 pub use traits::{SchemaTool, Tool};

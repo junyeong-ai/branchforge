@@ -8,15 +8,15 @@ use crate::subagents::SubagentIndex;
 
 use super::PluginError;
 use super::discovery::PluginDiscovery;
-use super::loader::{PluginHookEntry, PluginLoader, PluginResources};
+use super::loader::{PluginHookEntry, PluginLoader as InternalPluginLoader, PluginResources};
 use super::manifest::PluginDescriptor;
 
-pub struct PluginManager {
+pub struct PluginLoader {
     plugins: Vec<PluginDescriptor>,
     resources: PluginResources,
 }
 
-impl PluginManager {
+impl PluginLoader {
     pub async fn load_from_dirs(dirs: &[PathBuf]) -> Result<Self, PluginError> {
         let plugins = PluginDiscovery::discover(dirs)?;
 
@@ -25,7 +25,7 @@ impl PluginManager {
         let mut resources = PluginResources::default();
 
         for plugin in &plugins {
-            let plugin_resources = PluginLoader::load(plugin).await?;
+            let plugin_resources = InternalPluginLoader::load(plugin).await?;
             Self::merge(&mut resources, plugin_resources);
         }
 
@@ -135,7 +135,7 @@ mod tests {
         create_full_plugin(dir.path(), "plugin-a");
         create_full_plugin(dir.path(), "plugin-b");
 
-        let manager = PluginManager::load_from_dirs(&[dir.path().to_path_buf()])
+        let manager = PluginLoader::load_from_dirs(&[dir.path().to_path_buf()])
             .await
             .unwrap();
 
@@ -172,7 +172,7 @@ mod tests {
         .unwrap();
 
         let result =
-            PluginManager::load_from_dirs(&[dir1.path().to_path_buf(), dir2.path().to_path_buf()])
+            PluginLoader::load_from_dirs(&[dir1.path().to_path_buf(), dir2.path().to_path_buf()])
                 .await;
 
         assert!(
@@ -185,7 +185,7 @@ mod tests {
         let dir = tempdir().unwrap();
         create_full_plugin(dir.path(), "my-plugin");
 
-        let manager = PluginManager::load_from_dirs(&[dir.path().to_path_buf()])
+        let manager = PluginLoader::load_from_dirs(&[dir.path().to_path_buf()])
             .await
             .unwrap();
 
@@ -216,7 +216,7 @@ mod tests {
         )
         .unwrap();
 
-        let manager = PluginManager::load_from_dirs(&[dir.path().to_path_buf()])
+        let manager = PluginLoader::load_from_dirs(&[dir.path().to_path_buf()])
             .await
             .unwrap();
 
@@ -244,7 +244,7 @@ mod tests {
         )
         .unwrap();
 
-        let manager = PluginManager::load_from_dirs(&[dir.path().to_path_buf()])
+        let manager = PluginLoader::load_from_dirs(&[dir.path().to_path_buf()])
             .await
             .unwrap();
 
@@ -255,7 +255,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_empty_dirs() {
-        let manager = PluginManager::load_from_dirs(&[]).await.unwrap();
+        let manager = PluginLoader::load_from_dirs(&[]).await.unwrap();
         assert_eq!(manager.plugin_count(), 0);
     }
 
@@ -264,7 +264,7 @@ mod tests {
         let dir = tempdir().unwrap();
         create_full_plugin(dir.path(), "accessible");
 
-        let manager = PluginManager::load_from_dirs(&[dir.path().to_path_buf()])
+        let manager = PluginLoader::load_from_dirs(&[dir.path().to_path_buf()])
             .await
             .unwrap();
 

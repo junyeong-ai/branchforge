@@ -103,6 +103,7 @@ pub trait ModelTransport: Send + Sync + std::fmt::Debug {
 pub(crate) fn default_classify_status(status: u16) -> (ProviderErrorKind, Option<&'static str>) {
     match status {
         401 | 403 => (ProviderErrorKind::Auth, None),
+        413 => (ProviderErrorKind::PayloadTooLarge, None),
         429 => (ProviderErrorKind::RateLimit, None),
         500..=599 => (ProviderErrorKind::Server, None),
         400..=499 => (ProviderErrorKind::BadRequest, None),

@@ -530,7 +530,7 @@ impl SchemaTool for TaskTool {
 
                     let output = self
                         .registry
-                        .get_result(&agent_id)
+                        .result(&agent_id)
                         .await
                         .map(|snapshot| TaskOutput::from_snapshot(agent_id.clone(), snapshot))
                         .unwrap_or_else(|| completed_task_output(agent_id, &agent_result));

@@ -36,7 +36,7 @@ use crate::budget::TenantBudgetManager;
 use crate::client::FallbackConfig;
 use crate::common::IndexRegistry;
 use crate::context::{LeveledMemoryProvider, RuleIndex};
-use crate::hooks::{Hook, HookManager};
+use crate::hooks::{Hook, HookRegistry};
 use crate::output_style::OutputStyle;
 use crate::skills::SkillIndex;
 use crate::subagents::{SubagentIndex, builtin_subagents};
@@ -88,8 +88,9 @@ pub struct AgentBuilder {
     pub(super) output_style_name: Option<String>,
 
     // ── Hooks, policies, and execution control ───────────────────────
-    pub(super) hooks: HookManager,
+    pub(super) hooks: HookRegistry,
     pub(super) execution_mode: ExecutionMode,
+    pub(super) approval_sender: Option<crate::authorization::ApprovalSender>,
     pub(super) custom_tools: Vec<Arc<dyn Tool>>,
     pub(super) sandbox_settings: Option<crate::config::SandboxConfig>,
     pub(super) authorization_policy_explicit: bool,
@@ -102,12 +103,13 @@ pub struct AgentBuilder {
 
     // ── Tool search ──────────────────────────────────────────────────
     pub(super) tool_search_config: Option<crate::tools::ToolSearchConfig>,
-    pub(super) tool_search_manager: Option<std::sync::Arc<crate::tools::ToolSearchManager>>,
+    pub(super) tool_search_manager: Option<std::sync::Arc<crate::tools::ToolSearchEngine>>,
 
     // ── Session & orchestration ──────────────────────────────────────
     pub(super) session_manager: Option<crate::session::SessionManager>,
     pub(super) context_scope: Option<crate::context_scope::SharedContextScope>,
     pub(super) compaction_chain: Option<std::sync::Arc<crate::session::compact::CompactionChain>>,
+    pub(super) memory_store: Option<std::sync::Arc<dyn crate::session::MemoryStore>>,
     pub(super) coordination: Option<std::sync::Arc<dyn crate::orchestration::Coordination>>,
     pub(super) recovery_strategy:
         Option<std::sync::Arc<dyn crate::session::compact::recovery::RecoveryStrategy>>,
@@ -634,6 +636,20 @@ impl AgentBuilder {
         self
     }
 
+    /// Sets the approval channel sender for human-in-the-loop review.
+    ///
+    /// When the execution mode is [`ExecutionMode::Supervised`] or
+    /// [`ExecutionMode::SupervisedFor`], tools that require review will
+    /// send an [`ApprovalRequest`] through this channel and wait for a
+    /// response. If no channel is configured, supervised tools are
+    /// blocked with an error message.
+    ///
+    /// Create a channel with [`approval_channel`](crate::authorization::approval_channel).
+    pub fn approval_channel(mut self, sender: crate::authorization::ApprovalSender) -> Self {
+        self.approval_sender = Some(sender);
+        self
+    }
+
     /// Adds a rule to allow a tool or pattern (e.g., `"Read"` or `"Bash(git:*)"`)
     pub fn allow_tool(mut self, pattern: impl Into<String>) -> Self {
         self.authorization_policy_explicit = true;
@@ -840,6 +856,19 @@ impl AgentBuilder {
         Ok(self)
     }
 
+    /// Resume from a previously captured AgentCheckpoint.
+    ///
+    /// This sets the session ID from the checkpoint and restores the
+    /// execution mode. The session persistence backend is responsible for
+    /// loading the full session graph; the checkpoint only carries the
+    /// lightweight runtime metadata (iteration count, cost, budget) that
+    /// would otherwise be lost on restart.
+    pub fn resume_from(mut self, checkpoint: crate::agent::AgentCheckpoint) -> Self {
+        self.resume_session_id = Some(checkpoint.session_id.to_string());
+        self.execution_mode = checkpoint.execution_mode;
+        self
+    }
+
     /// Sets initial messages for the conversation.
     pub fn messages(mut self, messages: Vec<crate::ir::Message>) -> Self {
         self.initial_messages = Some(messages);
@@ -945,7 +974,7 @@ impl AgentBuilder {
     /// Sets a shared tool search manager.
     pub fn shared_tool_search_manager(
         mut self,
-        manager: std::sync::Arc<crate::tools::ToolSearchManager>,
+        manager: std::sync::Arc<crate::tools::ToolSearchEngine>,
     ) -> Self {
         self.tool_search_manager = Some(manager);
         self
@@ -1071,13 +1100,37 @@ impl AgentBuilder {
         self
     }
 
-    /// Configure a default advanced compaction chain (MicroCompaction → FullCompaction).
+    /// Configure a default advanced compaction chain (MicroCompaction -> FullCompaction).
+    ///
+    /// If a [`memory_store`](Self::memory_store) was previously set, the chain
+    /// will automatically persist compaction summaries to it.
     pub fn advanced_compaction(self) -> Self {
-        let chain = crate::session::compact::CompactionChain::builder()
+        let mut builder = crate::session::compact::CompactionChain::builder()
             .strategy(crate::session::compact::MicroCompaction::default())
-            .strategy(crate::session::compact::FullCompaction::default())
-            .build();
+            .strategy(crate::session::compact::FullCompaction::default());
+        if let Some(ref store) = self.memory_store {
+            builder = builder.memory_store(std::sync::Arc::clone(store));
+        }
+        let chain = builder.build();
         self.compaction_chain(chain)
+    }
+
+    /// Attach a [`MemoryStore`](crate::session::MemoryStore) for automatic
+    /// compaction summary persistence.
+    ///
+    /// When combined with [`advanced_compaction`](Self::advanced_compaction),
+    /// every successful full compaction will store its summary as a
+    /// [`MemoryEntry`](crate::session::MemoryEntry) tagged
+    /// `"compaction_summary"`, enabling cross-session context retrieval.
+    ///
+    /// Call this **before** `advanced_compaction()` so the default chain
+    /// picks up the store. If you supply a pre-built
+    /// [`CompactionChain`](crate::session::compact::CompactionChain) via
+    /// [`compaction_chain()`](Self::compaction_chain), wire the store into
+    /// the chain builder directly instead.
+    pub fn memory_store(mut self, store: std::sync::Arc<dyn crate::session::MemoryStore>) -> Self {
+        self.memory_store = Some(store);
+        self
     }
 
     // =========================================================================
@@ -1122,7 +1175,7 @@ impl AgentBuilder {
     }
 
     /// Replaces the complete hook manager.
-    pub fn hooks_manager(mut self, hooks: HookManager) -> Self {
+    pub fn hooks_manager(mut self, hooks: HookRegistry) -> Self {
         self.hooks = hooks;
         self
     }

@@ -6,17 +6,22 @@
 //!
 //! Integrates a [`CircuitBreaker`] to stop retrying after consecutive failures.
 
+use std::sync::Arc;
+
 use tracing::{debug, info, warn};
 
 use super::CompactResult;
 use super::strategy::{CompactionContext, CompactionPlan, CompactionStrategy};
 use crate::common::circuit::{CircuitBreaker, CircuitConfig};
+use crate::session::memory::{MemoryEntry, MemoryStore};
 use crate::session::state::Session;
 
 /// Chain of compaction strategies with circuit breaker protection.
 pub struct CompactionChain {
     strategies: Vec<Box<dyn CompactionStrategy>>,
     circuit_breaker: CircuitBreaker,
+    /// Optional memory store for auto-persisting compaction summaries.
+    memory_store: Option<Arc<dyn MemoryStore>>,
 }
 
 impl CompactionChain {
@@ -82,6 +87,21 @@ impl CompactionChain {
                         result = ?result,
                         "Compaction completed"
                     );
+
+                    // Auto-persist compaction summary to memory store.
+                    if let CompactResult::Compacted { ref summary, .. } = result
+                        && let Some(ref store) = self.memory_store
+                    {
+                        let entry = MemoryEntry::new(session.id.to_string(), summary.clone())
+                            .with_tags(vec!["compaction_summary".to_string()]);
+                        if let Err(e) = store.add(entry).await {
+                            warn!(
+                                error = %e,
+                                "Failed to store compaction summary in memory"
+                            );
+                        }
+                    }
+
                     return Ok(result);
                 }
                 Err(e) => {
@@ -124,6 +144,7 @@ impl CompactionChain {
 pub struct CompactionChainBuilder {
     strategies: Vec<Box<dyn CompactionStrategy>>,
     circuit_config: CircuitConfig,
+    memory_store: Option<Arc<dyn MemoryStore>>,
 }
 
 impl CompactionChainBuilder {
@@ -135,6 +156,7 @@ impl CompactionChainBuilder {
                 recovery_timeout: std::time::Duration::from_secs(60),
                 success_threshold: 1,
             },
+            memory_store: None,
         }
     }
 
@@ -159,10 +181,21 @@ impl CompactionChainBuilder {
         self
     }
 
+    /// Attach a memory store for auto-persisting compaction summaries.
+    ///
+    /// When set, each successful full compaction will store its summary
+    /// as a [`MemoryEntry`] tagged `"compaction_summary"`, enabling
+    /// cross-session context retrieval.
+    pub fn memory_store(mut self, store: Arc<dyn MemoryStore>) -> Self {
+        self.memory_store = Some(store);
+        self
+    }
+
     pub fn build(self) -> CompactionChain {
         CompactionChain {
             strategies: self.strategies,
             circuit_breaker: CircuitBreaker::new(self.circuit_config),
+            memory_store: self.memory_store,
         }
     }
 }

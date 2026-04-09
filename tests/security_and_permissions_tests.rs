@@ -132,7 +132,7 @@ mod authorization_tests {
 
 mod hook_tests {
     use async_trait::async_trait;
-    use branchforge::hooks::{Hook, HookContext, HookEvent, HookInput, HookManager, HookOutput};
+    use branchforge::hooks::{Hook, HookContext, HookEvent, HookInput, HookOutput, HookRegistry};
 
     struct TestHook {
         name: String,
@@ -172,7 +172,7 @@ mod hook_tests {
 
     #[test]
     fn test_hook_registration() {
-        let mut manager = HookManager::new();
+        let mut manager = HookRegistry::new();
         manager.register(TestHook::new());
         assert_eq!(manager.hook_names().len(), 1);
     }

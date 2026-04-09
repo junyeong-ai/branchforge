@@ -7,7 +7,7 @@ use crate::common::Index;
 use crate::common::IndexRegistry;
 use crate::context::{MemoryProvider, PromptOrchestrator, RuleIndex, StaticContext};
 use crate::skills::{SkillRuntime, build_model_invocable_summary};
-use crate::tools::{ToolRegistry, ToolSearchConfig, ToolSearchManager};
+use crate::tools::{ToolRegistry, ToolSearchConfig, ToolSearchEngine};
 
 use super::builder::AgentBuilder;
 
@@ -52,6 +52,7 @@ impl AgentBuilder {
         );
 
         agent.runtime_mut().execution_mode = self.execution_mode;
+        agent.runtime_mut().approval_sender = self.approval_sender;
 
         if let Some(messages) = self.initial_messages {
             agent = agent.initial_messages(messages);
@@ -106,8 +107,8 @@ impl AgentBuilder {
 
         if let Some(coordination) = self.coordination {
             let directory = std::sync::Arc::new(crate::orchestration::AgentDirectory::new());
-            agent.runtime_mut().orchestration.agent_directory = Some(directory);
-            agent.runtime_mut().orchestration.coordination = Some(coordination);
+            agent.runtime_mut().agent_directory = Some(directory);
+            agent.runtime_mut().coordination = Some(coordination);
         }
 
         if let Some(strategy) = self.recovery_strategy {
@@ -239,7 +240,7 @@ impl AgentBuilder {
                     crate::types::context_window::for_model(&self.config.model.primary) as usize;
                 ToolSearchConfig::default().context_window(context_window)
             });
-            Arc::new(ToolSearchManager::new(config))
+            Arc::new(ToolSearchEngine::new(config))
         };
 
         // Set toolset registry if available
@@ -300,7 +301,7 @@ impl AgentBuilder {
 
     #[cfg(feature = "plugins")]
     async fn load_plugins(&mut self) {
-        use crate::plugins::{PluginDiscovery, PluginManager};
+        use crate::plugins::{PluginDiscovery, PluginLoader};
         use crate::subagents::builtin_subagents;
 
         let mut dirs = std::mem::take(&mut self.plugin_dirs);
@@ -314,7 +315,7 @@ impl AgentBuilder {
             return;
         }
 
-        let manager = match PluginManager::load_from_dirs(&dirs).await {
+        let manager = match PluginLoader::load_from_dirs(&dirs).await {
             Ok(m) => m,
             Err(e) => {
                 tracing::warn!(error = %e, "Failed to load plugins");

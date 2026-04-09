@@ -395,6 +395,23 @@ impl Session {
 
     fn graph_projected_messages(&self) -> Vec<SessionMessage> {
         let branch_nodes = self.current_branch_graph_nodes();
+
+        // Filter out archived nodes: if a watermark is set, skip any
+        // primary-branch node whose created_at precedes the watermark node.
+        let branch_nodes: Vec<_> = if let Some(watermark_id) = self.graph.archived_watermark() {
+            if let Some(watermark_ts) = self.graph.nodes().get(&watermark_id).map(|n| n.created_at)
+            {
+                branch_nodes
+                    .into_iter()
+                    .filter(|n| n.created_at >= watermark_ts)
+                    .collect()
+            } else {
+                branch_nodes
+            }
+        } else {
+            branch_nodes
+        };
+
         let start_index = branch_nodes
             .iter()
             .rposition(|node| node.kind == NodeKind::Summary)

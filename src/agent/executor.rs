@@ -12,10 +12,10 @@ use crate::budget::{BudgetTracker, TenantBudget};
 use crate::context::PromptOrchestrator;
 use crate::context_scope::SharedContextScope;
 use crate::events::EventBus;
-use crate::hooks::HookManager;
+use crate::hooks::HookRegistry;
 use crate::ir::Message;
 use crate::session::{SessionAccessScope, SessionManager, ToolState};
-use crate::tools::{ToolRegistry, ToolSearchManager};
+use crate::tools::{ToolRegistry, ToolSearchEngine};
 
 pub struct Agent {
     pub(crate) runtime: Arc<AgentRuntime>,
@@ -38,7 +38,7 @@ impl Agent {
             llm,
             Arc::new(config),
             Arc::new(tools),
-            Arc::new(HookManager::new()),
+            Arc::new(HookRegistry::new()),
             None,
         )
     }
@@ -47,7 +47,7 @@ impl Agent {
         llm: Arc<dyn crate::client::LlmCall>,
         config: AgentConfig,
         tools: Arc<ToolRegistry>,
-        hooks: HookManager,
+        hooks: HookRegistry,
         orchestrator: PromptOrchestrator,
     ) -> Self {
         Self::from_parts(
@@ -63,7 +63,7 @@ impl Agent {
         llm: Arc<dyn crate::client::LlmCall>,
         config: Arc<AgentConfig>,
         tools: Arc<ToolRegistry>,
-        hooks: Arc<HookManager>,
+        hooks: Arc<HookRegistry>,
         orchestrator: Option<Arc<RwLock<PromptOrchestrator>>>,
     ) -> Self {
         let budget_tracker = match config.budget.max_cost_usd {
@@ -82,11 +82,9 @@ impl Agent {
             config,
             tools,
             hooks,
-            orchestration: super::runtime::OrchestrationBundle {
-                orchestrator,
-                coordination: None,
-                agent_directory: None,
-            },
+            orchestrator,
+            coordination: None,
+            agent_directory: None,
             compaction_chain: None,
             recovery_strategy: None,
             budget_tracker: Arc::new(budget_tracker),
@@ -95,6 +93,7 @@ impl Agent {
             tool_search_manager: None,
             event_bus: None,
             execution_mode: ExecutionMode::Auto,
+            approval_sender: None,
             context_scope: None,
             shutdown: CancellationToken::new(),
         });
@@ -131,7 +130,7 @@ impl Agent {
         self
     }
 
-    pub(crate) fn tool_search_manager(mut self, manager: Arc<ToolSearchManager>) -> Self {
+    pub(crate) fn tool_search_manager(mut self, manager: Arc<ToolSearchEngine>) -> Self {
         self.runtime_mut().tool_search_manager = Some(manager);
         self
     }
@@ -189,6 +188,34 @@ impl Agent {
     }
 
     #[must_use]
+    /// Capture current runtime state as a serializable checkpoint.
+    ///
+    /// The checkpoint records the session ID, approximate iteration count
+    /// (derived from the session message count), accumulated cost, and the
+    /// current execution mode. Combined with session persistence, this is
+    /// enough to resume an agent after a crash.
+    pub async fn checkpoint(&self) -> super::checkpoint::AgentCheckpoint {
+        let (session_id, iteration, total_cost_usd) = self
+            .state
+            .with_session(|s| {
+                let msg_count = s.current_branch_messages().len();
+                let approx_iterations = (msg_count / 2) as u32;
+                (s.id, approx_iterations, s.total_cost_usd())
+            })
+            .await;
+
+        super::checkpoint::AgentCheckpoint {
+            session_id,
+            iteration,
+            api_calls: 0,
+            tool_calls: 0,
+            total_cost_usd,
+            execution_mode: self.runtime.execution_mode.clone(),
+            budget_remaining: None,
+            created_at: chrono::Utc::now(),
+        }
+    }
+
     pub fn builder() -> super::AgentBuilder {
         super::AgentBuilder::new()
     }
@@ -214,7 +241,7 @@ impl Agent {
     }
 
     #[must_use]
-    pub fn hooks(&self) -> &Arc<HookManager> {
+    pub fn hooks(&self) -> &Arc<HookRegistry> {
         &self.runtime.hooks
     }
 
@@ -241,7 +268,7 @@ impl Agent {
     }
 
     pub fn orchestrator(&self) -> Option<&Arc<RwLock<PromptOrchestrator>>> {
-        self.runtime.orchestration.orchestrator.as_ref()
+        self.runtime.orchestrator.as_ref()
     }
 
     #[must_use]

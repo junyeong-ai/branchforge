@@ -1,15 +1,20 @@
 //! Authorization system for controlling tool execution.
 
+pub mod approval;
 mod denied;
 pub mod extractors;
 mod modes;
 mod rules;
 
+pub use approval::{
+    ApprovalReceiver, ApprovalRequest, ApprovalResponse, ApprovalSender, approval_channel,
+};
 pub use denied::AuthorizationDenied;
 pub use extractors::{FieldExtractor, InputExtractor};
 pub use modes::ExecutionMode;
 pub use rules::{
-    ToolDecision, ToolLimits, ToolPolicy, ToolPolicyBuilder, ToolRule, ToolRuleDecision,
+    PermissionDecision, PermissionDeniedReason, ToolLimits, ToolPolicy, ToolPolicyBuilder,
+    ToolRule, ToolRuleDecision,
 };
 
 pub const READ_ONLY_TOOLS: &[&str] = &["Read", "Glob", "Grep", "WebSearch", "WebFetch"];

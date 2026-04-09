@@ -19,7 +19,8 @@ use super::executor::Agent;
 use super::request::RequestBuilder;
 use super::run_config::RunConfig;
 use super::runtime::AgentRuntime;
-use crate::authorization::AuthorizationDenied;
+use crate::authorization::approval::DEFAULT_APPROVAL_TIMEOUT_SECS;
+use crate::authorization::{ApprovalRequest, ApprovalResponse, AuthorizationDenied};
 use crate::client::provider_client::ChunkStream;
 use crate::hooks::{HookContext, HookEvent, HookInput};
 use crate::ir::ContentPart;
@@ -69,7 +70,7 @@ impl Agent {
                 })
             })?;
         }
-        let static_context = match &self.runtime.orchestration.orchestrator {
+        let static_context = match &self.runtime.orchestrator {
             Some(orchestrator) => orchestrator.read().await.static_context().clone(),
             None => crate::context::StaticContext::new(),
         };
@@ -1154,7 +1155,7 @@ impl StreamState {
                     continue;
                 }
 
-                // ExecutionMode: Supervised mode requires review
+                // ExecutionMode: Supervised mode requires review via approval channel
                 if self
                     .cfg
                     .runtime
@@ -1166,17 +1167,74 @@ impl StreamState {
                         name: tool_use.name.clone(),
                         input: actual_input.clone(),
                     });
-                    all_tool_results.push(
-                        ContentPart::tool_error(
-                            &tool_use.id,
-                            format!(
-                                "Tool '{}' requires user review. Use execute_stream() to handle ToolReview events.",
+
+                    let approval_result = if let Some(ref sender) = self.cfg.runtime.approval_sender
+                    {
+                        let request = ApprovalRequest {
+                            tool_name: tool_use.name.clone(),
+                            tool_call_id: tool_use.id.clone(),
+                            tool_input: actual_input.clone(),
+                            reason: format!(
+                                "Tool '{}' requires approval in {} mode",
+                                tool_use.name, self.cfg.runtime.execution_mode
+                            ),
+                        };
+                        let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
+                        if sender.send((request, resp_tx)).await.is_err() {
+                            ApprovalResponse::Deny {
+                                reason: "Approval channel closed".into(),
+                            }
+                        } else {
+                            match tokio::time::timeout(
+                                std::time::Duration::from_secs(DEFAULT_APPROVAL_TIMEOUT_SECS),
+                                resp_rx,
+                            )
+                            .await
+                            {
+                                Ok(Ok(response)) => response,
+                                Ok(Err(_)) => ApprovalResponse::Deny {
+                                    reason: "Approval responder dropped".into(),
+                                },
+                                Err(_) => ApprovalResponse::Deny {
+                                    reason: "Approval timed out".into(),
+                                },
+                            }
+                        }
+                    } else {
+                        ApprovalResponse::Deny {
+                            reason: format!(
+                                "Tool '{}' requires review but no approval channel is configured.                                  Use AgentBuilder::approval_channel() to enable human-in-the-loop.",
                                 tool_use.name
                             ),
-                        )
-                        .with_tool_name(&tool_use.name),
-                    );
-                    continue;
+                        }
+                    };
+
+                    match approval_result {
+                        ApprovalResponse::Approve => {
+                            debug!(tool = %tool_use.name, "Tool approved by human");
+                        }
+                        ApprovalResponse::Deny { reason } => {
+                            debug!(tool = %tool_use.name, %reason, "Tool denied by human");
+                            all_tool_results.push(
+                                ContentPart::tool_error(&tool_use.id, reason.clone())
+                                    .with_tool_name(&tool_use.name),
+                            );
+                            self.metrics.record_authorization_denial(
+                                AuthorizationDenied::new(
+                                    &tool_use.name,
+                                    &tool_use.id,
+                                    actual_input.clone(),
+                                )
+                                .reason(reason.clone()),
+                            );
+                            events.push(AgentEvent::ToolBlocked {
+                                id: tool_use.id.clone(),
+                                name: tool_use.name.clone(),
+                                reason,
+                            });
+                            continue;
+                        }
+                    }
                 }
 
                 events.push(AgentEvent::ToolStart {
@@ -1378,7 +1436,7 @@ impl StreamState {
             try_activate_dynamic_rules(
                 &name,
                 &input,
-                &self.cfg.runtime.orchestration.orchestrator,
+                &self.cfg.runtime.orchestrator,
                 &mut self.dynamic_rules,
             )
             .await;

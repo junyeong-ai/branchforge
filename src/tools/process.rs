@@ -37,11 +37,11 @@ struct ManagedProcess {
 
 /// Manager for background shell processes.
 #[derive(Clone)]
-pub struct ProcessManager {
+pub struct ProcessScheduler {
     processes: Arc<Mutex<HashMap<ProcessId, ManagedProcess>>>,
 }
 
-impl ProcessManager {
+impl ProcessScheduler {
     /// Create a new process manager.
     #[must_use]
     pub fn new() -> Self {
@@ -210,7 +210,7 @@ impl ProcessManager {
     }
 }
 
-impl Default for ProcessManager {
+impl Default for ProcessScheduler {
     fn default() -> Self {
         Self::new()
     }
@@ -223,7 +223,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_spawn_and_list() {
-        let mgr = ProcessManager::new();
+        let mgr = ProcessScheduler::new();
         let id = mgr
             .spawn("sleep 0.1", &PathBuf::from("/tmp"))
             .await
@@ -245,7 +245,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_kill() {
-        let mgr = ProcessManager::new();
+        let mgr = ProcessScheduler::new();
         let id = mgr.spawn("sleep 10", &PathBuf::from("/tmp")).await.unwrap();
 
         assert!(mgr.is_running(&id).await);
@@ -255,7 +255,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_get_output() {
-        let mgr = ProcessManager::new();
+        let mgr = ProcessScheduler::new();
         let id = mgr
             .spawn("echo hello", &PathBuf::from("/tmp"))
             .await
@@ -268,7 +268,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_cleanup_finished() {
-        let mgr = ProcessManager::new();
+        let mgr = ProcessScheduler::new();
         let id = mgr
             .spawn("echo done", &PathBuf::from("/tmp"))
             .await
@@ -286,7 +286,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_process_not_found() {
-        let mgr = ProcessManager::new();
+        let mgr = ProcessScheduler::new();
         let result = mgr.get_output(&"nonexistent".to_string()).await;
         assert!(result.is_err());
 
@@ -296,7 +296,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_buffer_overflow_keeps_recent_data() {
-        let mgr = ProcessManager::new();
+        let mgr = ProcessScheduler::new();
 
         // Generate output larger than MAX_OUTPUT_BUFFER_SIZE (1MB)
         // We generate 1.5MB of data: 1500 lines of 1000 chars each

@@ -6,24 +6,24 @@ use std::sync::Arc;
 use tokio::time::{Duration, timeout};
 
 #[derive(Clone)]
-pub struct HookManager {
+pub struct HookRegistry {
     hooks: Vec<Arc<dyn Hook>>,
     cache: HashMap<HookEvent, Vec<usize>>,
-    default_timeout_secs: u64,
+    max_timeout_secs: u64,
 }
 
-impl Default for HookManager {
+impl Default for HookRegistry {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl HookManager {
+impl HookRegistry {
     pub fn new() -> Self {
         Self {
             hooks: Vec::new(),
             cache: HashMap::new(),
-            default_timeout_secs: 60,
+            max_timeout_secs: 60,
         }
     }
 
@@ -31,7 +31,7 @@ impl HookManager {
         Self {
             hooks: Vec::new(),
             cache: HashMap::new(),
-            default_timeout_secs: timeout_secs,
+            max_timeout_secs: timeout_secs,
         }
     }
 
@@ -137,7 +137,7 @@ impl HookManager {
                 continue;
             }
 
-            let hook_timeout = hook.timeout_secs().min(self.default_timeout_secs);
+            let hook_timeout = hook.timeout_secs().min(self.max_timeout_secs);
             let result = timeout(
                 Duration::from_secs(hook_timeout),
                 hook.execute(input.clone(), hook_context),
@@ -204,12 +204,12 @@ impl HookManager {
     }
 }
 
-impl std::fmt::Debug for HookManager {
+impl std::fmt::Debug for HookRegistry {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("HookManager")
+        f.debug_struct("HookRegistry")
             .field("hook_count", &self.hooks.len())
             .field("hook_names", &self.hook_names())
-            .field("default_timeout_secs", &self.default_timeout_secs)
+            .field("max_timeout_secs", &self.max_timeout_secs)
             .finish()
     }
 }
@@ -275,7 +275,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_hook_registration() {
-        let mut manager = HookManager::new();
+        let mut manager = HookRegistry::new();
         manager.register(TestHook::new("hook1", vec![HookEvent::PreToolUse], 0));
         manager.register(TestHook::new("hook2", vec![HookEvent::PostToolUse], 0));
 
@@ -287,7 +287,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_hook_unregistration() {
-        let mut manager = HookManager::new();
+        let mut manager = HookRegistry::new();
         manager.register(TestHook::new("hook1", vec![HookEvent::PreToolUse], 0));
         manager.register(TestHook::new("hook2", vec![HookEvent::PreToolUse], 0));
 
@@ -299,7 +299,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_hooks_for_event() {
-        let mut manager = HookManager::new();
+        let mut manager = HookRegistry::new();
         manager.register(TestHook::new("hook1", vec![HookEvent::PreToolUse], 10));
         manager.register(TestHook::new(
             "hook2",
@@ -321,7 +321,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_execute_allows() {
-        let mut manager = HookManager::new();
+        let mut manager = HookRegistry::new();
         manager.register(TestHook::new("hook1", vec![HookEvent::PreToolUse], 0));
         manager.register(TestHook::new("hook2", vec![HookEvent::PreToolUse], 0));
 
@@ -337,7 +337,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_execute_blocks() {
-        let mut manager = HookManager::new();
+        let mut manager = HookRegistry::new();
         manager.register(TestHook::new("hook1", vec![HookEvent::PreToolUse], 0));
         manager.register(TestHook::blocking(
             "hook2",
@@ -358,7 +358,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_no_hooks_allows() {
-        let manager = HookManager::new();
+        let manager = HookRegistry::new();
 
         let input = HookInput::pre_tool_use("session-1", "Read", serde_json::json!({}));
         let hook_context = HookContext::new("session-1");
@@ -446,7 +446,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_blockable_hook_failure_returns_error() {
-        let mut manager = HookManager::new();
+        let mut manager = HookRegistry::new();
         manager.register(FailingHook::new("failing", vec![HookEvent::PreToolUse]));
 
         let input = HookInput::pre_tool_use("session-1", "Read", serde_json::json!({}));
@@ -462,7 +462,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_blockable_hook_timeout_returns_error() {
-        let mut manager = HookManager::timeout(1);
+        let mut manager = HookRegistry::timeout(1);
         manager.register(SlowHook::new("slow", vec![HookEvent::UserPromptSubmit]));
 
         let input = HookInput::user_prompt_submit("session-1", "test prompt");
@@ -478,7 +478,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_non_blockable_hook_failure_continues() {
-        let mut manager = HookManager::new();
+        let mut manager = HookRegistry::new();
         // SessionEnd is non-blockable
         manager.register(FailingHook::new("failing", vec![HookEvent::SessionEnd]));
         manager.register(TestHook::new("success", vec![HookEvent::SessionEnd], 0));
@@ -496,7 +496,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_non_blockable_hook_timeout_continues() {
-        let mut manager = HookManager::timeout(1);
+        let mut manager = HookRegistry::timeout(1);
         // PostToolUse is non-blockable
         manager.register(SlowHook::new("slow", vec![HookEvent::PostToolUse]));
 

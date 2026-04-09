@@ -85,7 +85,7 @@ impl ApiKeyHelper {
         Some(Self::new(command).ttl_ms(ttl_ms))
     }
 
-    pub async fn get_key(&self) -> Result<SecretString> {
+    pub async fn key(&self) -> Result<SecretString> {
         let mut cache = self.cache.lock().await;
 
         if let Some(ref cached) = *cache
@@ -223,12 +223,12 @@ impl fmt::Debug for AwsCredentials {
 }
 
 #[derive(Debug)]
-pub struct CredentialManager {
+pub struct CredentialResolver {
     api_key_helper: Option<Arc<ApiKeyHelper>>,
     aws_refresh: Option<Arc<AwsCredentialRefresh>>,
 }
 
-impl CredentialManager {
+impl CredentialResolver {
     pub fn new() -> Self {
         Self {
             api_key_helper: None,
@@ -246,9 +246,9 @@ impl CredentialManager {
         self
     }
 
-    pub async fn get_api_key(&self) -> Result<Option<SecretString>> {
+    pub async fn api_key(&self) -> Result<Option<SecretString>> {
         match &self.api_key_helper {
-            Some(helper) => helper.get_key().await.map(Some),
+            Some(helper) => helper.key().await.map(Some),
             None => Ok(None),
         }
     }
@@ -261,7 +261,7 @@ impl CredentialManager {
     }
 }
 
-impl Default for CredentialManager {
+impl Default for CredentialResolver {
     fn default() -> Self {
         Self::new()
     }
@@ -274,7 +274,7 @@ mod tests {
     #[tokio::test]
     async fn test_api_key_helper_echo() {
         let helper = ApiKeyHelper::new("echo test-key");
-        let key = helper.get_key().await.unwrap();
+        let key = helper.key().await.unwrap();
         assert_eq!(key.expose_secret(), "test-key");
     }
 
@@ -282,20 +282,20 @@ mod tests {
     async fn test_api_key_helper_caching() {
         let helper = ApiKeyHelper::new("echo test-key").ttl(Duration::from_secs(60));
 
-        let key1 = helper.get_key().await.unwrap();
-        let key2 = helper.get_key().await.unwrap();
+        let key1 = helper.key().await.unwrap();
+        let key2 = helper.key().await.unwrap();
         assert_eq!(key1.expose_secret(), key2.expose_secret());
     }
 
     #[tokio::test]
     async fn test_api_key_helper_failure() {
         let helper = ApiKeyHelper::new("exit 1");
-        assert!(helper.get_key().await.is_err());
+        assert!(helper.key().await.is_err());
     }
 
     #[test]
     fn test_credential_manager_default() {
-        let manager = CredentialManager::default();
+        let manager = CredentialResolver::default();
         assert!(manager.api_key_helper.is_none());
         assert!(manager.aws_refresh.is_none());
     }

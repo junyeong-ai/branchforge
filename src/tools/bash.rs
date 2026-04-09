@@ -13,7 +13,7 @@ use tokio::time::timeout;
 
 use super::SchemaTool;
 use super::context::ExecutionContext;
-use super::process::ProcessManager;
+use super::process::ProcessScheduler;
 use crate::types::ToolResult;
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -36,17 +36,17 @@ pub struct BashInput {
 }
 
 pub struct BashTool {
-    process_manager: Arc<ProcessManager>,
+    process_manager: Arc<ProcessScheduler>,
 }
 
 impl BashTool {
-    pub fn new(manager: Arc<ProcessManager>) -> Self {
+    pub fn new(manager: Arc<ProcessScheduler>) -> Self {
         Self {
             process_manager: manager,
         }
     }
 
-    pub fn process_manager(&self) -> &Arc<ProcessManager> {
+    pub fn process_manager(&self) -> &Arc<ProcessScheduler> {
         &self.process_manager
     }
 
@@ -234,7 +234,7 @@ impl BashTool {
 
 impl Default for BashTool {
     fn default() -> Self {
-        Self::new(Arc::new(ProcessManager::new()))
+        Self::new(Arc::new(ProcessScheduler::new()))
     }
 }
 
@@ -387,7 +387,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_shared_process_manager() {
-        let manager = Arc::new(ProcessManager::new());
+        let manager = Arc::new(ProcessScheduler::new());
         let tool1 = BashTool::new(manager.clone());
         let tool2 = BashTool::new(manager.clone());
 

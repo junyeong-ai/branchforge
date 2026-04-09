@@ -8,7 +8,7 @@ use serde::Deserialize;
 
 use super::SchemaTool;
 use super::context::ExecutionContext;
-use super::process::ProcessManager;
+use super::process::ProcessScheduler;
 use crate::types::ToolResult;
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -19,24 +19,24 @@ pub struct KillShellInput {
 }
 
 pub struct KillShellTool {
-    process_manager: Arc<ProcessManager>,
+    process_manager: Arc<ProcessScheduler>,
 }
 
 impl KillShellTool {
-    pub fn new(manager: Arc<ProcessManager>) -> Self {
+    pub fn new(manager: Arc<ProcessScheduler>) -> Self {
         Self {
             process_manager: manager,
         }
     }
 
-    pub fn process_manager(&self) -> &Arc<ProcessManager> {
+    pub fn process_manager(&self) -> &Arc<ProcessScheduler> {
         &self.process_manager
     }
 }
 
 impl Default for KillShellTool {
     fn default() -> Self {
-        Self::new(Arc::new(ProcessManager::new()))
+        Self::new(Arc::new(ProcessScheduler::new()))
     }
 }
 
@@ -82,7 +82,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_kill_running_process() {
-        let mgr = Arc::new(ProcessManager::new());
+        let mgr = Arc::new(ProcessScheduler::new());
         let id = mgr.spawn("sleep 10", &PathBuf::from("/tmp")).await.unwrap();
 
         let tool = KillShellTool::new(mgr.clone());

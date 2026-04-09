@@ -9,7 +9,7 @@ use crate::authorization::{ExecutionMode, ToolPolicy, ToolRule};
 use crate::common::{IndexRegistry, matches_tool_pattern};
 use crate::config::SandboxConfig;
 use crate::context::MemoryContent;
-use crate::hooks::{CommandHook, HookEvent, HookManager, HookRule};
+use crate::hooks::{CommandHook, HookEvent, HookRegistry, HookRule};
 use crate::ir::Message;
 use crate::mcp::{is_mcp_name, parse_mcp_name};
 use crate::session::SessionManager;
@@ -25,12 +25,12 @@ pub(crate) struct DelegationRuntime {
     model_config: Option<ModelConfig>,
     skill_registry: IndexRegistry<SkillIndex>,
     subagent_registry: IndexRegistry<SubagentIndex>,
-    hooks: HookManager,
+    hooks: HookRegistry,
     memory_content: MemoryContent,
     sandbox_settings: Option<SandboxConfig>,
     session_manager: Option<SessionManager>,
     mcp_manager: Option<Arc<crate::mcp::McpManager>>,
-    tool_search_manager: Option<Arc<crate::tools::ToolSearchManager>>,
+    tool_search_manager: Option<Arc<crate::tools::ToolSearchEngine>>,
 }
 
 /// Configuration bundle for delegation runtime construction.
@@ -41,12 +41,12 @@ pub(crate) struct DelegationRuntimeConfig {
     pub model_config: Option<ModelConfig>,
     pub skill_registry: IndexRegistry<SkillIndex>,
     pub subagent_registry: IndexRegistry<SubagentIndex>,
-    pub hooks: HookManager,
+    pub hooks: HookRegistry,
     pub memory_content: MemoryContent,
     pub sandbox_settings: Option<SandboxConfig>,
     pub session_manager: Option<SessionManager>,
     pub mcp_manager: Option<Arc<crate::mcp::McpManager>>,
-    pub tool_search_manager: Option<Arc<crate::tools::ToolSearchManager>>,
+    pub tool_search_manager: Option<Arc<crate::tools::ToolSearchEngine>>,
 }
 
 impl DelegationRuntime {
@@ -410,10 +410,10 @@ impl DelegationRuntime {
 }
 
 fn merged_hooks(
-    base: &HookManager,
+    base: &HookRegistry,
     extra: Option<&HashMap<String, Vec<HookRule>>>,
     prefix: &str,
-) -> HookManager {
+) -> HookRegistry {
     let mut hooks = base.clone();
     let Some(extra) = extra else {
         return hooks;
@@ -612,7 +612,7 @@ mod tests {
             model_config: None,
             skill_registry,
             subagent_registry: IndexRegistry::new(),
-            hooks: HookManager::default(),
+            hooks: HookRegistry::default(),
             memory_content: MemoryContent::default(),
             sandbox_settings: None,
             session_manager: None,

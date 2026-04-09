@@ -23,6 +23,10 @@ pub struct SessionGraph {
     pub(crate) checkpoints: HashMap<NodeId, Checkpoint>,
     pub(crate) bookmarks: HashMap<Uuid, Bookmark>,
     pub(crate) primary_branch: BranchId,
+    /// Nodes on the primary branch before this watermark are "archived" --
+    /// skipped in message projection but preserved for referential integrity.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) archived_watermark: Option<NodeId>,
     #[serde(skip)]
     pub(crate) event_bus: Option<Arc<EventBus>>,
 }
@@ -60,6 +64,48 @@ impl SessionGraph {
 
     pub fn primary_branch(&self) -> BranchId {
         self.primary_branch
+    }
+
+    /// Returns the current archived watermark, if set.
+    ///
+    /// Nodes on the primary branch whose `created_at` is strictly before
+    /// the watermark node's `created_at` are considered archived and should
+    /// be skipped in message projection.
+    pub fn archived_watermark(&self) -> Option<NodeId> {
+        self.archived_watermark
+    }
+
+    // ── Archival ─────────────────────────────────────────────────────
+
+    /// Mark all primary-branch nodes before `watermark` as archived.
+    ///
+    /// Archived nodes remain in the graph (preserving `parent_id` chains
+    /// and checkpoint/bookmark references) but are skipped by the session
+    /// layer's message projection (`Session::current_branch_messages()`).
+    ///
+    /// Returns the number of primary-branch nodes that precede the
+    /// watermark (i.e. the archived count).
+    pub fn archive_before(&mut self, watermark: NodeId) -> Result<usize, GraphError> {
+        if !self.nodes.contains_key(&watermark) {
+            return Err(GraphError::MissingNode { node_id: watermark });
+        }
+        let primary = self.primary_branch;
+        let watermark_created_at = self.nodes[&watermark].created_at;
+        let count = self
+            .nodes
+            .values()
+            .filter(|n| n.branch_id == primary && n.created_at < watermark_created_at)
+            .count();
+
+        self.archived_watermark = Some(watermark);
+        self.events.push(GraphEvent::with_metadata(
+            EventMetadata::new(None),
+            GraphEventBody::EventsArchived {
+                watermark_node_id: watermark,
+                archived_count: count,
+            },
+        ));
+        Ok(count)
     }
 
     // ── Mutators ─────────────────────────────────────────────────────
@@ -169,6 +215,7 @@ impl SessionGraph {
             checkpoints: HashMap::new(),
             bookmarks: HashMap::new(),
             primary_branch: branch_id,
+            archived_watermark: None,
             event_bus: None,
         }
     }

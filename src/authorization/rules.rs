@@ -20,25 +20,65 @@ fn anchor_pattern(pattern: &str) -> String {
     }
 }
 
-/// Decision for a tool policy check.
+/// Reason a permission check denied or deferred an operation.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub enum ToolDecision {
-    Allow,
-    Deny { reason: String },
+pub enum PermissionDeniedReason {
+    PolicyDeny(String),
+    PlanModeBlocked,
+    SupervisedReview,
+    NotRegistered,
+    HookBlocked(String),
+    BudgetExceeded,
+    NoMatchingRule,
+    Custom(String),
 }
 
-impl ToolDecision {
+impl std::fmt::Display for PermissionDeniedReason {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::PolicyDeny(msg) => write!(f, "{}", msg),
+            Self::PlanModeBlocked => write!(f, "blocked in plan mode"),
+            Self::SupervisedReview => write!(f, "requires supervised review"),
+            Self::NotRegistered => write!(f, "tool not registered"),
+            Self::HookBlocked(msg) => write!(f, "blocked by hook: {}", msg),
+            Self::BudgetExceeded => write!(f, "budget exceeded"),
+            Self::NoMatchingRule => write!(f, "no matching rule: tool not explicitly allowed"),
+            Self::Custom(msg) => write!(f, "{}", msg),
+        }
+    }
+}
+
+/// Decision for a tool policy check.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum PermissionDecision {
+    Allow,
+    Deny { reason: PermissionDeniedReason },
+    Ask { reason: PermissionDeniedReason },
+}
+
+impl PermissionDecision {
     pub fn is_allowed(&self) -> bool {
         matches!(self, Self::Allow)
     }
 
     pub fn is_denied(&self) -> bool {
-        !self.is_allowed()
+        matches!(self, Self::Deny { .. })
     }
 
     pub fn reason(&self) -> &str {
         match self {
-            Self::Deny { reason } => reason,
+            Self::Deny { reason } | Self::Ask { reason } => match reason {
+                PermissionDeniedReason::PolicyDeny(msg)
+                | PermissionDeniedReason::HookBlocked(msg)
+                | PermissionDeniedReason::Custom(msg) => msg,
+                PermissionDeniedReason::PlanModeBlocked => "blocked in plan mode",
+                PermissionDeniedReason::SupervisedReview => "requires supervised review",
+                PermissionDeniedReason::NotRegistered => "tool not registered",
+                PermissionDeniedReason::BudgetExceeded => "budget exceeded",
+                PermissionDeniedReason::NoMatchingRule => {
+                    "no matching rule: tool not explicitly allowed"
+                }
+            },
             _ => "",
         }
     }
@@ -49,7 +89,7 @@ impl ToolDecision {
 
     pub fn denied(reason: impl Into<String>) -> Self {
         Self::Deny {
-            reason: reason.into(),
+            reason: PermissionDeniedReason::Custom(reason.into()),
         }
     }
 }
@@ -384,7 +424,7 @@ impl ToolPolicy {
     /// - First check deny rules: if any match, return Deny.
     /// - Then check allow rules: if any match, return Allow.
     /// - Default: Deny("no matching rule").
-    pub fn check(&self, tool_name: &str, input: &Value) -> ToolDecision {
+    pub fn check(&self, tool_name: &str, input: &Value) -> PermissionDecision {
         // Deny rules first (highest priority)
         for rule in self
             .rules
@@ -392,11 +432,13 @@ impl ToolPolicy {
             .filter(|r| r.decision == ToolRuleDecision::Deny)
         {
             if rule.matches_with_input_extractors(tool_name, input, Some(&self.extractors)) {
-                return ToolDecision::denied(
-                    rule.reason
-                        .clone()
-                        .unwrap_or_else(|| format!("Denied by rule: {}", rule.pattern)),
-                );
+                return PermissionDecision::Deny {
+                    reason: PermissionDeniedReason::PolicyDeny(
+                        rule.reason
+                            .clone()
+                            .unwrap_or_else(|| format!("Denied by rule: {}", rule.pattern)),
+                    ),
+                };
             }
         }
 
@@ -407,12 +449,14 @@ impl ToolPolicy {
             .filter(|r| r.decision == ToolRuleDecision::Allow)
         {
             if rule.matches_with_input_extractors(tool_name, input, Some(&self.extractors)) {
-                return ToolDecision::Allow;
+                return PermissionDecision::Allow;
             }
         }
 
         // Default: deny
-        ToolDecision::denied("No matching rule: tool not explicitly allowed")
+        PermissionDecision::Deny {
+            reason: PermissionDeniedReason::NoMatchingRule,
+        }
     }
 
     /// Check permission for an explicit user-requested skill invocation such as `/review-pr`.
@@ -422,18 +466,20 @@ impl ToolPolicy {
     /// - allow rules are honored
     /// - if no rule matches, the explicit wrapper invocation is allowed and
     ///   nested tool usage remains governed by the delegated runtime policy
-    pub fn check_explicit_skill(&self, input: &Value) -> ToolDecision {
+    pub fn check_explicit_skill(&self, input: &Value) -> PermissionDecision {
         for rule in self
             .rules
             .iter()
             .filter(|r| r.decision == ToolRuleDecision::Deny)
         {
             if rule.matches_with_input_extractors("Skill", input, Some(&self.extractors)) {
-                return ToolDecision::denied(
-                    rule.reason
-                        .clone()
-                        .unwrap_or_else(|| format!("Denied by rule: {}", rule.pattern)),
-                );
+                return PermissionDecision::Deny {
+                    reason: PermissionDeniedReason::PolicyDeny(
+                        rule.reason
+                            .clone()
+                            .unwrap_or_else(|| format!("Denied by rule: {}", rule.pattern)),
+                    ),
+                };
             }
         }
 
@@ -443,11 +489,11 @@ impl ToolPolicy {
             .filter(|r| r.decision == ToolRuleDecision::Allow)
         {
             if rule.matches_with_input_extractors("Skill", input, Some(&self.extractors)) {
-                return ToolDecision::Allow;
+                return PermissionDecision::Allow;
             }
         }
 
-        ToolDecision::Allow
+        PermissionDecision::Allow
     }
 
     pub fn limits(&self, tool_name: &str) -> Option<&ToolLimits> {
@@ -503,11 +549,11 @@ mod tests {
 
     #[test]
     fn test_tool_decision() {
-        let allowed = ToolDecision::Allow;
+        let allowed = PermissionDecision::Allow;
         assert!(allowed.is_allowed());
         assert!(!allowed.is_denied());
 
-        let denied = ToolDecision::denied("test");
+        let denied = PermissionDecision::denied("test");
         assert!(!denied.is_allowed());
         assert!(denied.is_denied());
         assert_eq!(denied.reason(), "test");

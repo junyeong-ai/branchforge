@@ -99,7 +99,7 @@ impl SessionManager {
         }
     }
 
-    pub async fn get_by_str(&self, id: &str) -> SessionResult<Session> {
+    pub async fn find_by_str(&self, id: &str) -> SessionResult<Session> {
         let session_id = Self::parse_session_id(id)?;
         self.get(&session_id).await
     }
@@ -630,7 +630,7 @@ impl ScopedSessionManager {
         self.manager.get_scoped(id, &self.scope).await
     }
 
-    pub async fn get_by_str(&self, id: &str) -> SessionResult<Session> {
+    pub async fn find_by_str(&self, id: &str) -> SessionResult<Session> {
         let session_id = SessionManager::parse_session_id(id)?;
         self.get(&session_id).await
     }
@@ -1644,9 +1644,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_session_manager_get_by_str_rejects_invalid_uuid() {
+    async fn test_session_manager_find_by_str_rejects_invalid_uuid() {
         let manager = SessionManager::in_memory();
-        let error = manager.get_by_str("not-a-uuid").await.unwrap_err();
+        let error = manager.find_by_str("not-a-uuid").await.unwrap_err();
 
         assert!(
             error
@@ -1656,7 +1656,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_scoped_manager_get_by_str_rejects_invalid_uuid() {
+    async fn test_scoped_manager_find_by_str_rejects_invalid_uuid() {
         let manager = SessionManager::in_memory();
         let scoped = manager.scoped(
             SessionAccessScope::default()
@@ -1664,7 +1664,7 @@ mod tests {
                 .principal("user-1"),
         );
 
-        let error = scoped.get_by_str("not-a-uuid").await.unwrap_err();
+        let error = scoped.find_by_str("not-a-uuid").await.unwrap_err();
 
         assert!(
             error

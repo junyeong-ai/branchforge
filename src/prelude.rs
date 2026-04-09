@@ -82,7 +82,7 @@ pub use crate::skills::{SkillIndex, SkillResult, SkillRuntime};
 pub use crate::Hook;
 pub use crate::HookContext;
 pub use crate::HookEvent;
-pub use crate::HookManager;
+pub use crate::HookRegistry;
 
 // =============================================================================
 // Authorization

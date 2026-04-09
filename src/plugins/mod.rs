@@ -39,5 +39,5 @@ pub mod namespace;
 pub use discovery::PluginDiscovery;
 pub use error::PluginError;
 pub use loader::PluginHookEntry;
-pub use manager::PluginManager;
+pub use manager::PluginLoader;
 pub use manifest::{PluginAuthor, PluginDescriptor, PluginManifest};
