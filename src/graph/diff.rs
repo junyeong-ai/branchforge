@@ -117,7 +117,7 @@ mod tests {
     #[test]
     fn branch_diff_errors_for_missing_branch() {
         let graph = SessionGraph::default();
-        let missing = uuid::Uuid::new_v4();
+        let missing = crate::graph::BranchId::new();
 
         let error = GraphDiffer::branch_diff(&graph, graph.primary_branch, missing).unwrap_err();
         assert!(matches!(

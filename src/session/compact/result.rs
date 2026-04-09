@@ -1,5 +1,7 @@
 //! Result of a session compaction or projection truncation.
 
+use crate::ir::TokenCount;
+
 /// Outcome of running compaction against a session.
 #[derive(Debug, Clone)]
 pub enum CompactResult {
@@ -9,7 +11,7 @@ pub enum CompactResult {
     Compacted {
         original_count: usize,
         new_count: usize,
-        saved_tokens: usize,
+        saved_tokens: TokenCount,
         summary: String,
     },
     /// Compaction was skipped (e.g., disabled or another run in flight).
@@ -18,6 +20,6 @@ pub enum CompactResult {
     /// The graph remains unchanged; truncations are session-local.
     Truncated {
         truncation_count: usize,
-        estimated_token_savings: u64,
+        estimated_token_savings: TokenCount,
     },
 }

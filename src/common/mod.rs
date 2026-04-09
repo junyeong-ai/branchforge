@@ -4,6 +4,7 @@ mod directory;
 #[cfg(feature = "file-resources")]
 mod file_provider;
 mod frontmatter;
+pub mod id_macros;
 mod index;
 pub(crate) mod index_loader;
 mod index_registry;

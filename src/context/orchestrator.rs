@@ -25,7 +25,7 @@ pub struct PromptOrchestrator {
     skill_registry: IndexRegistry<SkillIndex>,
     rule_registry: Arc<RwLock<IndexRegistry<RuleIndex>>>,
     model: String,
-    current_input_tokens: u64,
+    last_usage: crate::ir::Usage,
     compact_threshold: f32,
     current_file: Option<PathBuf>,
     active_rule_names: Arc<RwLock<HashSet<String>>>,
@@ -38,7 +38,7 @@ impl PromptOrchestrator {
             skill_registry: IndexRegistry::new(),
             rule_registry: Arc::new(RwLock::new(IndexRegistry::new())),
             model: model.to_string(),
-            current_input_tokens: 0,
+            last_usage: crate::ir::Usage::default(),
             compact_threshold: DEFAULT_COMPACT_THRESHOLD,
             current_file: None,
             active_rule_names: Arc::new(RwLock::new(HashSet::new())),
@@ -66,7 +66,7 @@ impl PromptOrchestrator {
     /// the compacted session rather than stale cached content.
     pub fn invalidate_static_cache(&mut self) {
         // Reset token tracking so the orchestrator re-evaluates compaction need.
-        self.current_input_tokens = 0;
+        self.last_usage = crate::ir::Usage::default();
         // Clear the current file so rule matching is re-evaluated fresh.
         self.current_file = None;
     }
@@ -91,25 +91,27 @@ impl PromptOrchestrator {
     }
 
     pub fn current_input_tokens(&self) -> u64 {
-        self.current_input_tokens
+        self.last_usage.context_window_tokens()
     }
 
     pub fn update_usage(&mut self, usage: &crate::ir::Usage) {
-        self.current_input_tokens = usage.input_tokens;
+        self.last_usage = usage.clone();
     }
 
     pub fn needs_compact(&self) -> bool {
-        let ratio = self.current_input_tokens as f32 / self.max_tokens() as f32;
+        let ctx = self.last_usage.context_window_tokens();
+        let ratio = ctx as f32 / self.max_tokens() as f32;
         ratio > self.compact_threshold
     }
 
     pub fn available_tokens(&self) -> u64 {
         let threshold = (self.max_tokens() as f32 * self.compact_threshold) as u64;
-        threshold.saturating_sub(self.current_input_tokens)
+        threshold.saturating_sub(self.last_usage.context_window_tokens())
     }
 
     pub fn usage_percent(&self) -> f32 {
-        (self.current_input_tokens as f32 / self.max_tokens() as f32) * 100.0
+        let ctx = self.last_usage.context_window_tokens();
+        (ctx as f32 / self.max_tokens() as f32) * 100.0
     }
 
     pub fn set_current_file(&mut self, path: impl AsRef<Path>) {

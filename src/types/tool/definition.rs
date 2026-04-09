@@ -68,7 +68,7 @@ impl ToolSpec {
         self.defer_loading
     }
 
-    pub fn estimated_tokens(&self) -> usize {
+    pub fn estimated_tokens(&self) -> crate::ir::TokenCount {
         estimate_tool_tokens(&self.name, &self.description, &self.input_schema)
     }
 }
@@ -111,8 +111,13 @@ impl From<ToolSpec> for crate::ir::ToolDefinition {
 ///
 /// Uses a chars/4 heuristic (roughly 4 characters per token) plus a fixed
 /// overhead of 20 tokens for JSON structure.
-pub fn estimate_tool_tokens(name: &str, description: &str, schema: &serde_json::Value) -> usize {
-    name.len() / 4 + description.len() / 4 + schema.to_string().len() / 4 + 20
+pub fn estimate_tool_tokens(
+    name: &str,
+    description: &str,
+    schema: &serde_json::Value,
+) -> crate::ir::TokenCount {
+    let raw = name.len() / 4 + description.len() / 4 + schema.to_string().len() / 4 + 20;
+    crate::ir::TokenCount::new(raw as u64)
 }
 
 #[cfg(test)]

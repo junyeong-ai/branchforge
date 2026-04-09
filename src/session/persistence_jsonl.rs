@@ -421,7 +421,7 @@ struct SessionMeta {
     todos_hash: u64,
     plan_hash: u64,
     current_leaf_id: Option<MessageId>,
-    primary_branch_id: Option<Uuid>,
+    primary_branch_id: Option<crate::graph::BranchId>,
 }
 
 #[derive(Default)]
@@ -819,7 +819,7 @@ impl JsonlPersistence {
         let mut todos_map: HashMap<String, TodoItem> = HashMap::new();
         let mut latest_plan: Option<Plan> = None;
         let mut current_leaf_id: Option<MessageId> = None;
-        let mut primary_branch_id: Option<Uuid> = None;
+        let mut primary_branch_id: Option<crate::graph::BranchId> = None;
 
         for entry in entries {
             match entry {
@@ -981,7 +981,7 @@ impl JsonlPersistence {
             .and_then(|environment| environment.cwd.clone())
     }
 
-    fn primary_branch_from_event(event: &GraphEvent) -> Option<Uuid> {
+    fn primary_branch_from_event(event: &GraphEvent) -> Option<crate::graph::BranchId> {
         match &event.body {
             crate::graph::GraphEventBody::NodeAppended { branch_id, .. }
             | crate::graph::GraphEventBody::BranchForked { branch_id, .. }
@@ -1085,9 +1085,9 @@ impl JsonlPersistence {
                 id: compact.id.to_string(),
                 session_id: session.id.to_string(),
                 trigger: enum_to_jsonl(&compact.trigger, "manual"),
-                pre_tokens: compact.pre_tokens,
-                post_tokens: compact.post_tokens,
-                saved_tokens: compact.saved_tokens,
+                pre_tokens: compact.pre_tokens.get() as usize,
+                post_tokens: compact.post_tokens.get() as usize,
+                saved_tokens: compact.saved_tokens.get() as usize,
                 summary: compact.summary.clone(),
                 original_count: compact.original_count,
                 new_count: compact.new_count,
@@ -1311,9 +1311,9 @@ impl JsonlPersistence {
                     id: compact.id.to_string(),
                     session_id: session.id.to_string(),
                     trigger: enum_to_jsonl(&compact.trigger, "manual"),
-                    pre_tokens: compact.pre_tokens,
-                    post_tokens: compact.post_tokens,
-                    saved_tokens: compact.saved_tokens,
+                    pre_tokens: compact.pre_tokens.get() as usize,
+                    post_tokens: compact.post_tokens.get() as usize,
+                    saved_tokens: compact.saved_tokens.get() as usize,
                     summary: compact.summary.clone(),
                     original_count: compact.original_count,
                     new_count: compact.new_count,
@@ -1371,7 +1371,7 @@ impl JsonlPersistence {
         let mut latest_plan: Option<Plan> = None;
         let mut compacts: Vec<CompactRecord> = Vec::new();
         let mut graph_events: Vec<GraphEvent> = Vec::new();
-        let mut primary_branch_id: Option<Uuid> = None;
+        let mut primary_branch_id: Option<crate::graph::BranchId> = None;
 
         for entry in entries {
             match entry {
@@ -1463,9 +1463,9 @@ impl JsonlPersistence {
                         id: compact_id,
                         session_id,
                         trigger: jsonl_to_enum(&c.trigger).unwrap_or_default(),
-                        pre_tokens: c.pre_tokens,
-                        post_tokens: c.post_tokens,
-                        saved_tokens: c.saved_tokens,
+                        pre_tokens: crate::ir::TokenCount::new(c.pre_tokens as u64),
+                        post_tokens: crate::ir::TokenCount::new(c.post_tokens as u64),
+                        saved_tokens: crate::ir::TokenCount::new(c.saved_tokens as u64),
                         summary: c.summary,
                         original_count: c.original_count,
                         new_count: c.new_count,
@@ -1493,7 +1493,7 @@ impl JsonlPersistence {
         session.compact_history = VecDeque::from(compacts);
         session.graph =
             GraphMaterializer::from_events_with_primary(&graph_events, primary_branch_id);
-        session.graph.id = session.id.0;
+        session.graph.id = crate::graph::SessionGraphId::from_uuid(session.id.as_uuid());
         session.graph.created_at = session.created_at;
         validate_graph(&session_id, &session.graph)?;
         session.summary = session.graph.latest_summary();
@@ -1621,7 +1621,9 @@ impl Persistence for JsonlPersistence {
 
         let session_type: SessionType =
             serde_json::from_value(last_session_meta.session_type.clone()).unwrap_or_default();
-        let primary_branch_id = meta.primary_branch_id.unwrap_or_else(Uuid::new_v4);
+        let primary_branch_id = meta
+            .primary_branch_id
+            .unwrap_or_else(crate::graph::BranchId::new);
         let node_id = graph_node_id_for_message(&message)?;
         let parent_id = graph_parent_node_id_for_message(&message)?;
         let event = GraphEvent {
@@ -2316,8 +2318,8 @@ mod tests {
     fn test_graph_event_entry_serialization() {
         let session_id = SessionId::new();
         let event = GraphEvent::new(crate::graph::GraphEventBody::NodeAppended {
-            node_id: Uuid::new_v4(),
-            branch_id: Uuid::new_v4(),
+            node_id: crate::graph::NodeId::new(),
+            branch_id: crate::graph::BranchId::new(),
             parent_id: None,
             kind: crate::graph::NodeKind::User,
             tags: vec!["test".to_string()],
@@ -2626,8 +2628,8 @@ mod tests {
         let (persistence, _temp) = create_test_persistence().await;
         let path = persistence.session_file_path(&SessionId::new(), None);
         let event = GraphEvent::new(crate::graph::GraphEventBody::NodeAppended {
-            node_id: Uuid::new_v4(),
-            branch_id: Uuid::new_v4(),
+            node_id: crate::graph::NodeId::new(),
+            branch_id: crate::graph::BranchId::new(),
             parent_id: None,
             kind: crate::graph::NodeKind::User,
             tags: Vec::new(),

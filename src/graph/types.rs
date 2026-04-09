@@ -1,10 +1,10 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use uuid::Uuid;
 
-pub type SessionGraphId = Uuid;
-pub type NodeId = Uuid;
-pub type BranchId = Uuid;
+crate::uuid_id!(SessionGraphId);
+crate::uuid_id!(NodeId);
+crate::uuid_id!(BranchId);
+crate::uuid_id!(BookmarkId);
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NodeProvenance {
@@ -66,7 +66,7 @@ pub struct Checkpoint {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Bookmark {
-    pub id: Uuid,
+    pub id: BookmarkId,
     pub node_id: NodeId,
     pub branch_id: BranchId,
     pub label: String,

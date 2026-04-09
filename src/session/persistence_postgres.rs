@@ -155,9 +155,15 @@ fn parse_compact_rows(session_id: &SessionId, rows: Vec<PgRow>) -> Vec<CompactRe
             id,
             session_id: *session_id,
             trigger,
-            pre_tokens: row.try_get::<i32, _>("pre_tokens").unwrap_or(0) as usize,
-            post_tokens: row.try_get::<i32, _>("post_tokens").unwrap_or(0) as usize,
-            saved_tokens: row.try_get::<i32, _>("saved_tokens").unwrap_or(0) as usize,
+            pre_tokens: crate::ir::TokenCount::new(
+                row.try_get::<i32, _>("pre_tokens").unwrap_or(0) as u64,
+            ),
+            post_tokens: crate::ir::TokenCount::new(
+                row.try_get::<i32, _>("post_tokens").unwrap_or(0) as u64,
+            ),
+            saved_tokens: crate::ir::TokenCount::new(
+                row.try_get::<i32, _>("saved_tokens").unwrap_or(0) as u64,
+            ),
             summary,
             original_count: row.try_get::<i32, _>("original_count").unwrap_or(0) as usize,
             new_count: row.try_get::<i32, _>("new_count").unwrap_or(0) as usize,
@@ -304,7 +310,7 @@ fn build_session_graph(
     session_id: &SessionId,
     created_at: chrono::DateTime<Utc>,
     current_leaf_id: Option<super::state::MessageId>,
-    primary_branch_id: Uuid,
+    primary_branch_id: crate::graph::BranchId,
     graph_events: &[crate::graph::GraphEvent],
 ) -> SessionResult<SessionGraph> {
     let graph = if !graph_events.is_empty() {
@@ -312,7 +318,7 @@ fn build_session_graph(
             graph_events,
             Some(primary_branch_id),
         );
-        graph.id = session_id.0;
+        graph.id = crate::graph::SessionGraphId::from_uuid(session_id.as_uuid());
         graph.created_at = created_at;
         if !graph.branches.contains_key(&primary_branch_id) {
             return Err(SessionError::Storage {
@@ -325,7 +331,7 @@ fn build_session_graph(
         graph
     } else {
         let mut graph = SessionGraph::new("main");
-        graph.id = session_id.0;
+        graph.id = crate::graph::SessionGraphId::from_uuid(session_id.as_uuid());
         graph.created_at = created_at;
         let original_primary = graph.primary_branch;
         let mut branch = graph
@@ -386,14 +392,17 @@ fn reconstruct_session_from_row(
         .try_get::<&str, _>("current_leaf_id")
         .ok()
         .and_then(|s| s.parse().ok());
-    let primary_branch_id: Uuid =
-        row.try_get("primary_branch_id")
+    let primary_branch_id: crate::graph::BranchId = {
+        let raw: Uuid = row
+            .try_get("primary_branch_id")
             .map_err(|e| SessionError::Storage {
                 message: format!(
                     "Session {} is missing required primary_branch_id: {}",
                     session_id, e
                 ),
             })?;
+        crate::graph::BranchId::from_uuid(raw)
+    };
 
     let created_at = row.try_get("created_at").unwrap_or_else(|_| Utc::now());
     let mut session = Session {
@@ -1464,9 +1473,9 @@ impl PostgresPersistence {
             .bind(compact.id)
             .bind(session_id.to_string())
             .bind(&trigger)
-            .bind(compact.pre_tokens as i32)
-            .bind(compact.post_tokens as i32)
-            .bind(compact.saved_tokens as i32)
+            .bind(compact.pre_tokens.get() as i32)
+            .bind(compact.post_tokens.get() as i32)
+            .bind(compact.saved_tokens.get() as i32)
             .bind(&compact.summary)
             .bind(compact.original_count as i32)
             .bind(compact.new_count as i32)
@@ -1615,7 +1624,7 @@ impl PostgresPersistence {
         .bind(session.total_usage.output_tokens as i64)
         .bind(session.total_cost_usd)
         .bind(session.current_leaf_id().map(|id| id.to_string()))
-        .bind(session.graph.primary_branch)
+        .bind(session.graph.primary_branch.as_uuid())
         .bind(&session.static_context_hash)
         .bind(&session.error)
         .bind(session.created_at)
@@ -1703,7 +1712,7 @@ impl PostgresPersistence {
         .bind(session.total_usage.output_tokens as i64)
         .bind(session.total_cost_usd)
         .bind(session.current_leaf_id().map(|id| id.to_string()))
-        .bind(session.graph.primary_branch)
+        .bind(session.graph.primary_branch.as_uuid())
         .bind(&session.static_context_hash)
         .bind(&session.error)
         .bind(session.created_at)
@@ -1991,14 +2000,17 @@ impl Persistence for PostgresPersistence {
                     .unwrap_or_default();
                 let principal_id: Option<String> = row.try_get("principal_id").ok();
                 let current_leaf_id: Option<String> = row.try_get("current_leaf_id").ok();
-                let primary_branch_id: Uuid =
-                    row.try_get("primary_branch_id")
-                        .map_err(|e| SessionError::Storage {
-                            message: format!(
-                                "Session {} is missing required primary_branch_id: {}",
-                                sid, e
-                            ),
-                        })?;
+                let primary_branch_id: crate::graph::BranchId = {
+                    let raw: Uuid =
+                        row.try_get("primary_branch_id")
+                            .map_err(|e| SessionError::Storage {
+                                message: format!(
+                                    "Session {} is missing required primary_branch_id: {}",
+                                    sid, e
+                                ),
+                            })?;
+                    crate::graph::BranchId::from_uuid(raw)
+                };
 
                 if let Some(parent_id) = current_leaf_id {
                     message.parent_id = Some(crate::session::MessageId::from_string(parent_id));
@@ -2071,7 +2083,7 @@ impl Persistence for PostgresPersistence {
                 .bind(sid.to_string())
                 .bind(message.id.to_string())
                 .bind(summary_cache)
-                .bind(primary_branch_id)
+                .bind(primary_branch_id.as_uuid())
                 .bind(usage.input_tokens as i64)
                 .bind(usage.output_tokens as i64)
                 .bind(message.timestamp)

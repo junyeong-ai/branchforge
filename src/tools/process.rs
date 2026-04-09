@@ -11,8 +11,7 @@ use tokio::sync::Mutex;
 
 use crate::security::bash::SanitizedEnv;
 
-/// Unique identifier for a managed process.
-pub type ProcessId = String;
+crate::string_id!(ProcessId);
 
 /// Information about a running process.
 #[derive(Debug, Clone)]
@@ -75,7 +74,7 @@ impl ProcessScheduler {
 
         let child = cmd.spawn().map_err(|e| format!("Failed to spawn: {}", e))?;
 
-        let id = uuid::Uuid::new_v4().to_string();
+        let id = ProcessId::new(uuid::Uuid::new_v4().to_string());
         let pid = child.id();
 
         let info = ProcessInfo {
@@ -287,10 +286,10 @@ mod tests {
     #[tokio::test]
     async fn test_process_not_found() {
         let mgr = ProcessScheduler::new();
-        let result = mgr.get_output(&"nonexistent".to_string()).await;
+        let result = mgr.get_output(&ProcessId::new("nonexistent")).await;
         assert!(result.is_err());
 
-        let result = mgr.kill(&"nonexistent".to_string()).await;
+        let result = mgr.kill(&ProcessId::new("nonexistent")).await;
         assert!(result.is_err());
     }
 

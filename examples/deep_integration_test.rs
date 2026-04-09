@@ -146,7 +146,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let msg = branchforge::session::SessionMessage::user(vec![ContentPart::text(
             "Hello, this is a very long message that we want to truncate. ".repeat(100),
         )]);
-        let msg_id_str = msg.id.0.clone();
+        let msg_id_str = msg.id.to_string();
         session.add_message(msg).unwrap();
 
         // Get messages without overrides
@@ -160,7 +160,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         check("original message is long", original_len > 1000);
 
         // Apply content override
-        if let Ok(node_id) = msg_id_str.parse::<uuid::Uuid>() {
+        if let Ok(node_id) = msg_id_str
+            .parse::<uuid::Uuid>()
+            .map(branchforge::NodeId::from_uuid)
+        {
             session.set_content_override(
                 node_id,
                 vec![ContentPart::text("[truncated for token savings]")],

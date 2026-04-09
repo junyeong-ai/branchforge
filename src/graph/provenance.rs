@@ -65,15 +65,14 @@ impl ProvenanceSummarizer {
 mod tests {
     use super::*;
     use crate::graph::NodeProvenance;
-    use crate::graph::{GraphNode, NodeKind};
+    use crate::graph::{BranchId, GraphNode, NodeId, NodeKind};
     use chrono::Utc;
-    use uuid::Uuid;
 
     #[test]
     fn provenance_digest_renders_compact_summary() {
         let node = GraphNode {
-            id: Uuid::new_v4(),
-            branch_id: Uuid::new_v4(),
+            id: NodeId::new(),
+            branch_id: BranchId::new(),
             kind: NodeKind::Assistant,
             parent_id: None,
             created_by_principal_id: Some("user-1".to_string()),

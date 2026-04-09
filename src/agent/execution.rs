@@ -237,7 +237,7 @@ impl Agent {
                     info!(
                         immediate = prepared.immediate.len(),
                         deferred = prepared.deferred.len(),
-                        tokens_saved = prepared.token_savings(),
+                        tokens_saved = prepared.token_savings().get(),
                         "MCP Progressive Disclosure active"
                     );
                 }

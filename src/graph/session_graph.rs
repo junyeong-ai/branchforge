@@ -21,7 +21,7 @@ pub struct SessionGraph {
     pub(crate) branches: HashMap<BranchId, Branch>,
     pub(crate) nodes: HashMap<NodeId, GraphNode>,
     pub(crate) checkpoints: HashMap<NodeId, Checkpoint>,
-    pub(crate) bookmarks: HashMap<Uuid, Bookmark>,
+    pub(crate) bookmarks: HashMap<super::BookmarkId, Bookmark>,
     pub(crate) primary_branch: BranchId,
     /// Nodes on the primary branch before this watermark are "archived" --
     /// skipped in message projection but preserved for referential integrity.
@@ -58,7 +58,7 @@ impl SessionGraph {
         &self.checkpoints
     }
 
-    pub fn bookmarks(&self) -> &HashMap<Uuid, Bookmark> {
+    pub fn bookmarks(&self) -> &HashMap<super::BookmarkId, Bookmark> {
         &self.bookmarks
     }
 
@@ -106,6 +106,139 @@ impl SessionGraph {
             },
         ));
         Ok(count)
+    }
+
+    // ── Incremental event application ─────────────────────────────────
+
+    /// Apply a single [`GraphEvent`] in-place without rebuilding the whole graph.
+    ///
+    /// This is O(1) per event (hash-map inserts/lookups) vs the O(n)
+    /// full-rebuild path through [`GraphMaterializer::from_events`].
+    pub fn apply_event(&mut self, event: &GraphEvent) {
+        match &event.body {
+            GraphEventBody::NodeAppended {
+                node_id,
+                branch_id,
+                parent_id,
+                kind,
+                tags,
+                payload,
+                provenance,
+            } => {
+                self.nodes.insert(
+                    *node_id,
+                    GraphNode {
+                        id: *node_id,
+                        branch_id: *branch_id,
+                        kind: *kind,
+                        parent_id: *parent_id,
+                        created_by_principal_id: event.metadata.actor.clone(),
+                        provenance: provenance.clone(),
+                        created_at: event.metadata.occurred_at,
+                        tags: tags.clone(),
+                        payload: payload.clone(),
+                    },
+                );
+                if let Some(branch) = self.branches.get_mut(branch_id) {
+                    branch.head = Some(*node_id);
+                }
+            }
+            GraphEventBody::BranchForked {
+                branch_id,
+                name,
+                forked_from,
+            } => {
+                self.branches.insert(
+                    *branch_id,
+                    Branch {
+                        id: *branch_id,
+                        name: name.clone(),
+                        forked_from: *forked_from,
+                        created_at: event.metadata.occurred_at,
+                        head: *forked_from,
+                    },
+                );
+            }
+            GraphEventBody::CheckpointCreated {
+                checkpoint_id,
+                branch_id,
+                label,
+                note,
+                tags,
+                provenance,
+            } => {
+                let parent_id = self.branches.get(branch_id).and_then(|b| b.head);
+                self.checkpoints.insert(
+                    *checkpoint_id,
+                    Checkpoint {
+                        id: *checkpoint_id,
+                        branch_id: *branch_id,
+                        label: label.clone(),
+                        note: note.clone(),
+                        tags: tags.clone(),
+                        created_by_principal_id: event.metadata.actor.clone(),
+                        provenance: provenance.clone(),
+                        created_at: event.metadata.occurred_at,
+                    },
+                );
+                self.nodes.insert(
+                    *checkpoint_id,
+                    GraphNode {
+                        id: *checkpoint_id,
+                        branch_id: *branch_id,
+                        kind: NodeKind::Checkpoint,
+                        parent_id,
+                        created_by_principal_id: event.metadata.actor.clone(),
+                        provenance: provenance.clone(),
+                        created_at: event.metadata.occurred_at,
+                        tags: tags.clone(),
+                        payload: serde_json::json!({
+                            "label": label,
+                            "note": note,
+                        }),
+                    },
+                );
+                if let Some(branch) = self.branches.get_mut(branch_id) {
+                    branch.head = Some(*checkpoint_id);
+                }
+            }
+            GraphEventBody::BookmarkCreated {
+                bookmark_id,
+                node_id,
+                branch_id,
+                label,
+                note,
+                provenance,
+            } => {
+                self.bookmarks.insert(
+                    *bookmark_id,
+                    Bookmark {
+                        id: *bookmark_id,
+                        node_id: *node_id,
+                        branch_id: *branch_id,
+                        label: label.clone(),
+                        note: note.clone(),
+                        created_by_principal_id: event.metadata.actor.clone(),
+                        provenance: provenance.clone(),
+                        created_at: event.metadata.occurred_at,
+                    },
+                );
+            }
+            GraphEventBody::NodeMetadataPatched { node_id, metadata } => {
+                if let Some(node) = self.nodes.get_mut(node_id) {
+                    if let Some(payload) = node.payload.as_object_mut() {
+                        payload.insert("metadata".to_string(), metadata.clone());
+                    } else {
+                        node.payload = serde_json::json!({ "metadata": metadata });
+                    }
+                }
+            }
+            GraphEventBody::EventsArchived {
+                watermark_node_id, ..
+            } => {
+                self.archived_watermark = Some(*watermark_node_id);
+            }
+        }
     }
 
     // ── Mutators ─────────────────────────────────────────────────────
@@ -196,7 +329,7 @@ impl SessionGraph {
     }
 
     pub fn new(primary_branch_name: impl Into<String>) -> Self {
-        let branch_id = Uuid::new_v4();
+        let branch_id = BranchId::new();
         let now = Utc::now();
         let branch = Branch {
             id: branch_id,
@@ -207,7 +340,7 @@ impl SessionGraph {
         };
 
         Self {
-            id: Uuid::new_v4(),
+            id: SessionGraphId::new(),
             created_at: now,
             events: Vec::new(),
             branches: [(branch_id, branch)].into_iter().collect(),
@@ -237,7 +370,7 @@ impl SessionGraph {
         created_by_principal_id: Option<String>,
         provenance: Option<NodeProvenance>,
     ) -> Result<NodeId, GraphError> {
-        let node_id = Uuid::new_v4();
+        let node_id = NodeId::new();
         let parent_id = self.validated_branch_head(branch_id, node_id)?;
         self.append_existing_node(
             branch_id,
@@ -357,7 +490,7 @@ impl SessionGraph {
         {
             return Err(GraphError::MissingForkSource { node_id });
         }
-        let branch_id = Uuid::new_v4();
+        let branch_id = BranchId::new();
         let branch = Branch {
             id: branch_id,
             name: name.into(),
@@ -399,7 +532,7 @@ impl SessionGraph {
         if !self.branches.contains_key(&branch_id) {
             return Err(GraphError::MissingBranch { branch_id });
         }
-        let checkpoint_id = Uuid::new_v4();
+        let checkpoint_id = NodeId::new();
         let parent_id = self.validated_branch_head(branch_id, checkpoint_id)?;
         let checkpoint = Checkpoint {
             id: checkpoint_id,
@@ -515,7 +648,7 @@ impl SessionGraph {
         note: Option<String>,
         created_by_principal_id: Option<String>,
         provenance: Option<NodeProvenance>,
-    ) -> Result<Uuid, GraphError> {
+    ) -> Result<super::BookmarkId, GraphError> {
         let node = self
             .nodes
             .get(&node_id)
@@ -525,7 +658,7 @@ impl SessionGraph {
                 branch_id: node.branch_id,
             });
         }
-        let bookmark_id = Uuid::new_v4();
+        let bookmark_id = super::BookmarkId::new();
         self.bookmarks.insert(
             bookmark_id,
             Bookmark {
@@ -698,7 +831,7 @@ mod tests {
             .create_bookmark(node, "start", Some("entry".to_string()), None, None)
             .unwrap();
 
-        assert_ne!(bookmark, Uuid::nil());
+        assert_ne!(bookmark, crate::graph::BookmarkId::nil());
         assert_eq!(graph.bookmarks_for_branch(graph.primary_branch).len(), 1);
     }
 
@@ -788,8 +921,8 @@ mod tests {
     #[test]
     fn rejects_missing_branch_and_parent_mutations() {
         let mut graph = SessionGraph::default();
-        let missing_branch = Uuid::new_v4();
-        let missing_parent = Uuid::new_v4();
+        let missing_branch = BranchId::new();
+        let missing_parent = NodeId::new();
 
         assert!(matches!(
             graph.append_node(missing_branch, NodeKind::User, serde_json::json!({})),
@@ -798,7 +931,7 @@ mod tests {
         assert!(matches!(
             graph.append_existing_node(
                 graph.primary_branch,
-                Uuid::new_v4(),
+                NodeId::new(),
                 Some(missing_parent),
                 NodeKind::User,
                 Vec::new(),
@@ -844,7 +977,7 @@ mod tests {
         assert!(matches!(
             graph.append_existing_node(
                 side,
-                Uuid::new_v4(),
+                NodeId::new(),
                 Some(main_follow_up),
                 NodeKind::Assistant,
                 Vec::new(),
@@ -856,5 +989,99 @@ mod tests {
             Err(GraphError::ParentBranchMismatch { branch_id, parent_id, .. })
                 if branch_id == side && parent_id == main_follow_up
         ));
+    }
+
+    #[test]
+    fn apply_event_matches_full_materializer() {
+        // Build a graph using the normal API (which pushes events internally).
+        let mut original = SessionGraph::default();
+        let primary = original.primary_branch;
+
+        let n1 = original
+            .append_node(primary, NodeKind::User, serde_json::json!({"q": 1}))
+            .unwrap();
+        let _n2 = original
+            .append_node(primary, NodeKind::Assistant, serde_json::json!({"a": 1}))
+            .unwrap();
+
+        let side = original.fork_branch(Some(n1), "side").unwrap();
+        original
+            .append_node(side, NodeKind::User, serde_json::json!({"alt": true}))
+            .unwrap();
+
+        original
+            .create_checkpoint(
+                primary,
+                "cp",
+                Some("note".into()),
+                vec!["v1".into()],
+                None,
+                None,
+            )
+            .unwrap();
+        original
+            .create_bookmark(n1, "mark", None, None, None)
+            .unwrap();
+        original.patch_node_metadata(n1, serde_json::json!({"tokens": 42}), None);
+
+        // Replay all events through apply_event into a fresh graph that has the
+        // same primary branch.
+        let mut incremental = SessionGraph::new("main");
+        // Replace the default primary branch with the original's primary branch
+        // so the IDs line up.
+        incremental.branches.clear();
+        incremental.primary_branch = primary;
+        incremental.branches.insert(
+            primary,
+            Branch {
+                id: primary,
+                name: "main".to_string(),
+                forked_from: None,
+                created_at: original.created_at,
+                head: None,
+            },
+        );
+        for event in &original.events {
+            incremental.apply_event(event);
+        }
+
+        // Structural equality checks.
+        assert_eq!(original.nodes.len(), incremental.nodes.len());
+        assert_eq!(original.branches.len(), incremental.branches.len());
+        assert_eq!(original.checkpoints.len(), incremental.checkpoints.len());
+        assert_eq!(original.bookmarks.len(), incremental.bookmarks.len());
+        assert_eq!(original.archived_watermark, incremental.archived_watermark);
+
+        for (id, node) in &original.nodes {
+            let inc_node = incremental.nodes.get(id).expect("node missing");
+            assert_eq!(node.kind, inc_node.kind);
+            assert_eq!(node.parent_id, inc_node.parent_id);
+            assert_eq!(node.payload, inc_node.payload);
+            assert_eq!(node.branch_id, inc_node.branch_id);
+        }
+
+        for (id, branch) in &original.branches {
+            let inc_branch = incremental.branches.get(id).expect("branch missing");
+            assert_eq!(branch.head, inc_branch.head);
+        }
+    }
+
+    #[test]
+    fn apply_event_handles_events_archived() {
+        let mut graph = SessionGraph::default();
+        let primary = graph.primary_branch;
+        let n1 = graph
+            .append_node(primary, NodeKind::User, serde_json::json!({}))
+            .unwrap();
+
+        assert!(graph.archived_watermark.is_none());
+
+        let archive_event = GraphEvent::new(GraphEventBody::EventsArchived {
+            watermark_node_id: n1,
+            archived_count: 1,
+        });
+        graph.apply_event(&archive_event);
+
+        assert_eq!(graph.archived_watermark, Some(n1));
     }
 }

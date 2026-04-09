@@ -203,15 +203,17 @@ impl TaskTool {
     }
 }
 
-fn parse_replay_node_id(value: Option<&str>) -> crate::Result<Option<uuid::Uuid>> {
+fn parse_replay_node_id(value: Option<&str>) -> crate::Result<Option<crate::graph::NodeId>> {
     value
         .map(|value| {
-            uuid::Uuid::parse_str(value).map_err(|error| {
-                crate::Error::Config(format!(
-                    "Invalid replay_from_node UUID '{}': {}",
-                    value, error
-                ))
-            })
+            uuid::Uuid::parse_str(value)
+                .map(crate::graph::NodeId::from_uuid)
+                .map_err(|error| {
+                    crate::Error::Config(format!(
+                        "Invalid replay_from_node UUID '{}': {}",
+                        value, error
+                    ))
+                })
         })
         .transpose()
 }

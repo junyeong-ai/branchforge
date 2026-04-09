@@ -25,7 +25,7 @@ pub struct AuditBundle {
     pub session_id: String,
     pub tenant_id: Option<String>,
     pub principal_id: Option<String>,
-    pub branch_id: uuid::Uuid,
+    pub branch_id: crate::graph::BranchId,
     pub branch_name: String,
     pub stats: crate::graph::GraphSessionStats,
     pub provenance_digest: Vec<String>,

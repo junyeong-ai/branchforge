@@ -1,5 +1,3 @@
-use uuid::Uuid;
-
 use super::{BranchId, NodeId};
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -46,7 +44,7 @@ pub enum GraphError {
 
     #[error("Graph bookmark {bookmark_id} belongs to missing branch {branch_id}")]
     BookmarkBranchMissing {
-        bookmark_id: Uuid,
+        bookmark_id: super::BookmarkId,
         branch_id: BranchId,
     },
 

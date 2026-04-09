@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 use super::state::{AgentMetrics, AgentState};
 use crate::ir::FinishReason;
 use crate::ir::Message;
+use crate::ir::TokenCount;
 
 /// Events emitted during agent execution.
 ///
@@ -86,12 +87,12 @@ pub enum AgentEvent {
     /// Fields match [`AgentMetrics`] naming for consistency.
     /// `cache_creation_tokens` = Anthropic's `cache_creation_input_tokens`.
     TurnUsage {
-        input_tokens: u32,
-        output_tokens: u32,
-        cache_read_tokens: u32,
-        cache_creation_tokens: u32,
-        total_input_tokens: u64,
-        total_output_tokens: u64,
+        input_tokens: TokenCount,
+        output_tokens: TokenCount,
+        cache_read_tokens: TokenCount,
+        cache_creation_tokens: TokenCount,
+        total_input_tokens: TokenCount,
+        total_output_tokens: TokenCount,
     },
     /// Final execution result.
     Complete(Box<AgentResult>),

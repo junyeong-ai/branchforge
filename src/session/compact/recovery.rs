@@ -26,6 +26,8 @@ pub enum RecoveryErrorKind {
     ContextOverflow { estimated: u64, limit: u64 },
     /// The API rejected the payload as too large (HTTP 413).
     ApiPayloadTooLarge { message: String },
+    /// Authentication or authorization failure (401/403, expired token).
+    AuthFailure { message: String },
 }
 
 /// Contextual information passed to [`RecoveryStrategy::attempt_recovery`].
@@ -87,6 +89,15 @@ impl RecoveryStrategy for ContextRecovery {
         llm: Option<&dyn crate::client::LlmCall>,
         _compaction_chain: Option<&str>,
     ) -> crate::Result<RecoveryAction> {
+        // Auth failures: allow one retry (token refresh / transient), then abort.
+        if matches!(ctx.error_kind, RecoveryErrorKind::AuthFailure { .. }) {
+            return if ctx.attempt == 0 {
+                Ok(RecoveryAction::Retry)
+            } else {
+                Ok(RecoveryAction::Abort)
+            };
+        }
+
         if ctx.attempt >= self.max_attempts {
             return Ok(RecoveryAction::Abort);
         }
@@ -168,7 +179,13 @@ fn collapse_context(session: &mut crate::session::Session, max_len: usize) {
             }
         }
 
-        if needs_override && let Ok(node_id) = message.id.0.parse::<uuid::Uuid>() {
+        if needs_override
+            && let Ok(node_id) = message
+                .id
+                .as_str()
+                .parse::<uuid::Uuid>()
+                .map(crate::graph::NodeId::from_uuid)
+        {
             session.content_overrides.set(node_id, new_content);
         }
     }
@@ -235,5 +252,43 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(result, RecoveryAction::Retry);
+    }
+
+    #[tokio::test]
+    async fn test_auth_failure_retries_once_then_aborts() {
+        let recovery = ContextRecovery::default();
+        let tool_state = ToolState::default();
+
+        // First attempt -> Retry
+        let ctx = RecoveryContext {
+            error_kind: RecoveryErrorKind::AuthFailure {
+                message: "token expired".to_string(),
+            },
+            attempt: 0,
+            max_attempts: 3,
+            current_tokens: 0,
+            max_tokens: 200_000,
+        };
+        let result = recovery
+            .attempt_recovery(&ctx, &tool_state, None, None)
+            .await
+            .unwrap();
+        assert_eq!(result, RecoveryAction::Retry);
+
+        // Second attempt -> Abort
+        let ctx = RecoveryContext {
+            error_kind: RecoveryErrorKind::AuthFailure {
+                message: "token expired".to_string(),
+            },
+            attempt: 1,
+            max_attempts: 3,
+            current_tokens: 0,
+            max_tokens: 200_000,
+        };
+        let result = recovery
+            .attempt_recovery(&ctx, &tool_state, None, None)
+            .await
+            .unwrap();
+        assert_eq!(result, RecoveryAction::Abort);
     }
 }

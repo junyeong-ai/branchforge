@@ -1,5 +1,6 @@
 //! Tool index for efficient searching.
 
+use crate::ir::TokenCount;
 use crate::mcp::McpToolDefinition;
 use crate::types::estimate_tool_tokens;
 
@@ -11,7 +12,7 @@ pub struct ToolIndexEntry {
     pub description: String,
     pub arg_names: Vec<String>,
     pub arg_descriptions: Vec<String>,
-    pub estimated_tokens: usize,
+    pub estimated_tokens: TokenCount,
 }
 
 impl ToolIndexEntry {
@@ -61,7 +62,7 @@ impl ToolIndexEntry {
 #[derive(Debug, Default)]
 pub struct ToolIndex {
     entries: Vec<ToolIndexEntry>,
-    total_tokens: usize,
+    total_tokens: TokenCount,
 }
 
 impl ToolIndex {
@@ -74,7 +75,7 @@ impl ToolIndex {
         self.entries.push(entry);
     }
 
-    pub fn total_tokens(&self) -> usize {
+    pub fn total_tokens(&self) -> TokenCount {
         self.total_tokens
     }
 
@@ -98,7 +99,7 @@ impl ToolIndex {
 
     pub fn clear(&mut self) {
         self.entries.clear();
-        self.total_tokens = 0;
+        self.total_tokens = TokenCount::ZERO;
     }
 }
 
@@ -127,7 +128,7 @@ mod tests {
         assert_eq!(entry.qualified_name, "mcp__filesystem__read_file");
         assert_eq!(entry.server_name, "filesystem");
         assert_eq!(entry.tool_name, "read_file");
-        assert!(entry.estimated_tokens > 0);
+        assert!(entry.estimated_tokens > TokenCount::ZERO);
     }
 
     #[test]

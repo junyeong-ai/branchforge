@@ -181,7 +181,7 @@ impl Compactor {
                     .sum::<usize>()
             })
             .sum();
-        let saved_tokens = (removed_chars / 4) as u64;
+        let saved_tokens = crate::ir::TokenCount::new((removed_chars / 4) as u64);
 
         let branch_id = session.graph.primary_branch;
         session.graph.append_node(
@@ -209,7 +209,7 @@ impl Compactor {
         Ok(CompactResult::Compacted {
             original_count,
             new_count: 1,
-            saved_tokens: saved_tokens as usize,
+            saved_tokens,
             summary,
         })
     }

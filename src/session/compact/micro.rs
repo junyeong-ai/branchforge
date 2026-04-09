@@ -97,7 +97,7 @@ impl MicroCompaction {
             };
 
             let mut has_large_block = false;
-            let mut total_saved_tokens = 0u64;
+            let mut total_saved_tokens = crate::ir::TokenCount::ZERO;
             let mut replacement_blocks = Vec::with_capacity(blocks.len());
 
             for block in &blocks {
@@ -106,7 +106,8 @@ impl MicroCompaction {
                     has_large_block = true;
                     let truncated = truncate_block(block, self.truncate_to_chars);
                     let new_size = estimate_block_chars(&truncated);
-                    total_saved_tokens += ((size - new_size) / 4) as u64;
+                    total_saved_tokens +=
+                        crate::ir::TokenCount::new(((size - new_size) / 4) as u64);
                     replacement_blocks.push(truncated);
                 } else {
                     replacement_blocks.push(block.clone());
@@ -150,7 +151,8 @@ impl CompactionStrategy for MicroCompaction {
             return Ok(CompactionPlan::NotNeeded);
         }
 
-        let estimated_savings: u64 = targets.iter().map(|e| e.original_tokens).sum();
+        let estimated_savings: crate::ir::TokenCount =
+            targets.iter().map(|e| e.original_tokens).sum();
         Ok(CompactionPlan::Override {
             overrides: targets,
             estimated_token_savings: estimated_savings,

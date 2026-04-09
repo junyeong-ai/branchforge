@@ -70,7 +70,7 @@ pub enum GraphEventBody {
         provenance: Option<NodeProvenance>,
     },
     BookmarkCreated {
-        bookmark_id: Uuid,
+        bookmark_id: super::BookmarkId,
         node_id: NodeId,
         branch_id: BranchId,
         label: String,

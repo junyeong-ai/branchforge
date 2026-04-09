@@ -462,14 +462,17 @@ pub(crate) async fn handle_compaction(
             ref summary,
             ..
         }) => {
-            info!(saved_tokens, "Session context compacted");
+            info!(
+                saved_tokens = saved_tokens.get(),
+                "Session context compacted"
+            );
             metrics.record_compaction();
             if let Some(bus) = runtime.event_bus.as_deref() {
                 bus.emit_simple(
                     crate::events::EventKind::SessionCompacted,
                     serde_json::json!({
                         "session_id": session_id,
-                        "saved_tokens": saved_tokens,
+                        "saved_tokens": saved_tokens.get(),
                         "summary": summary,
                     }),
                 );
@@ -495,7 +498,8 @@ pub(crate) async fn handle_compaction(
         }) => {
             debug!(
                 truncation_count,
-                estimated_token_savings, "Micro-compaction truncated content blocks"
+                estimated_token_savings = estimated_token_savings.get(),
+                "Micro-compaction truncated content blocks"
             );
             runtime.invalidate_caches_after_compact().await;
         }
@@ -548,6 +552,13 @@ pub(crate) async fn try_recover(
             ..
         } => RecoveryErrorKind::ApiPayloadTooLarge {
             message: message.clone(),
+        },
+        crate::Error::Authentication { .. }
+        | crate::Error::Provider {
+            kind: crate::error::ProviderErrorKind::Auth,
+            ..
+        } => RecoveryErrorKind::AuthFailure {
+            message: error.to_string(),
         },
         _ => return None,
     };

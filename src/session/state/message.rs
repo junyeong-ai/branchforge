@@ -84,7 +84,7 @@ pub struct SessionMessage {
 impl SessionMessage {
     pub fn user(content: Vec<ContentPart>) -> Self {
         Self {
-            id: MessageId::new(),
+            id: MessageId::random(),
             parent_id: None,
             role: Role::User,
             content,
@@ -99,7 +99,7 @@ impl SessionMessage {
 
     pub fn assistant(content: Vec<ContentPart>) -> Self {
         Self {
-            id: MessageId::new(),
+            id: MessageId::random(),
             parent_id: None,
             role: Role::Assistant,
             content,

@@ -109,14 +109,29 @@ impl SessionManager {
     }
 
     /// Fork an existing session, creating a new independent branch.
+    ///
+    /// The fork is performed under an advisory lock so concurrent mutations
+    /// to the parent session cannot interleave between the read and the
+    /// graph mutation.
     pub async fn fork_session(
         &self,
         parent_id: &SessionId,
-        node_id: Option<uuid::Uuid>,
+        node_id: Option<crate::graph::NodeId>,
         branch_name: Option<String>,
     ) -> SessionResult<Session> {
-        let parent = self.get(parent_id).await?;
-        let forked = parent.fork_at(node_id, branch_name)?;
+        let result_slot = Arc::new(std::sync::Mutex::new(None::<Session>));
+        let slot = result_slot.clone();
+        self.persistence
+            .with_session_lock(
+                parent_id,
+                Box::new(move |session| {
+                    let forked = session.fork_at(node_id, branch_name)?;
+                    *slot.lock().unwrap() = Some(forked);
+                    Ok(())
+                }),
+            )
+            .await?;
+        let forked = result_slot.lock().unwrap().take().unwrap();
         self.persistence.save(&forked).await?;
         Ok(forked)
     }
@@ -568,7 +583,7 @@ impl SessionManager {
         id: &SessionId,
         label: impl Into<String>,
         note: Option<String>,
-    ) -> SessionResult<Option<uuid::Uuid>> {
+    ) -> SessionResult<Option<crate::graph::BookmarkId>> {
         let mut session = self.get(id).await?;
         let bookmark = session.bookmark_current_head(label, note);
         let Some(event) = bookmark.and_then(|bookmark_id| {
@@ -984,7 +999,7 @@ impl ScopedSessionManager {
         id: &SessionId,
         label: impl Into<String>,
         note: Option<String>,
-    ) -> SessionResult<Option<uuid::Uuid>> {
+    ) -> SessionResult<Option<crate::graph::BookmarkId>> {
         self.manager.get_scoped(id, &self.scope).await?;
         self.manager.bookmark_current_head(id, label, note).await
     }

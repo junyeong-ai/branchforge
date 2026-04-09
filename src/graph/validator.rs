@@ -240,7 +240,8 @@ fn issue(code: &str, message: String) -> GraphValidationIssue {
 mod tests {
     use super::*;
     use crate::graph::{
-        Bookmark, Branch, Checkpoint, GraphNode, NodeKind, NodeProvenance, SessionGraph,
+        Bookmark, BookmarkId, Branch, BranchId, Checkpoint, GraphNode, NodeId, NodeKind,
+        NodeProvenance, SessionGraph,
     };
     use chrono::Utc;
     use uuid::Uuid;
@@ -249,7 +250,12 @@ mod tests {
     // Test helpers
     // ---------------------------------------------------------------
 
-    fn test_node(id: Uuid, kind: NodeKind, branch_id: Uuid, parent_id: Option<Uuid>) -> GraphNode {
+    fn test_node(
+        id: NodeId,
+        kind: NodeKind,
+        branch_id: BranchId,
+        parent_id: Option<NodeId>,
+    ) -> GraphNode {
         GraphNode {
             id,
             branch_id,
@@ -280,7 +286,7 @@ mod tests {
     }
 
     /// Build a graph with primary branch (2 nodes) and a fork (1 extra node).
-    fn forked_graph() -> (SessionGraph, Uuid, Uuid) {
+    fn forked_graph() -> (SessionGraph, NodeId, BranchId) {
         let mut graph = SessionGraph::default();
         let root = graph
             .append_node(graph.primary_branch, NodeKind::User, serde_json::json!({}))
@@ -310,7 +316,7 @@ mod tests {
     #[test]
     fn primary_branch_missing() {
         let mut graph = linear_graph(1);
-        let fake_branch = Uuid::new_v4();
+        let fake_branch = BranchId::new();
         graph.primary_branch = fake_branch;
         graph.branches.remove(&fake_branch); // ensure it doesn't accidentally exist
 
@@ -326,8 +332,8 @@ mod tests {
     #[test]
     fn branch_fork_source_missing() {
         let mut graph = SessionGraph::default();
-        let phantom_node = Uuid::new_v4();
-        let side_id = Uuid::new_v4();
+        let phantom_node = NodeId::new();
+        let side_id = BranchId::new();
         graph.branches.insert(
             side_id,
             Branch {
@@ -354,7 +360,7 @@ mod tests {
         let root = graph
             .append_node(graph.primary_branch, NodeKind::User, serde_json::json!({}))
             .unwrap();
-        let side_id = Uuid::new_v4();
+        let side_id = BranchId::new();
         // Create branch whose head points to a node that belongs to a different branch
         graph.branches.insert(
             side_id,
@@ -396,7 +402,7 @@ mod tests {
     #[test]
     fn branch_head_missing() {
         let mut graph = SessionGraph::default();
-        let phantom_node = Uuid::new_v4();
+        let phantom_node = NodeId::new();
         // Directly set primary branch head to non-existent node
         graph.branches.get_mut(&graph.primary_branch).unwrap().head = Some(phantom_node);
 
@@ -412,8 +418,8 @@ mod tests {
     #[test]
     fn node_branch_missing() {
         let mut graph = SessionGraph::default();
-        let phantom_branch = Uuid::new_v4();
-        let node_id = Uuid::new_v4();
+        let phantom_branch = BranchId::new();
+        let node_id = NodeId::new();
         graph.nodes.insert(
             node_id,
             test_node(node_id, NodeKind::User, phantom_branch, None),
@@ -445,7 +451,7 @@ mod tests {
 
         // Manually insert a node on the side branch whose parent is main_next,
         // which is NOT the fork source for this branch (root is).
-        let bad_node = Uuid::new_v4();
+        let bad_node = NodeId::new();
         graph.nodes.insert(
             bad_node,
             test_node(bad_node, NodeKind::Assistant, side, Some(main_next)),
@@ -480,8 +486,8 @@ mod tests {
     #[test]
     fn missing_parent() {
         let mut graph = SessionGraph::default();
-        let phantom_parent = Uuid::new_v4();
-        let node_id = Uuid::new_v4();
+        let phantom_parent = NodeId::new();
+        let node_id = NodeId::new();
         graph.nodes.insert(
             node_id,
             test_node(
@@ -507,8 +513,8 @@ mod tests {
         let node = graph
             .append_node(graph.primary_branch, NodeKind::User, serde_json::json!({}))
             .unwrap();
-        let phantom_branch = Uuid::new_v4();
-        let bm_id = Uuid::new_v4();
+        let phantom_branch = BranchId::new();
+        let bm_id = BookmarkId::new();
         graph.bookmarks.insert(
             bm_id,
             Bookmark {
@@ -535,8 +541,8 @@ mod tests {
     #[test]
     fn bookmark_target_missing() {
         let mut graph = SessionGraph::default();
-        let phantom_node = Uuid::new_v4();
-        let bm_id = Uuid::new_v4();
+        let phantom_node = NodeId::new();
+        let bm_id = BookmarkId::new();
         graph.bookmarks.insert(
             bm_id,
             Bookmark {
@@ -572,7 +578,7 @@ mod tests {
             .unwrap();
 
         // Bookmark claims to be on the primary branch but references a node on `side`
-        let bm_id = Uuid::new_v4();
+        let bm_id = BookmarkId::new();
         graph.bookmarks.insert(
             bm_id,
             Bookmark {
@@ -599,8 +605,8 @@ mod tests {
     #[test]
     fn checkpoint_branch_missing() {
         let mut graph = SessionGraph::default();
-        let phantom_branch = Uuid::new_v4();
-        let cp_id = Uuid::new_v4();
+        let phantom_branch = BranchId::new();
+        let cp_id = NodeId::new();
         // Insert a checkpoint node so we don't also trigger checkpoint_node_missing
         graph.nodes.insert(
             cp_id,
@@ -632,7 +638,7 @@ mod tests {
     #[test]
     fn checkpoint_node_missing() {
         let mut graph = SessionGraph::default();
-        let cp_id = Uuid::new_v4();
+        let cp_id = NodeId::new();
         // Register checkpoint but do NOT insert a matching node
         graph.checkpoints.insert(
             cp_id,
@@ -665,7 +671,7 @@ mod tests {
             .unwrap();
         let side = graph.fork_branch(Some(root), "side").unwrap();
 
-        let cp_id = Uuid::new_v4();
+        let cp_id = NodeId::new();
         // Node is on primary branch but checkpoint claims side branch
         graph.nodes.insert(
             cp_id,
@@ -697,7 +703,7 @@ mod tests {
     #[test]
     fn checkpoint_node_kind_mismatch() {
         let mut graph = SessionGraph::default();
-        let cp_id = Uuid::new_v4();
+        let cp_id = NodeId::new();
         // Node has kind User but checkpoint expects Checkpoint
         graph.nodes.insert(
             cp_id,
@@ -729,7 +735,7 @@ mod tests {
     #[test]
     fn provenance_missing_when_creator_set() {
         let mut graph = SessionGraph::default();
-        let node_id = Uuid::new_v4();
+        let node_id = NodeId::new();
         let mut node = test_node(node_id, NodeKind::User, graph.primary_branch, None);
         node.created_by_principal_id = Some("user-1".to_string());
         node.provenance = None; // creator set but no provenance
@@ -743,7 +749,7 @@ mod tests {
     #[test]
     fn provenance_present_when_creator_set_is_valid() {
         let mut graph = SessionGraph::default();
-        let node_id = Uuid::new_v4();
+        let node_id = NodeId::new();
         let mut node = test_node(node_id, NodeKind::User, graph.primary_branch, None);
         node.created_by_principal_id = Some("user-1".to_string());
         node.provenance = Some(NodeProvenance {
@@ -853,19 +859,19 @@ mod tests {
         let mut graph = SessionGraph::default();
 
         // Issue 1: primary branch missing
-        let bad_primary = Uuid::new_v4();
+        let bad_primary = BranchId::new();
         graph.primary_branch = bad_primary;
 
         // Issue 2: node references missing branch
-        let node_id = Uuid::new_v4();
+        let node_id = NodeId::new();
         graph.nodes.insert(
             node_id,
             test_node(node_id, NodeKind::User, bad_primary, None),
         );
 
         // Issue 3: bookmark target missing
-        let bm_id = Uuid::new_v4();
-        let phantom_node = Uuid::new_v4();
+        let bm_id = BookmarkId::new();
+        let phantom_node = NodeId::new();
         // Use the real existing branch for the bookmark so we isolate just the target issue
         let existing_branch = *graph.branches.keys().next().unwrap();
         graph.bookmarks.insert(
@@ -883,7 +889,7 @@ mod tests {
         );
 
         // Issue 4: checkpoint node missing
-        let cp_id = Uuid::new_v4();
+        let cp_id = NodeId::new();
         graph.checkpoints.insert(
             cp_id,
             Checkpoint {
@@ -1009,8 +1015,8 @@ mod tests {
             )
             .unwrap();
         // Manually insert a node referencing a missing parent
-        let bad_node = Uuid::new_v4();
-        let phantom_parent = Uuid::new_v4();
+        let bad_node = NodeId::new();
+        let phantom_parent = NodeId::new();
         restored.nodes.insert(
             bad_node,
             test_node(

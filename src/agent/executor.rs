@@ -77,6 +77,7 @@ impl Agent {
             .unwrap_or_else(|| ToolState::new(crate::session::SessionId::new()));
         let session_id: Arc<str> = state.session_id().to_string().into();
 
+        let shutdown = CancellationToken::new();
         let runtime = Arc::new(AgentRuntime {
             llm,
             config,
@@ -95,7 +96,8 @@ impl Agent {
             execution_mode: ExecutionMode::Auto,
             approval_sender: None,
             context_scope: None,
-            shutdown: CancellationToken::new(),
+            _shutdown_guard: shutdown.clone().drop_guard(),
+            shutdown,
         });
 
         Self {

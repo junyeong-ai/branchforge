@@ -12,7 +12,7 @@ use crate::client::LlmCall;
 use crate::common::{ContentSource, IndexRegistry};
 use crate::context::{PromptOrchestrator, StaticContext};
 use crate::hooks::{HookContext, HookEvent, HookInput, HookOutput, HookRegistry};
-use crate::ir::{self, ContentPart, FinishReason};
+use crate::ir::{self, ContentPart, FinishReason, TokenCount};
 use crate::session::types::TodoItem;
 use crate::session::{Session, SessionAccessScope, SessionConfig, SessionId, SessionManager};
 use crate::skills::{SkillIndex, SkillRuntime};
@@ -176,12 +176,12 @@ fn test_agent_event_serialization_roundtrip() {
             reason: "Denied".to_string(),
         },
         AgentEvent::TurnUsage {
-            input_tokens: 100,
-            output_tokens: 50,
-            cache_read_tokens: 10,
-            cache_creation_tokens: 5,
-            total_input_tokens: 100,
-            total_output_tokens: 50,
+            input_tokens: TokenCount::new(100),
+            output_tokens: TokenCount::new(50),
+            cache_read_tokens: TokenCount::new(10),
+            cache_creation_tokens: TokenCount::new(5),
+            total_input_tokens: TokenCount::new(100),
+            total_output_tokens: TokenCount::new(50),
         },
     ];
 
@@ -237,12 +237,12 @@ fn test_agent_event_type_method() {
     );
     assert_eq!(
         AgentEvent::TurnUsage {
-            input_tokens: 0,
-            output_tokens: 0,
-            cache_read_tokens: 0,
-            cache_creation_tokens: 0,
-            total_input_tokens: 0,
-            total_output_tokens: 0
+            input_tokens: TokenCount::ZERO,
+            output_tokens: TokenCount::ZERO,
+            cache_read_tokens: TokenCount::ZERO,
+            cache_creation_tokens: TokenCount::ZERO,
+            total_input_tokens: TokenCount::ZERO,
+            total_output_tokens: TokenCount::ZERO,
         }
         .event_type(),
         "turn_usage"

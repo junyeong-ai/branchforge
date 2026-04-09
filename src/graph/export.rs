@@ -49,7 +49,7 @@ pub struct ExportTreeNode {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExportBookmark {
-    pub id: uuid::Uuid,
+    pub id: super::BookmarkId,
     pub node_id: NodeId,
     pub label: String,
     pub note: Option<String>,

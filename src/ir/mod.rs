@@ -46,6 +46,7 @@ pub mod model;
 pub mod provider_options;
 pub mod settings;
 pub mod stream;
+pub mod token_count;
 pub mod usage;
 pub mod warning;
 
@@ -69,5 +70,6 @@ pub use provider_options::{
 };
 pub use settings::{ModelSettings, ReasoningSettings};
 pub use stream::{ModelStreamChunk, PartialUsage, StreamDecodeState, StreamFraming};
+pub use token_count::TokenCount;
 pub use usage::{ServerToolInvocations, Usage};
 pub use warning::ModelWarning;

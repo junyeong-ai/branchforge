@@ -208,7 +208,7 @@ impl Session {
             static_context_hash: None,
             graph: {
                 let mut graph = SessionGraph::new("main");
-                graph.id = id.0;
+                graph.id = crate::graph::SessionGraphId::from_uuid(id.as_uuid());
                 graph.created_at = now;
                 graph
             },
@@ -444,7 +444,7 @@ impl Session {
         &mut self,
         label: impl Into<String>,
         note: Option<String>,
-    ) -> Option<uuid::Uuid> {
+    ) -> Option<crate::graph::BookmarkId> {
         let head = self.graph.branch_head(self.graph.primary_branch)?;
         let bookmark = self
             .graph
@@ -482,7 +482,7 @@ impl Session {
         // The graph head now reflects the new checkpoint; current_leaf_id()
         // is derived from it on demand.
         self.updated_at = Utc::now();
-        Ok(checkpoint)
+        Ok(checkpoint.into_inner())
     }
 
     pub fn replay_input(
@@ -494,11 +494,15 @@ impl Session {
 
     fn record_message_in_graph(&mut self, message: &SessionMessage) -> SessionResult<()> {
         let branch_id = self.graph.primary_branch;
-        let node_id = parse_message_node_id(&message.id, "message.id")?;
+        let node_id =
+            crate::graph::NodeId::from_uuid(parse_message_node_id(&message.id, "message.id")?);
         let parent_id = message
             .parent_id
             .as_ref()
-            .map(|parent| parse_message_node_id(parent, "message.parent_id"))
+            .map(|parent| {
+                parse_message_node_id(parent, "message.parent_id")
+                    .map(crate::graph::NodeId::from_uuid)
+            })
             .transpose()?;
         self.graph
             .append_existing_node(
@@ -586,7 +590,11 @@ impl Session {
             branch_messages
                 .iter()
                 .map(|sm| {
-                    if let Ok(node_id) = sm.id.0.parse::<uuid::Uuid>()
+                    if let Ok(node_id) = sm
+                        .id
+                        .as_str()
+                        .parse::<uuid::Uuid>()
+                        .map(crate::graph::NodeId::from_uuid)
                         && let Some(replacement) = self.content_overrides.get(&node_id)
                     {
                         return Message {
@@ -774,7 +782,7 @@ impl Session {
     /// Use cases: A/B testing, checkpoint recovery, async analysis branches.
     pub fn fork_at(
         &self,
-        node_id: Option<uuid::Uuid>,
+        node_id: Option<crate::graph::NodeId>,
         branch_name: Option<String>,
     ) -> SessionResult<Session> {
         let mut forked = self.clone();
@@ -854,18 +862,22 @@ pub(crate) fn compact_summary_text(message: &SessionMessage) -> Option<String> {
 }
 
 #[cfg(any(feature = "jsonl", feature = "postgres"))]
-pub(crate) fn graph_node_id_for_message(message: &SessionMessage) -> SessionResult<uuid::Uuid> {
-    parse_message_node_id(&message.id, "message.id")
+pub(crate) fn graph_node_id_for_message(
+    message: &SessionMessage,
+) -> SessionResult<crate::graph::NodeId> {
+    parse_message_node_id(&message.id, "message.id").map(crate::graph::NodeId::from_uuid)
 }
 
 #[cfg(any(feature = "jsonl", feature = "postgres"))]
 pub(crate) fn graph_parent_node_id_for_message(
     message: &SessionMessage,
-) -> SessionResult<Option<uuid::Uuid>> {
+) -> SessionResult<Option<crate::graph::NodeId>> {
     message
         .parent_id
         .as_ref()
-        .map(|parent| parse_message_node_id(parent, "message.parent_id"))
+        .map(|parent| {
+            parse_message_node_id(parent, "message.parent_id").map(crate::graph::NodeId::from_uuid)
+        })
         .transpose()
 }
 
@@ -897,7 +909,7 @@ pub(crate) fn build_graph_provenance(
 }
 
 fn parse_message_node_id(message_id: &MessageId, field: &str) -> SessionResult<uuid::Uuid> {
-    uuid::Uuid::parse_str(&message_id.0).map_err(|error| SessionError::Storage {
+    uuid::Uuid::parse_str(message_id.as_str()).map_err(|error| SessionError::Storage {
         message: format!(
             "Session message {} '{}' is not a valid UUID: {}",
             field, message_id, error

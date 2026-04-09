@@ -4,7 +4,7 @@ use super::family::ModelFamily;
 use super::provider::{ProviderIds, ProviderKind};
 use crate::budget::ModelPricing;
 
-pub type ModelId = String;
+crate::string_id!(ModelId);
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ModelSpec {

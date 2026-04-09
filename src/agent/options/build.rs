@@ -237,7 +237,7 @@ impl AgentBuilder {
         } else {
             let config = self.tool_search_config.take().unwrap_or_else(|| {
                 let context_window =
-                    crate::types::context_window::for_model(&self.config.model.primary) as usize;
+                    crate::types::context_window::for_model(&self.config.model.primary);
                 ToolSearchConfig::default().context_window(context_window)
             });
             Arc::new(ToolSearchEngine::new(config))
@@ -257,8 +257,8 @@ impl AgentBuilder {
             use_search = prepared.use_search,
             immediate_count = prepared.immediate.len(),
             deferred_count = prepared.deferred.len(),
-            total_tokens = prepared.total_tokens,
-            threshold_tokens = prepared.threshold_tokens,
+            total_tokens = prepared.total_tokens.get(),
+            threshold_tokens = prepared.threshold_tokens.get(),
             "Tool search initialized"
         );
 

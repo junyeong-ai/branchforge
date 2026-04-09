@@ -53,6 +53,7 @@ pub struct AgentRuntime {
     pub(crate) approval_sender: Option<ApprovalSender>,
     pub(crate) context_scope: Option<SharedContextScope>,
     pub(crate) shutdown: CancellationToken,
+    pub(crate) _shutdown_guard: tokio_util::sync::DropGuard,
 
     // ── Resource accounting ──────────────────────────────────────────
     pub(crate) budget_tracker: Arc<BudgetTracker>,

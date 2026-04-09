@@ -6,7 +6,7 @@ use super::types::{BranchId, NodeId};
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum GraphReference {
     Bookmark {
-        id: uuid::Uuid,
+        id: super::BookmarkId,
         label: String,
         node_id: NodeId,
     },

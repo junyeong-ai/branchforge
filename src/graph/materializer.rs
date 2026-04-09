@@ -246,6 +246,7 @@ impl GraphMaterializer {
 mod tests {
     use super::*;
     use crate::graph::event::EventMetadata;
+    use crate::graph::types::{BookmarkId, BranchId, NodeId};
     use crate::graph::validator::GraphValidator;
     use crate::graph::{GraphEvent, NodeKind};
     use chrono::Utc;
@@ -260,9 +261,9 @@ mod tests {
     }
 
     fn node_appended(
-        node_id: Uuid,
-        branch_id: Uuid,
-        parent_id: Option<Uuid>,
+        node_id: NodeId,
+        branch_id: BranchId,
+        parent_id: Option<NodeId>,
         kind: NodeKind,
         payload: serde_json::Value,
     ) -> GraphEvent {
@@ -280,7 +281,7 @@ mod tests {
         }
     }
 
-    fn branch_forked(branch_id: Uuid, name: &str, forked_from: Option<Uuid>) -> GraphEvent {
+    fn branch_forked(branch_id: BranchId, name: &str, forked_from: Option<NodeId>) -> GraphEvent {
         GraphEvent {
             metadata: meta(),
             body: GraphEventBody::BranchForked {
@@ -291,7 +292,7 @@ mod tests {
         }
     }
 
-    fn checkpoint_created(checkpoint_id: Uuid, branch_id: Uuid, label: &str) -> GraphEvent {
+    fn checkpoint_created(checkpoint_id: NodeId, branch_id: BranchId, label: &str) -> GraphEvent {
         GraphEvent {
             metadata: meta(),
             body: GraphEventBody::CheckpointCreated {
@@ -306,9 +307,9 @@ mod tests {
     }
 
     fn bookmark_created(
-        bookmark_id: Uuid,
-        node_id: Uuid,
-        branch_id: Uuid,
+        bookmark_id: BookmarkId,
+        node_id: NodeId,
+        branch_id: BranchId,
         label: &str,
     ) -> GraphEvent {
         GraphEvent {
@@ -330,8 +331,8 @@ mod tests {
 
     #[test]
     fn rebuilds_graph_from_events() {
-        let branch_id = Uuid::new_v4();
-        let node_id = Uuid::new_v4();
+        let branch_id = BranchId::new();
+        let node_id = NodeId::new();
         let graph = GraphMaterializer::from_events(&[
             branch_forked(branch_id, "exp", None),
             node_appended(
@@ -375,10 +376,10 @@ mod tests {
 
     #[test]
     fn single_branch_materialization() {
-        let branch_id = Uuid::new_v4();
-        let n1 = Uuid::new_v4();
-        let n2 = Uuid::new_v4();
-        let n3 = Uuid::new_v4();
+        let branch_id = BranchId::new();
+        let n1 = NodeId::new();
+        let n2 = NodeId::new();
+        let n3 = NodeId::new();
 
         let graph = GraphMaterializer::from_events(&[
             branch_forked(branch_id, "main", None),
@@ -437,11 +438,11 @@ mod tests {
 
     #[test]
     fn multi_branch_materialization() {
-        let main_id = Uuid::new_v4();
-        let side_id = Uuid::new_v4();
-        let n1 = Uuid::new_v4();
-        let n2 = Uuid::new_v4();
-        let n3 = Uuid::new_v4(); // on side branch
+        let main_id = BranchId::new();
+        let side_id = BranchId::new();
+        let n1 = NodeId::new();
+        let n2 = NodeId::new();
+        let n3 = NodeId::new(); // on side branch
 
         let graph = GraphMaterializer::from_events(&[
             branch_forked(main_id, "main", None),
@@ -485,9 +486,9 @@ mod tests {
 
     #[test]
     fn checkpoint_materialization() {
-        let branch_id = Uuid::new_v4();
-        let n1 = Uuid::new_v4();
-        let cp_id = Uuid::new_v4();
+        let branch_id = BranchId::new();
+        let n1 = NodeId::new();
+        let cp_id = NodeId::new();
 
         let graph = GraphMaterializer::from_events(&[
             branch_forked(branch_id, "main", None),
@@ -526,10 +527,10 @@ mod tests {
 
     #[test]
     fn bookmark_materialization() {
-        let branch_id = Uuid::new_v4();
-        let n1 = Uuid::new_v4();
-        let n2 = Uuid::new_v4();
-        let bm_id = Uuid::new_v4();
+        let branch_id = BranchId::new();
+        let n1 = NodeId::new();
+        let n2 = NodeId::new();
+        let bm_id = BookmarkId::new();
 
         let graph = GraphMaterializer::from_events(&[
             branch_forked(branch_id, "main", None),
@@ -560,8 +561,8 @@ mod tests {
 
     #[test]
     fn metadata_patch_applied() {
-        let branch_id = Uuid::new_v4();
-        let n1 = Uuid::new_v4();
+        let branch_id = BranchId::new();
+        let n1 = NodeId::new();
 
         let graph = GraphMaterializer::from_events(&[
             branch_forked(branch_id, "main", None),
@@ -589,8 +590,8 @@ mod tests {
 
     #[test]
     fn metadata_patch_on_nonobject_payload_replaces() {
-        let branch_id = Uuid::new_v4();
-        let n1 = Uuid::new_v4();
+        let branch_id = BranchId::new();
+        let n1 = NodeId::new();
 
         // Start with a non-object payload (string)
         let graph = GraphMaterializer::from_events(&[
@@ -623,8 +624,8 @@ mod tests {
 
     #[test]
     fn metadata_patch_on_missing_node_is_noop() {
-        let branch_id = Uuid::new_v4();
-        let phantom = Uuid::new_v4();
+        let branch_id = BranchId::new();
+        let phantom = NodeId::new();
 
         let graph = GraphMaterializer::from_events(&[
             branch_forked(branch_id, "main", None),
@@ -647,10 +648,10 @@ mod tests {
 
     #[test]
     fn primary_branch_preserved_via_explicit_id() {
-        let main_id = Uuid::new_v4();
-        let side_id = Uuid::new_v4();
-        let n1 = Uuid::new_v4();
-        let n2 = Uuid::new_v4();
+        let main_id = BranchId::new();
+        let side_id = BranchId::new();
+        let n1 = NodeId::new();
+        let n2 = NodeId::new();
 
         let events = vec![
             branch_forked(side_id, "side", None),
@@ -670,9 +671,9 @@ mod tests {
 
     #[test]
     fn primary_branch_explicit_ignores_nonexistent_branch() {
-        let branch_id = Uuid::new_v4();
-        let n1 = Uuid::new_v4();
-        let phantom = Uuid::new_v4();
+        let branch_id = BranchId::new();
+        let n1 = NodeId::new();
+        let phantom = BranchId::new();
 
         let events = vec![
             branch_forked(branch_id, "main", None),
@@ -838,8 +839,8 @@ mod tests {
 
     #[test]
     fn node_appended_creates_branch_implicitly() {
-        let branch_id = Uuid::new_v4();
-        let n1 = Uuid::new_v4();
+        let branch_id = BranchId::new();
+        let n1 = NodeId::new();
 
         // No explicit BranchForked event; NodeAppended should create the branch
         let graph = GraphMaterializer::from_events(&[node_appended(
@@ -861,9 +862,9 @@ mod tests {
 
     #[test]
     fn events_are_stored_in_materialized_graph() {
-        let branch_id = Uuid::new_v4();
-        let n1 = Uuid::new_v4();
-        let n2 = Uuid::new_v4();
+        let branch_id = BranchId::new();
+        let n1 = NodeId::new();
+        let n2 = NodeId::new();
 
         let events = vec![
             branch_forked(branch_id, "main", None),
@@ -902,8 +903,8 @@ mod tests {
 
     #[test]
     fn actor_propagated_to_materialized_nodes() {
-        let branch_id = Uuid::new_v4();
-        let n1 = Uuid::new_v4();
+        let branch_id = BranchId::new();
+        let n1 = NodeId::new();
 
         let graph = GraphMaterializer::from_events(&[GraphEvent {
             metadata: EventMetadata {
@@ -1085,9 +1086,9 @@ mod tests {
 
     #[test]
     fn primary_branch_falls_back_to_branch_with_head() {
-        let empty_branch = Uuid::new_v4();
-        let active_branch = Uuid::new_v4();
-        let n1 = Uuid::new_v4();
+        let empty_branch = BranchId::new();
+        let active_branch = BranchId::new();
+        let n1 = NodeId::new();
 
         // Create empty branch first (becomes primary by position), then branch with a node
         let graph = GraphMaterializer::from_events(&[

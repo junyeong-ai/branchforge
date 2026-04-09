@@ -195,7 +195,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             session.content_overrides().is_empty(),
         );
 
-        let node_id = uuid::Uuid::new_v4();
+        let node_id = branchforge::NodeId::new();
         session.set_content_override(node_id, vec![ContentPart::text("truncated")]);
         check("override added", session.content_overrides().len() == 1);
         check(

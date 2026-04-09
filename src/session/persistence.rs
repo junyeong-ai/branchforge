@@ -12,7 +12,7 @@ use chrono::{DateTime, Utc};
 use super::state::{Session, SessionId, SessionMessage, SessionState, SessionType};
 use super::types::QueueItem;
 use super::{SessionError, SessionResult};
-use crate::graph::{GraphEvent, GraphMaterializer, GraphValidator, SessionGraph};
+use crate::graph::{GraphEvent, GraphValidator, SessionGraph};
 
 pub(crate) fn validate_session_graph(session: &Session, backend: &str) -> SessionResult<()> {
     let report = GraphValidator::validate(&session.graph);
@@ -212,16 +212,8 @@ pub trait Persistence: Send + Sync {
         self.with_session_lock(
             session_id,
             Box::new(move |session| {
-                let graph_id = session.graph.id;
-                let created_at = session.graph.created_at;
-                let primary_branch = session.graph.primary_branch;
+                session.graph.apply_event(&event);
                 session.graph.events.push(event);
-                session.graph = GraphMaterializer::from_events_with_primary(
-                    &session.graph.events,
-                    Some(primary_branch),
-                );
-                session.graph.id = graph_id;
-                session.graph.created_at = created_at;
                 Ok(())
             }),
         )
@@ -672,7 +664,7 @@ mod tests {
             .append_graph_event(
                 &id,
                 GraphEvent::new(GraphEventBody::NodeAppended {
-                    node_id: uuid::Uuid::new_v4(),
+                    node_id: crate::graph::NodeId::new(),
                     branch_id: session.graph.primary_branch,
                     parent_id: None,
                     kind: NodeKind::User,

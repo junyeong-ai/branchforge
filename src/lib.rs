@@ -122,9 +122,9 @@ pub use client::transport::{DirectAuth, DirectTransport, Endpoint, ModelTranspor
 pub use context::PromptFrame;
 pub use context_scope::{ContextScope, SharedContextScope};
 pub use graph::{
-    Bookmark, Branch, BranchExport, BranchId, Checkpoint, ExportBookmark, ExportNode, GraphError,
-    GraphEvent, GraphEventBody, GraphMaterializer, GraphNode, NodeId, NodeKind, ReplayInput,
-    SessionGraph,
+    Bookmark, BookmarkId, Branch, BranchExport, BranchId, Checkpoint, ExportBookmark, ExportNode,
+    GraphError, GraphEvent, GraphEventBody, GraphMaterializer, GraphNode, NodeId, NodeKind,
+    ReplayInput, SessionGraph,
 };
 pub use tools::{
     ExecutionContext, ProgressBuilder, ProgressStatus, SchemaTool, Tool, ToolRegistry, ToolSurface,

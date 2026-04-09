@@ -14,7 +14,7 @@ use chrono::{DateTime, Utc};
 
 use super::CompactResult;
 use crate::graph::NodeId;
-use crate::ir::ContentPart;
+use crate::ir::{ContentPart, TokenCount};
 use crate::session::SessionResult;
 use crate::session::state::Session;
 
@@ -66,7 +66,7 @@ pub enum CompactionPlan {
         /// Content blocks to replace in the projection.
         overrides: Vec<ContentOverrideEntry>,
         /// Estimated token savings from this operation.
-        estimated_token_savings: u64,
+        estimated_token_savings: TokenCount,
     },
 }
 
@@ -78,7 +78,7 @@ pub struct ContentOverrideEntry {
     /// Replacement content blocks (truncated version).
     pub replacement_content: Vec<ContentPart>,
     /// Original token count of the content being replaced.
-    pub original_tokens: u64,
+    pub original_tokens: TokenCount,
 }
 
 /// Pluggable compaction strategy.

@@ -53,7 +53,8 @@ impl SchemaTool for KillShellTool {
 - Shell IDs can be obtained from Bash tool responses when using run_in_background"#;
 
     async fn handle(&self, input: KillShellInput, _context: &ExecutionContext) -> ToolResult {
-        match self.process_manager.kill(&input.shell_id).await {
+        let pid = crate::tools::ProcessId::new(&input.shell_id);
+        match self.process_manager.kill(&pid).await {
             Ok(()) => ToolResult::success(format!("Process '{}' terminated", input.shell_id)),
             Err(e) => ToolResult::error(e),
         }

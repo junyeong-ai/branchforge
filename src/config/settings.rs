@@ -245,7 +245,7 @@ impl ToolSearchConfig {
     pub fn to_config(&self, context_window: usize) -> crate::tools::ToolSearchConfig {
         use crate::tools::{SearchMode, ToolSearchConfig};
 
-        let mut config = ToolSearchConfig::default().context_window(context_window);
+        let mut config = ToolSearchConfig::default().context_window(context_window as u64);
 
         if let Some(threshold) = self.threshold {
             config = config.threshold(threshold);
@@ -639,7 +639,7 @@ mod tests {
 
         let config = settings.to_config(100_000);
         assert_eq!(config.search_mode, SearchMode::Regex);
-        assert_eq!(config.context_window, 100_000);
+        assert_eq!(config.context_window, crate::ir::TokenCount::new(100_000));
     }
 
     #[test]

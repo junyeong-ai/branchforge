@@ -7,13 +7,14 @@ use tokio::sync::RwLock;
 
 use super::engine::{SearchEngine, SearchMode};
 use super::index::{ToolIndex, ToolIndexEntry};
+use crate::ir::TokenCount;
 use crate::mcp::{McpManager, McpToolDefinition, McpToolsetRegistry};
 use crate::types::ToolSpec;
 
 #[derive(Debug, Clone)]
 pub struct ToolSearchConfig {
     pub threshold: f64,
-    pub context_window: usize,
+    pub context_window: TokenCount,
     pub search_mode: SearchMode,
     pub max_results: usize,
     pub always_load: Vec<String>,
@@ -23,7 +24,7 @@ impl Default for ToolSearchConfig {
     fn default() -> Self {
         Self {
             threshold: 0.10,
-            context_window: 200_000,
+            context_window: TokenCount::new(200_000),
             search_mode: SearchMode::Regex,
             max_results: 5,
             always_load: Vec::new(),
@@ -32,8 +33,8 @@ impl Default for ToolSearchConfig {
 }
 
 impl ToolSearchConfig {
-    pub fn threshold_tokens(&self) -> usize {
-        (self.context_window as f64 * self.threshold) as usize
+    pub fn threshold_tokens(&self) -> TokenCount {
+        TokenCount::new((self.context_window.get() as f64 * self.threshold) as u64)
     }
 
     pub fn threshold(mut self, threshold: f64) -> Self {
@@ -41,8 +42,8 @@ impl ToolSearchConfig {
         self
     }
 
-    pub fn context_window(mut self, tokens: usize) -> Self {
-        self.context_window = tokens;
+    pub fn context_window(mut self, tokens: impl Into<TokenCount>) -> Self {
+        self.context_window = tokens.into();
         self
     }
 
@@ -110,7 +111,7 @@ impl ToolSearchEngine {
         index.total_tokens() > self.config.threshold_tokens()
     }
 
-    pub async fn total_tokens(&self) -> usize {
+    pub async fn total_tokens(&self) -> TokenCount {
         self.index.read().await.total_tokens()
     }
 
@@ -226,8 +227,8 @@ pub struct PreparedTools {
     pub search_mode: SearchMode,
     pub immediate: Vec<ToolSpec>,
     pub deferred: Vec<ToolSpec>,
-    pub total_tokens: usize,
-    pub threshold_tokens: usize,
+    pub total_tokens: TokenCount,
+    pub threshold_tokens: TokenCount,
 }
 
 impl PreparedTools {
@@ -249,11 +250,11 @@ impl PreparedTools {
             .cloned()
             .collect();
 
-        let total_tokens = immediate
+        let total_tokens: TokenCount = immediate
             .iter()
             .chain(deferred.iter())
             .map(ToolSpec::estimated_tokens)
-            .sum::<usize>();
+            .sum();
         let use_search =
             self.use_search && !deferred.is_empty() && total_tokens > self.threshold_tokens;
 
@@ -271,14 +272,11 @@ impl PreparedTools {
         }
     }
 
-    pub fn token_savings(&self) -> usize {
+    pub fn token_savings(&self) -> TokenCount {
         if self.use_search {
-            self.deferred
-                .iter()
-                .map(|t| t.estimated_tokens())
-                .sum::<usize>()
+            self.deferred.iter().map(|t| t.estimated_tokens()).sum()
         } else {
-            0
+            TokenCount::ZERO
         }
     }
 }
@@ -300,27 +298,27 @@ mod tests {
     #[test]
     fn test_config_threshold_tokens() {
         let config = ToolSearchConfig::default();
-        assert_eq!(config.threshold_tokens(), 20_000); // 10% of 200k
+        assert_eq!(config.threshold_tokens(), TokenCount::new(20_000)); // 10% of 200k
     }
 
     #[test]
     fn test_config_builder() {
         let config = ToolSearchConfig::default()
             .threshold(0.05)
-            .context_window(100_000)
+            .context_window(100_000u64)
             .search_mode(SearchMode::Bm25);
 
         assert_eq!(config.threshold, 0.05);
-        assert_eq!(config.context_window, 100_000);
+        assert_eq!(config.context_window, TokenCount::new(100_000));
         assert_eq!(config.search_mode, SearchMode::Bm25);
-        assert_eq!(config.threshold_tokens(), 5_000);
+        assert_eq!(config.threshold_tokens(), TokenCount::new(5_000));
     }
 
     #[tokio::test]
     async fn test_manager_creation() {
         let manager = ToolSearchEngine::default();
         assert!(!manager.should_use_search().await);
-        assert_eq!(manager.total_tokens().await, 0);
+        assert_eq!(manager.total_tokens().await, TokenCount::ZERO);
     }
 
     #[test]
@@ -334,8 +332,8 @@ mod tests {
                 "Read a file",
                 serde_json::json!({"type": "object"}),
             )],
-            total_tokens: 100,
-            threshold_tokens: 1,
+            total_tokens: TokenCount::new(100),
+            threshold_tokens: TokenCount::new(1),
         };
 
         let filtered = prepared.filtered_for_access(&ToolSurface::none());
@@ -343,7 +341,7 @@ mod tests {
         assert!(!filtered.use_search);
         assert!(filtered.immediate.is_empty());
         assert!(filtered.deferred.is_empty());
-        assert_eq!(filtered.total_tokens, 0);
+        assert_eq!(filtered.total_tokens, TokenCount::ZERO);
     }
 
     #[test]
@@ -364,8 +362,8 @@ mod tests {
                     serde_json::json!({"type": "object"}),
                 ),
             ],
-            total_tokens: 10_000,
-            threshold_tokens: 1,
+            total_tokens: TokenCount::new(10_000),
+            threshold_tokens: TokenCount::new(1),
         };
 
         let filtered = prepared.filtered_for_access(&ToolSurface::only(["mcp__context7__search"]));

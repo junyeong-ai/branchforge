@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use super::state::{MessageId, SessionId};
+use crate::ir::TokenCount;
 
 /// Environment context for coding-mode sessions.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -85,8 +86,8 @@ pub struct ToolExecution {
     pub is_error: bool,
     pub error_message: Option<String>,
     pub duration_ms: u64,
-    pub input_tokens: Option<u32>,
-    pub output_tokens: Option<u32>,
+    pub input_tokens: Option<TokenCount>,
+    pub output_tokens: Option<TokenCount>,
     pub plan_id: Option<Uuid>,
     pub created_at: DateTime<Utc>,
 }
@@ -141,9 +142,9 @@ impl ToolExecution {
         self
     }
 
-    pub fn tokens(mut self, input: u32, output: u32) -> Self {
-        self.input_tokens = Some(input);
-        self.output_tokens = Some(output);
+    pub fn tokens(mut self, input: impl Into<TokenCount>, output: impl Into<TokenCount>) -> Self {
+        self.input_tokens = Some(input.into());
+        self.output_tokens = Some(output.into());
         self
     }
 }
@@ -350,9 +351,9 @@ pub struct CompactRecord {
     pub id: Uuid,
     pub session_id: SessionId,
     pub trigger: CompactTrigger,
-    pub pre_tokens: usize,
-    pub post_tokens: usize,
-    pub saved_tokens: usize,
+    pub pre_tokens: TokenCount,
+    pub post_tokens: TokenCount,
+    pub saved_tokens: TokenCount,
     pub summary: String,
     pub original_count: usize,
     pub new_count: usize,
@@ -366,9 +367,9 @@ impl CompactRecord {
             id: Uuid::new_v4(),
             session_id,
             trigger: CompactTrigger::default(),
-            pre_tokens: 0,
-            post_tokens: 0,
-            saved_tokens: 0,
+            pre_tokens: TokenCount::ZERO,
+            post_tokens: TokenCount::ZERO,
+            saved_tokens: TokenCount::ZERO,
             summary: String::new(),
             original_count: 0,
             new_count: 0,
@@ -393,15 +394,15 @@ impl CompactRecord {
         self
     }
 
-    pub fn saved_tokens(mut self, saved: usize) -> Self {
-        self.saved_tokens = saved;
+    pub fn saved_tokens(mut self, saved: impl Into<TokenCount>) -> Self {
+        self.saved_tokens = saved.into();
         self
     }
 
-    pub fn tokens(mut self, pre: usize, post: usize) -> Self {
-        self.pre_tokens = pre;
-        self.post_tokens = post;
-        self.saved_tokens = pre.saturating_sub(post);
+    pub fn tokens(mut self, pre: impl Into<TokenCount>, post: impl Into<TokenCount>) -> Self {
+        self.pre_tokens = pre.into();
+        self.post_tokens = post.into();
+        self.saved_tokens = self.pre_tokens.saturating_sub(self.post_tokens);
         self
     }
 
@@ -613,9 +614,9 @@ mod tests {
             .counts(50, 5)
             .summary("Summary of conversation");
 
-        assert_eq!(record.pre_tokens, 100_000);
-        assert_eq!(record.post_tokens, 20_000);
-        assert_eq!(record.saved_tokens, 80_000);
+        assert_eq!(record.pre_tokens, TokenCount::new(100_000));
+        assert_eq!(record.post_tokens, TokenCount::new(20_000));
+        assert_eq!(record.saved_tokens, TokenCount::new(80_000));
         assert_eq!(record.original_count, 50);
         assert_eq!(record.new_count, 5);
     }

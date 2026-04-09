@@ -100,10 +100,15 @@ impl Usage {
     /// Tokens that count against the context window (input + cache reads +
     /// cache creation). Used by the token tracker for window-utilisation
     /// checks.
-    pub fn context_usage(&self) -> u64 {
+    pub fn context_window_tokens(&self) -> u64 {
         self.input_tokens
             + self.cached_input_tokens.unwrap_or(0)
             + self.cache_creation_tokens.unwrap_or(0)
+    }
+
+    /// Alias for [`context_window_tokens`](Self::context_window_tokens).
+    pub fn context_usage(&self) -> u64 {
+        self.context_window_tokens()
     }
 
     /// Total across both context and output tokens.
