@@ -64,12 +64,12 @@ cargo build --all-features                      # full + multimedia
 - `src/orchestration/`: coordinator, agent directory, inter-agent messaging, worker constraints
 - `src/skills/`: skill index, runtime, progressive disclosure, on-demand loading
 - `src/subagents/`: subagent index, builtin agents, delegation runtime
-- `src/tokens/`: TokenBudget (cache_creation_tokens), context window, pricing tiers, tracker
+- `src/tokens/`: TokenTracker (uses `ir::Usage` directly), context window, pricing tiers
 - `src/budget/`: BudgetTracker, OnExceed policy, tenant budgets, cost reporting. `calculate_ir()` for IR-native pricing.
 - `src/scheduling/`: CronScheduler (interval + cron expressions), RemoteTrigger (async execution)
 - `src/events/`: non-blocking EventBus (fire-and-forget), event kinds, subscriptions
 - `src/observability/`: metrics (counter/gauge/histogram), OpenTelemetry bridge, spans
-- `src/hooks/`: HookManager (blocking, fail-closed), command hooks, lifecycle events
+- `src/hooks/`: HookRegistry (blocking, fail-closed), command hooks, lifecycle events
 - `src/context/`: PromptOrchestrator, static context, memory loading, rule index
 - `src/models/`: model registry, specs, builtin model definitions
 - `src/config/`: file/env/memory config sources, composite config, validation
