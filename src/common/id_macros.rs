@@ -1,7 +1,7 @@
 //! Macros for generating strongly-typed ID newtypes.
 //!
-//! - [`uuid_id!`] — newtype over `uuid::Uuid` (private field).
-//! - [`string_id!`] — newtype over `String` (private field).
+//! - `uuid_id!` — newtype over `uuid::Uuid` (private field).
+//! - `string_id!` — newtype over `String` (private field).
 //!
 //! Both macros generate a full trait surface so the newtypes are
 //! drop-in replacements for the raw types they wrap, while preventing
@@ -20,8 +20,8 @@
 /// - `as_uuid()`, `into_inner()`
 /// - Standard derives: Copy, Clone, Debug, Default, PartialEq, Eq,
 ///   PartialOrd, Ord, Hash, Serialize, Deserialize (transparent)
-/// - Conversions: From<Uuid>, From<Self> for Uuid, Display, FromStr,
-///   TryFrom<&str>, TryFrom<String>
+/// - Conversions: `From<Uuid>`, `From<Self> for Uuid`, `Display`, `FromStr`,
+///   `TryFrom<&str>`, `TryFrom<String>`
 #[macro_export]
 macro_rules! uuid_id {
     ($Name:ident) => {
@@ -140,8 +140,8 @@ macro_rules! uuid_id {
 /// - `new(impl Into<String>)`, `as_str()`, `into_inner()`, `is_empty()`
 /// - Standard derives: Clone, Debug, Default, PartialEq, Eq,
 ///   PartialOrd, Ord, Hash, Serialize, Deserialize (transparent)
-/// - Conversions: From<String>, From<&str>, From<Self> for String,
-///   Display, FromStr (infallible), Borrow<str>, AsRef<str>
+/// - Conversions: `From<String>`, `From<&str>`, `From<Self> for String`,
+///   `Display`, `FromStr` (infallible), `Borrow<str>`, `AsRef<str>`
 #[macro_export]
 macro_rules! string_id {
     ($Name:ident) => {

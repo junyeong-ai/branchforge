@@ -1,7 +1,7 @@
 //! Human-in-the-loop approval for tool execution.
 //!
-//! When a tool requires human review (e.g., in [`ExecutionMode::Supervised`]
-//! or [`ExecutionMode::SupervisedFor`]), the agent sends an [`ApprovalRequest`]
+//! When a tool requires human review (e.g., in `ExecutionMode::Supervised`
+//! or `ExecutionMode::SupervisedFor`), the agent sends an [`ApprovalRequest`]
 //! through a bounded channel and waits for an [`ApprovalResponse`].
 //!
 //! # Example
@@ -49,7 +49,7 @@ pub enum ApprovalResponse {
 
 /// Sender half of the approval channel.
 ///
-/// Pass this to [`AgentBuilder::approval_channel`] so the agent runtime
+/// Pass this to `AgentBuilder::approval_channel` so the agent runtime
 /// can send approval requests during tool execution.
 pub type ApprovalSender = mpsc::Sender<(ApprovalRequest, oneshot::Sender<ApprovalResponse>)>;
 

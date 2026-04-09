@@ -49,7 +49,7 @@ impl std::fmt::Debug for DirectAuth {
 ///
 /// Constructs URLs as `{base_url}/{rendered path}[?query]`. Adds the
 /// codec's `required_headers` (resolving `ContextValue` placeholders from
-/// the transport's [`Self::context`] map) and applies the configured
+/// the transport's `Self::context` map) and applies the configured
 /// [`DirectAuth`] in [`Self::authorize`].
 ///
 /// # Credential refresh

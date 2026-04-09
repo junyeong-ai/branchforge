@@ -113,7 +113,7 @@ impl SessionGraph {
     /// Apply a single [`GraphEvent`] in-place without rebuilding the whole graph.
     ///
     /// This is O(1) per event (hash-map inserts/lookups) vs the O(n)
-    /// full-rebuild path through [`GraphMaterializer::from_events`].
+    /// full-rebuild path through `GraphMaterializer::from_events`.
     pub fn apply_event(&mut self, event: &GraphEvent) {
         match &event.body {
             GraphEventBody::NodeAppended {

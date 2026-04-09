@@ -114,7 +114,7 @@ impl ToolCallSupport {
 ///
 /// **Note**: synthesized-by-name was intentionally removed from this enum
 /// because it cannot disambiguate parallel calls to the same function.
-/// Codecs whose wire format omits ids must use [`SynthesizedByIndex`] and
+/// Codecs whose wire format omits ids must use [`ToolIdSemantics::SynthesizedByIndex`] and
 /// the agent runtime must preserve part ordering when echoing tool results.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

@@ -51,7 +51,7 @@ pub const DEFAULT_COMPACT_KEEP_MESSAGES: usize = 4;
 ///
 /// Use [`crate::Agent::builder()`] to create a new builder instance.
 #[derive(Default)]
-/// Builder for [`Agent`] construction.
+/// Builder for `Agent` construction.
 ///
 /// Fields are organised by domain so the builder API surface stays
 /// navigable. The grouping is documentary — Rust struct fields are flat
@@ -640,7 +640,7 @@ impl AgentBuilder {
     ///
     /// When the execution mode is [`ExecutionMode::Supervised`] or
     /// [`ExecutionMode::SupervisedFor`], tools that require review will
-    /// send an [`ApprovalRequest`] through this channel and wait for a
+    /// send an `ApprovalRequest` through this channel and wait for a
     /// response. If no channel is configured, supervised tools are
     /// blocked with an error message.
     ///

@@ -103,7 +103,7 @@ pub struct TaskExecutionSummary {
 
 /// Snapshot of a task's terminal state: status, content, structured
 /// output, metadata, execution summary, and any error message. This is
-/// the public-facing payload returned by [`TaskRegistry::result`].
+/// the public-facing payload returned by `TaskRegistry::result`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TaskResultSnapshot {
     pub status: SessionState,

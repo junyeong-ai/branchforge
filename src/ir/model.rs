@@ -13,7 +13,7 @@ use super::warning::ModelWarning;
 
 /// A complete model invocation request.
 ///
-/// `ModelRequest` is the canonical input to a [`ModelCodec::encode_request`]
+/// `ModelRequest` is the canonical input to a codec's `encode_request`
 /// call. Codecs translate this into the provider-native wire format,
 /// emitting [`ModelWarning`]s for anything they cannot honour exactly.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -28,7 +28,7 @@ pub struct ModelRequest {
     pub messages: Vec<Message>,
 
     /// System prompt. Kept as a top-level field — and not as a
-    /// [`Role::System`] message — because Anthropic supports structured
+    /// `system` role message — because Anthropic supports structured
     /// system blocks with per-block `cache_control` that cannot round-trip
     /// through a flat message string. Codecs whose wire format expects a
     /// `role: "system"` message flatten on encode and emit a

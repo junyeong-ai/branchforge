@@ -94,7 +94,7 @@ impl CronEntry {
         Some(Duration::from_nanos(avg as u64))
     }
 
-    /// Number of [`ExecutionOutcome::Skipped`] records in history.
+    /// Number of `Skipped` execution outcome records in history.
     pub fn skip_count(&self) -> usize {
         self.history
             .iter()

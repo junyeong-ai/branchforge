@@ -204,7 +204,7 @@ impl Drop for SubscriberSlot {
 
 /// Non-blocking event bus for observability.
 ///
-/// See the [module docs](crate::events::bus) for the dispatch model and
+/// See the module docs for the dispatch model and
 /// rationale for the per-subscriber bounded mpsc design.
 pub struct EventBus {
     subscribers: DashMap<EventKind, Vec<SubscriberSlot>>,
@@ -219,7 +219,7 @@ impl EventBus {
     /// `broadcast_capacity` controls the all-events broadcast channel
     /// returned by [`Self::subscribe_all`]; lagged receivers there miss
     /// events. Per-kind subscribers use their own bounded mpsc channels
-    /// of [`DEFAULT_SUBSCRIBER_BUFFER`] events each (override per
+    /// of `DEFAULT_SUBSCRIBER_BUFFER` events each (override per
     /// subscription with [`Self::subscribe_with`]).
     pub fn new(broadcast_capacity: usize) -> Self {
         let (tx, _rx) = broadcast::channel(broadcast_capacity);
@@ -242,7 +242,7 @@ impl EventBus {
     ///
     /// The bus spawns one drainer task per subscriber that pulls events
     /// from a bounded mpsc channel and invokes the callback. Uses the
-    /// default buffer size and [`OverflowPolicy::Drop`].
+    /// default buffer size and `OverflowPolicy::Drop`.
     pub fn subscribe(&self, kind: EventKind, callback: SubscriberFn) -> SubscriptionId {
         self.subscribe_with(
             kind,
@@ -317,9 +317,9 @@ impl EventBus {
     /// 1. Broadcasts to all-event subscribers (errors silently ignored).
     /// 2. Hands the event to each per-kind subscriber's mpsc channel via
     ///    `try_send`. On `Full`, applies the subscriber's
-    ///    [`OverflowPolicy`] and counts the drop.
+    ///    `OverflowPolicy` and counts the drop.
     ///
-    /// Returns [`EmitStats`] so callers can detect lag in production.
+    /// Returns `EmitStats` so callers can detect lag in production.
     pub fn emit(&self, event: Event) -> EmitStats {
         // Broadcast to all-event subscribers. Ignore errors (no active
         // receivers is not an error condition for fire-and-forget).
@@ -352,7 +352,7 @@ impl EventBus {
         stats
     }
 
-    /// Convenience: emit with just a kind and data. Discards [`EmitStats`].
+    /// Convenience: emit with just a kind and data. Discards `EmitStats`.
     pub fn emit_simple(&self, kind: EventKind, data: serde_json::Value) {
         let _ = self.emit(Event::new(kind, data));
     }

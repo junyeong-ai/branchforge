@@ -344,7 +344,7 @@ impl PricingTableBuilder {
     /// Add explicit Anthropic Claude 4-family pricing.
     ///
     /// The simple `defaults()` registration relies on
-    /// [`PricingTable::normalize_model_name`] to fold every "opus"/"sonnet"/
+    /// `PricingTable::normalize_model_name` to fold every "opus"/"sonnet"/
     /// "haiku" model into a single bucket, which works but masks per-version
     /// cost differences. This method registers the canonical 4-family
     /// identifiers explicitly so cost reporting can attribute spend to a
