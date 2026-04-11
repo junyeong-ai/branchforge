@@ -1,12 +1,15 @@
 //! Context Builder for Progressive Disclosure
 
-use std::path::{Path, PathBuf};
+#[cfg(feature = "local-fs")]
+use std::path::Path;
+use std::path::PathBuf;
 
 use crate::agent::DEFAULT_MODEL;
 use crate::common::IndexRegistry;
 use crate::skills::{SkillIndex, build_model_invocable_summary};
 
 use super::ContextResult;
+#[cfg(feature = "local-fs")]
 use super::memory_loader::MemoryLoader;
 use super::orchestrator::PromptOrchestrator;
 use super::rule_index::RuleIndex;
@@ -89,6 +92,14 @@ impl ContextBuilder {
         self
     }
 
+    /// Walks `dir` for CLAUDE.md / CLAUDE.local.md / `.claude/rules/` and
+    /// folds the discovered content into this builder.
+    ///
+    /// Only available under the `local-fs` feature — pure-core builds have
+    /// no filesystem loader. Non-`local-fs` callers should inject memory
+    /// content via [`claude_md`][Self::claude_md] and [`rule`][Self::rule]
+    /// directly.
+    #[cfg(feature = "local-fs")]
     pub async fn load_from_directory(mut self, dir: impl AsRef<Path>) -> Self {
         let dir = dir.as_ref();
         let loader = MemoryLoader::new();
@@ -192,6 +203,7 @@ mod tests {
         assert!(orchestrator.static_context().skill_summary.is_empty());
     }
 
+    #[cfg(feature = "local-fs")]
     #[tokio::test]
     async fn test_load_from_directory() {
         use tempfile::tempdir;

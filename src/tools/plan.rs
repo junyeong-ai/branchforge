@@ -325,8 +325,7 @@ mod tests {
         let session_id = SessionId::new();
         let tool_state = ToolState::new(session_id);
         let tool = PlanTool::new(tool_state);
-        let context = ExecutionContext::try_permissive()
-            .expect("failed to create permissive context")
+        let context = ExecutionContext::empty()
             .with_session_manager(manager.clone())
             .with_session_scope(scope.clone());
 

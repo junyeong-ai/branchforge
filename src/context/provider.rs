@@ -3,11 +3,14 @@
 //! Providers abstract the source of memory content, allowing for both
 //! in-memory testing and file-based production use.
 
+#[cfg(feature = "local-fs")]
 use std::path::PathBuf;
 
 use async_trait::async_trait;
 
-use super::{ContextResult, MemoryContent, MemoryLoader};
+#[cfg(feature = "local-fs")]
+use super::MemoryLoader;
+use super::{ContextResult, MemoryContent};
 
 /// Trait for providing memory content from various sources.
 ///
@@ -78,20 +81,26 @@ impl MemoryProvider for MemoryContextProvider {
 /// File-based memory provider for CLI-compatible behavior.
 ///
 /// Loads CLAUDE.md and CLAUDE.local.md files from the file system
-/// with full @import support.
+/// with full @import support. Only available under the `local-fs`
+/// feature — pure Layer 1 builds should use [`MemoryContextProvider`]
+/// with programmatic content instead.
 ///
 /// # Example
 /// ```no_run
+/// # #[cfg(feature = "local-fs")] {
 /// use branchforge::context::FileMemoryProvider;
 ///
 /// let provider = FileMemoryProvider::new("/path/to/project");
+/// # }
 /// ```
+#[cfg(feature = "local-fs")]
 #[derive(Debug, Clone)]
 pub struct FileMemoryProvider {
     /// Root path to load memory files from.
     pub path: PathBuf,
 }
 
+#[cfg(feature = "local-fs")]
 impl FileMemoryProvider {
     /// Creates a new FileMemoryProvider for the given directory.
     pub fn new(path: impl Into<PathBuf>) -> Self {
@@ -99,6 +108,7 @@ impl FileMemoryProvider {
     }
 }
 
+#[cfg(feature = "local-fs")]
 #[async_trait]
 impl MemoryProvider for FileMemoryProvider {
     fn name(&self) -> &str {

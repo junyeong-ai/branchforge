@@ -162,12 +162,19 @@ pub struct SandboxConfig {
 }
 
 impl SandboxConfig {
-    /// Convert settings to SandboxConfig for use with SecurityContext.
+    /// Convert settings to the Layer 2a runtime `SandboxConfig` used by
+    /// the filesystem sandbox (Landlock/Seatbelt).
+    ///
+    /// Only available under the `local-fs` feature because it references
+    /// Layer 2a types (`crate::security::sandbox::*`). Pure-core callers do
+    /// not need this method — they parse the settings as data and can still
+    /// read scalar fields directly.
     ///
     /// # Default Behaviors
     /// - `auto_allow_bash_if_sandboxed`: defaults to `true`
     /// - `enable_weaker_nested_sandbox`: defaults to `false` (strict mode)
     /// - `allowed_paths` and `denied_paths`: empty by default (use working_dir as root)
+    #[cfg(feature = "local-fs")]
     pub fn to_sandbox_config(
         &self,
         working_dir: std::path::PathBuf,
@@ -576,6 +583,7 @@ mod tests {
         assert!(!disabled.is_enabled());
     }
 
+    #[cfg(feature = "local-fs")]
     #[test]
     fn test_sandbox_settings_to_sandbox_config() {
         use std::path::PathBuf;
@@ -597,7 +605,7 @@ mod tests {
 
         let network_sandbox = config.to_network_sandbox();
         // Use check() to verify domains - allowed_domains/blocked_domains are builder methods
-        use crate::security::DomainCheck;
+        use crate::network_sandbox::DomainCheck;
         assert_eq!(network_sandbox.check("example.com"), DomainCheck::Allowed);
         assert_eq!(network_sandbox.check("malware.com"), DomainCheck::Blocked);
     }

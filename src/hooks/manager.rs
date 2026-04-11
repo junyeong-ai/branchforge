@@ -444,6 +444,91 @@ mod tests {
         }
     }
 
+    /// Hook for testing the `updated_input` rewrite path. Always
+    /// returns a hook output that replaces the tool input with the
+    /// supplied JSON value.
+    struct RewriteHook {
+        name: String,
+        events: Vec<HookEvent>,
+        replacement: serde_json::Value,
+    }
+
+    impl RewriteHook {
+        fn new(
+            name: impl Into<String>,
+            events: Vec<HookEvent>,
+            replacement: serde_json::Value,
+        ) -> Self {
+            Self {
+                name: name.into(),
+                events,
+                replacement,
+            }
+        }
+    }
+
+    #[async_trait]
+    impl Hook for RewriteHook {
+        fn name(&self) -> &str {
+            &self.name
+        }
+        fn events(&self) -> &[HookEvent] {
+            &self.events
+        }
+        fn priority(&self) -> i32 {
+            0
+        }
+        async fn execute(
+            &self,
+            _input: HookInput,
+            _ctx: &HookContext,
+        ) -> Result<HookOutput, crate::Error> {
+            Ok(HookOutput::allow().updated_input(self.replacement.clone()))
+        }
+    }
+
+    /// End-to-end demonstration of the shell-command rewriting path:
+    /// a `PreToolUse` hook returns `updated_input` with a rewritten
+    /// `command` field, and the registry merges that into its
+    /// aggregate output. The agent execution path then substitutes
+    /// the tool input before deserialization (verified at the
+    /// `tool_input.unwrap_or` callsite in
+    /// `src/agent/execution.rs:501` and the streaming counterpart).
+    #[tokio::test]
+    async fn pre_tool_use_hook_can_rewrite_bash_command_via_updated_input() {
+        let mut manager = HookRegistry::new();
+        let replacement = serde_json::json!({
+            "command": "rg --line-number 'TODO' src/",
+            "description": "rewritten by hook",
+        });
+        manager.register(RewriteHook::new(
+            "grep-to-rg",
+            vec![HookEvent::PreToolUse],
+            replacement.clone(),
+        ));
+
+        let original_input = serde_json::json!({
+            "command": "grep -rn 'TODO' src/",
+            "description": "find todos",
+        });
+        let input = HookInput::pre_tool_use("session-1", "Bash", original_input);
+        let hook_context = HookContext::new("session-1");
+
+        let output = manager
+            .execute(HookEvent::PreToolUse, input, &hook_context)
+            .await
+            .expect("hook should not fail");
+
+        assert!(output.continue_execution);
+        let updated = output
+            .updated_input
+            .expect("PreToolUse hook must propagate updated_input to the agent loop");
+        assert_eq!(updated, replacement);
+        // Crucially: the rewritten command field is the one the
+        // tool deserializer will see.
+        assert_eq!(updated["command"], "rg --line-number 'TODO' src/");
+    }
+
     #[tokio::test]
     async fn test_blockable_hook_failure_returns_error() {
         let mut manager = HookRegistry::new();

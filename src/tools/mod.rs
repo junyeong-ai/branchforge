@@ -60,5 +60,5 @@ pub use traits::{SchemaTool, Tool};
 #[cfg(feature = "coding-tools")]
 pub use write::WriteTool;
 
-pub use crate::security::sandbox::{DomainCheck, NetworkSandbox};
+pub use crate::network_sandbox::{DomainCheck, NetworkSandbox};
 pub use crate::types::{ToolOutput, ToolResult};

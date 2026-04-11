@@ -66,13 +66,9 @@ mod tests {
     use super::*;
     use crate::orchestration::directory::AgentHandle;
     use crate::orchestration::messaging::MessageChannel;
-    use crate::security::SecurityContext;
 
     fn test_context() -> ExecutionContext {
-        ExecutionContext::new(
-            SecurityContext::try_permissive()
-                .expect("failed to create permissive security context"),
-        )
+        ExecutionContext::empty()
     }
 
     #[tokio::test]

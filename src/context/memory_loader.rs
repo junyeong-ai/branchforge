@@ -3,11 +3,26 @@
 //! This module provides a memory loader that reads CLAUDE.md and CLAUDE.local.md files
 //! with support for recursive @import directives. It implements the same import behavior
 //! as Claude Code CLI 2.1.12.
+//!
+//! # Layering
+//!
+//! This module is Layer 2a (`local-fs`) — it walks a real filesystem tree
+//! and reads markdown files. A local research or knowledge-management
+//! agent can legitimately use it (the mechanism is "scan a directory for
+//! markdown instructions"); the only Claude Code-specific aspects are the
+//! hard-coded file names (`CLAUDE.md`, `CLAUDE.local.md`, `.claude/rules/`).
+//! A future refinement will split this into a truly domain-neutral
+//! `MarkdownMemoryLoader` (Layer 2a) that accepts a configurable glob and
+//! an opinionated Claude Code-convention wrapper (Layer 2b, `coding-tools`).
+//! Pure-core builds have no access to either loader; they use
+//! [`super::MemoryContent`] (Layer 1) as a data carrier and populate it via
+//! in-memory providers.
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use super::import_extractor::ImportExtractor;
+use super::memory_content::MemoryContent;
 use super::rule_index::RuleIndex;
 use super::{ContextError, ContextResult};
 
@@ -335,42 +350,6 @@ impl MemoryLoader {
 impl Default for MemoryLoader {
     fn default() -> Self {
         Self::new()
-    }
-}
-
-/// Loaded memory content from CLAUDE.md files and rules.
-#[derive(Debug, Default, Clone)]
-pub struct MemoryContent {
-    /// Content from CLAUDE.md files (shared/team config).
-    pub claude_md: Vec<String>,
-    /// Content from CLAUDE.local.md files (user-specific config).
-    pub local_md: Vec<String>,
-    /// Rule indices from .claude/rules/ directory.
-    pub rule_indices: Vec<RuleIndex>,
-}
-
-impl MemoryContent {
-    /// Combines all CLAUDE.md and CLAUDE.local.md content into a single string.
-    pub fn combined_claude_md(&self) -> String {
-        self.claude_md
-            .iter()
-            .chain(self.local_md.iter())
-            .filter(|c| !c.trim().is_empty())
-            .cloned()
-            .collect::<Vec<_>>()
-            .join("\n\n")
-    }
-
-    /// Returns true if no content was loaded.
-    pub fn is_empty(&self) -> bool {
-        self.claude_md.is_empty() && self.local_md.is_empty() && self.rule_indices.is_empty()
-    }
-
-    /// Merges another MemoryContent into this one.
-    pub fn merge(&mut self, other: MemoryContent) {
-        self.claude_md.extend(other.claude_md);
-        self.local_md.extend(other.local_md);
-        self.rule_indices.extend(other.rule_indices);
     }
 }
 

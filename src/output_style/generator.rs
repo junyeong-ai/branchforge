@@ -11,9 +11,11 @@ use super::{InMemoryOutputStyleProvider, OutputStyle, builtin_styles, default_st
 use crate::agent::DEFAULT_MODEL;
 use crate::common::Provider;
 use crate::common::SourceType;
+#[cfg(feature = "coding-tools")]
+use crate::prompts::environment::is_git_repository;
 use crate::prompts::{
     base::{BASE_SYSTEM_PROMPT, TOOL_USAGE_POLICY},
-    environment::{current_platform, environment_block, is_git_repository, os_version},
+    environment::{current_platform, environment_block, os_version},
     identity::CLI_IDENTITY,
 };
 
@@ -208,7 +210,14 @@ impl SystemPromptGenerator {
         }
 
         // 6. Environment Block (always)
-        let is_git = is_git_repository(self.working_dir.as_deref());
+        //
+        // Git repository detection is a Layer 2b concern — only surfaced
+        // when the `coding-tools` feature is active. Layer 1 / `local-fs`
+        // builds pass `None` and the corresponding prompt line is omitted.
+        #[cfg(feature = "coding-tools")]
+        let is_git = Some(is_git_repository(self.working_dir.as_deref()));
+        #[cfg(not(feature = "coding-tools"))]
+        let is_git: Option<bool> = None;
         let platform = current_platform();
         let os_ver = os_version();
 
@@ -271,7 +280,9 @@ mod tests {
 
         // CLI Identity should NOT be included by default
         assert!(!prompt.starts_with(CLI_IDENTITY));
-        assert!(prompt.contains("Doing tasks")); // coding instructions
+        // Coding instructions are only injected under `coding-tools`.
+        #[cfg(feature = "coding-tools")]
+        assert!(prompt.contains("Doing tasks"));
         assert!(prompt.contains("<env>")); // environment block
     }
 
@@ -281,7 +292,9 @@ mod tests {
 
         // CLI Identity MUST be the first line
         assert!(prompt.starts_with(CLI_IDENTITY));
-        assert!(prompt.contains("Doing tasks")); // coding instructions
+        // Coding instructions are only injected under `coding-tools`.
+        #[cfg(feature = "coding-tools")]
+        assert!(prompt.contains("Doing tasks"));
         assert!(prompt.contains("<env>")); // environment block
     }
 

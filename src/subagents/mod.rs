@@ -41,10 +41,11 @@ mod index;
 #[cfg(feature = "file-resources")]
 mod index_loader;
 
-pub use builtin::{
-    bash_subagent, builtin_subagents, explore_subagent, find_builtin, general_purpose_subagent,
-    plan_subagent,
-};
+#[cfg(feature = "coding-tools")]
+pub use builtin::bash_subagent;
+pub use builtin::{builtin_subagents, find_builtin, general_purpose_subagent};
+#[cfg(feature = "local-fs")]
+pub use builtin::{explore_subagent, plan_subagent};
 pub use index::SubagentIndex;
 #[cfg(feature = "file-resources")]
 pub use index_loader::{SubagentFrontmatter, SubagentIndexLoader};

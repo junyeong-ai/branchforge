@@ -439,9 +439,7 @@ mod tests {
             .await
             .unwrap();
 
-        let context = ExecutionContext::try_permissive()
-            .expect("failed to create permissive context")
-            .with_session_manager(manager);
+        let context = ExecutionContext::empty().with_session_manager(manager);
         let tool = GraphHistoryTool;
         let result = tool
             .execute(
@@ -469,9 +467,7 @@ mod tests {
             .await
             .unwrap();
 
-        let context = ExecutionContext::try_permissive()
-            .expect("failed to create permissive context")
-            .with_session_manager(manager);
+        let context = ExecutionContext::empty().with_session_manager(manager);
         let tool = GraphHistoryTool;
         let result = tool
             .execute(
@@ -499,8 +495,7 @@ mod tests {
             .await
             .unwrap();
 
-        let context = ExecutionContext::try_permissive()
-            .expect("failed to create permissive context")
+        let context = ExecutionContext::empty()
             .with_session_manager(manager)
             .with_session_scope(
                 SessionAccessScope::default()
@@ -534,9 +529,7 @@ mod tests {
     #[tokio::test]
     async fn graph_history_tool_rejects_invalid_session_id() {
         let manager = SessionManager::in_memory();
-        let context = ExecutionContext::try_permissive()
-            .expect("failed to create permissive context")
-            .with_session_manager(manager);
+        let context = ExecutionContext::empty().with_session_manager(manager);
         let tool = GraphHistoryTool;
         let result = tool
             .execute(
