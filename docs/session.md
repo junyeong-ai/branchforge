@@ -5,7 +5,7 @@ Sessions are modeled as graphs, not flat chat transcripts.
 ## Core Model
 
 - `SessionGraph` is canonical state.
-- `Session.messages` is a compatibility projection.
+- Message lists are derived on demand via `Session::current_branch_messages()` — there is no cached `messages` field.
 - Branching, replay, export, bookmarks, and checkpoints operate on graph state.
 - Sessions can be scoped by `tenant_id` and owned by `principal_id`.
 

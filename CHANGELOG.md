@@ -5,6 +5,176 @@ All notable changes to branchforge are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.0] — 2026-04-10 — Native structured outputs across all codecs
+
+This release ships **native JSON-schema structured outputs on every
+codec** through a single shared preparation pipeline
+(`src/client/schema/`). The prior 0.8 Anthropic Messages and Bedrock
+Converse "tool-based emulation" gap is closed: both now advertise and
+honor `structured_output.json_schema: Native`, matching the GA rollout
+upstream (Anthropic Claude API + AWS Bedrock, as of 2026-04-10).
+
+### Added
+
+- **`src/client/schema/`** — new five-file module (`mod.rs`,
+  `policy.rs`, `walker.rs`, `cycles.rs`, `keywords.rs`). Public API:
+  `SchemaPolicy`, `PreparedSchema`, `prepare_schema`, `schema_for<T>`,
+  `prepare_tool_schema`, `warn_dropped_metadata`, `ObjectClosure`,
+  `RequiredHandling`, `MinItemsPolicy`. Adding a new provider is
+  additive — define a new `const fn` factory on `SchemaPolicy` and
+  the walker handles it with no core changes.
+- **`SchemaPolicy::lenient()` / `::openai_strict()` / `::anthropic()` /
+  `::gemini()` / `::bedrock_converse()`** — five `const fn` factories
+  covering every currently-supported codec. `lenient()` is the
+  baseline used for non-strict tool schemas across every codec;
+  `gemini()` is defined as an alias of `lenient()`.
+- **Tool schemas share the same pipeline** — every codec's
+  `encode_tool_definition` now runs `tool.parameters` through
+  `prepare_tool_schema(schema, policy, tool.strict, &tool.name)`
+  before embedding it in the wire envelope. This fixes the Gemini
+  `$schema` bug uniformly (the walker's unconditional metadata strip
+  catches schemars-generated `$schema` on every tool schema) and
+  enables Anthropic strict tool use (wire-level `"strict": true`
+  alongside the constrained schema subset).
+- **`ir::JsonSchemaSpec`** — new IR struct carrying `schema` plus
+  optional `name`, `description`, and `strict` fields. Builder API:
+  `JsonSchemaSpec::new(value).with_name("...").with_description("...")
+  .with_strict(true)`. Type-driven constructor:
+  `JsonSchemaSpec::from_type::<T: schemars::JsonSchema>()`.
+- **`ModelResponse::json::<T: DeserializeOwned>()`** — decoder
+  convenience with finish-reason-aware errors (distinguishes refusal,
+  length truncation, and parse failures).
+- **`examples/structured_output.rs`** — end-to-end demo using a
+  `Contact` struct → `JsonSchemaSpec::from_type::<Contact>` → send →
+  `response.json::<Contact>()`. Works with any provider via
+  `BRANCHFORGE_PROVIDER` env var.
+- **Schema walker correctness features**: schema-valued vs literal
+  keyword distinction (protects `const`/`enum`/`default` internals),
+  format allowlist (strips schemars-generated `uint64`/`int32`/etc.
+  for Anthropic), `MAX_DEPTH = 500` recursion guard, DFS-based cycle
+  detection over `$ref` graphs, auto-fill warning for OpenAI strict
+  mode.
+- **`tests/codec_contract.rs::capability_honesty_response_format`** —
+  matrix is doubled to cover both `JsonSchema` and `JsonObject` across
+  all five codecs. Emulated-branch assertion is flexibilized to
+  `starts_with("response_format")` so variant-specific capability
+  strings (`response_format.json_object`, `response_format.json_schema`)
+  all match.
+
+### Changed (BREAKING)
+
+- **`ResponseFormat::JsonSchema`** is now a tuple variant wrapping
+  `JsonSchemaSpec`. The prior struct variant with `{ name: String,
+  schema: Value, strict: bool }` is gone. Migration:
+
+  ```rust
+  // Before (0.8):
+  ResponseFormat::JsonSchema {
+      name: "Person".into(),
+      schema: json!({...}),
+      strict: true,
+  }
+
+  // After (0.9):
+  ResponseFormat::JsonSchema(JsonSchemaSpec::new(json!({...}))
+      .with_name("Person")
+      .with_strict(true))
+  // Or, type-driven:
+  ResponseFormat::JsonSchema(JsonSchemaSpec::from_type::<Person>())
+  ```
+
+- **`AnthropicMessagesCodec.structured_output.json_schema`** flipped
+  from `Emulated` to `Native`; `strict` flipped from `false` to
+  `true` (Anthropic is always grammar-constrained). The codec now
+  emits `output_config.format` natively on the Messages API wire and
+  no longer produces a `CapabilityEmulated { capability:
+  "response_format" }` warning for `JsonSchema` inputs. `JsonObject`
+  has no portable mapping on Anthropic and emits
+  `CapabilityEmulated { capability: "response_format.json_object" }`
+  instead.
+- **`BedrockConverseCodec.structured_output.json_schema`** flipped
+  from `Emulated` to `Native`; `strict` flipped from `false` to
+  `true`. The codec emits
+  `outputConfig.textFormat.structure.jsonSchema` at the top level of
+  the Converse request body, with the schema embedded as a JSON
+  **string** (`serde_json::to_string`-encoded — unique to this
+  codec). Supports native `name` and `description` wire fields.
+- **`openai_chat.rs` / `openai_responses.rs`** now use the shared
+  `prepare_schema(.., openai_strict())` pipeline and propagate lossy
+  warnings. Previously, `transform_for_strict` silently stripped
+  unsupported keywords like `minimum`/`maxLength`; callers now see a
+  `LossyEncode` warning for each stripped keyword. **This is a
+  retroactive capability honesty fix** — no wire behaviour changes,
+  only the warning surface.
+- **`gemini_generate.rs`** now runs schemas through
+  `prepare_schema(.., gemini())` before wire submission. Previously
+  the codec passed the user's schema through unchanged, meaning
+  recursive schemas and external `$ref` reached Gemini and caused
+  400 errors with no locally-produced warning. **This is a fix for a
+  latent bug** that was silently violating capability honesty.
+- **Anthropic codec preemptive prefilling check**: setting
+  `response_format` on a request whose last message is
+  `Role::Assistant` (Anthropic's message prefilling pattern) now
+  returns `Error::InvalidRequest` at encode time instead of letting
+  the API return a 400. Anthropic explicitly documents these two
+  features as incompatible.
+- **`tests/codec_contract.rs::capability_honesty_response_format`**
+  assertion on `Emulated` codecs is flexibilized from `capability ==
+  "response_format"` to `capability.starts_with("response_format")`
+  so variant-specific naming is forward-compatible.
+
+### Removed (BREAKING)
+
+- **`client::transform_for_strict`** (`src/client/schema.rs`) — the
+  old single-function API. Replacement:
+  `prepare_schema(value, &SchemaPolicy::openai_strict(), "response_format.schema").value`.
+- **`client::strict_schema<T>`** — the old schemars helper.
+  Replacement: `schema_for::<T>(&SchemaPolicy::openai_strict()).value`
+  (note: `schema_for` hardcodes `"response_format.schema"` as the
+  attribution prefix internally; use `prepare_schema` directly if
+  you need a different source path).
+- **`src/client/schema.rs`** (the single-file module) — replaced by
+  `src/client/schema/` directory with five focused files.
+
+### Fixed
+
+- **Gemini silent raw-schema passthrough** — `gemini_generate.rs`
+  previously passed `response_format.schema` to the wire without any
+  validation, so recursive or externally-referenced schemas would
+  reach Gemini and return a 400 with no locally-generated warning.
+  The new walker rejects cycles and external `$ref` up front.
+- **OpenAI strict-mode silent keyword stripping** — both OpenAI
+  codecs previously stripped `minimum`/`maximum`/`minLength`/etc.
+  without telling the caller. Now each strip emits a
+  `ModelWarning::LossyEncode` pointing at the JSON pointer where the
+  keyword was removed.
+- **`schemars` → Anthropic compatibility** — `schemars::schema_for!`
+  generates OpenAPI-style format hints like `"uint64"` and `"int32"`
+  for Rust integer types, which Anthropic does not accept. The new
+  `SchemaPolicy::anthropic()` factory carries a format allowlist and
+  strips non-allowlisted formats at walk time, unblocking
+  `JsonSchemaSpec::from_type::<T>()` for typical Rust structs.
+- **`const`/`enum`/`default` inner keywords** — the walker is now
+  schema-aware, recursing only into schema-valued keyword children
+  (`properties.*`, `items`, `allOf[]`, etc.) and leaving literal
+  values verbatim. A `const: {"minimum": 5}` previously had its
+  `minimum` key stripped as if it were a constraint.
+
+### Scope boundaries
+
+- **Agent layer integration** is out of scope for this release.
+  `agent::RequestBuilder::build` still sets `response_format: None`.
+  Users who want structured outputs from `Agent::query` should build
+  a `ModelRequest` directly and call `client.send(&request)`.
+- **Strict tool use is now implemented on Anthropic.**
+  `AnthropicMessagesCodec.tool_calls.strict_schema` flipped from
+  `false` to `true`, matching OpenAI Chat and OpenAI Responses.
+  Gemini and Bedrock still pass `is_strict: false` because their
+  wire format has no tool-level strict flag — setting
+  `ToolDefinition.strict = true` on those codecs now emits a
+  `ModelWarning::LossyEncode { field: "tool.<name>.strict", … }`
+  for capability honesty.
+
 ## [Unreleased] — Phase 1b complete
 
 This release closes the Phase 1b refactor that moves the agent runtime to a
