@@ -7,26 +7,56 @@ use rust_decimal::Decimal;
 use super::pricing::{PricingTable, global_pricing_table};
 use super::{COST_SCALE_FACTOR, cost_to_bits};
 
-/// Action to take when budget is exceeded.
+/// Policy for what to do when a [`BudgetTracker`] (or
+/// [`super::TenantBudget`]) detects an over-budget condition.
+///
+/// # Two-stage application
+///
+/// The agent loop applies this policy in **two stages** per
+/// iteration:
+///
+/// 1. **Pre-build (model swap)** — at the top of the iteration the
+///    runtime calls `tracker.should_fallback()` and, if it returns
+///    `Some(model_id)`, swaps the request's model id to the
+///    fallback before building the IR request. This is the only
+///    place the `Fallback` variant has runtime effect.
+/// 2. **Pre-send (preflight)** — after the request is built, the
+///    runtime runs the budget preflight against the (possibly
+///    already-swapped) request. The `Stop` policy fails the call,
+///    `Warn` logs and proceeds, and `Fallback` is a no-op here
+///    because the swap already happened in stage 1.
+///
+/// This split is intentional: the model swap must happen before
+/// request construction (it changes which pricing table the
+/// preflight uses), but the budget enforcement decision must
+/// happen after construction (it sees the final estimate).
 #[derive(Debug, Clone, Default, PartialEq)]
-pub enum OnExceed {
-    /// Stop execution before the next API call.
+pub enum BudgetExceedPolicy {
+    /// Stop execution before the next API call. The default —
+    /// fail-fast on budget overruns.
     #[default]
-    StopBeforeNext,
-    /// Log a warning and continue execution.
-    WarnAndContinue,
-    /// Switch to a cheaper model when budget is exceeded.
-    FallbackModel(String),
+    Stop,
+    /// Log a warning and continue execution. Useful for
+    /// observability-first deployments where budget is a soft
+    /// limit.
+    Warn,
+    /// Swap to a cheaper model when budget is exceeded. The
+    /// fallback model id is captured here at type level so the
+    /// invariant "fallback policy carries a model id" is enforced
+    /// by the compiler.
+    Fallback(String),
 }
 
-impl OnExceed {
+impl BudgetExceedPolicy {
+    /// Construct a `Fallback` policy with the given model id.
     pub fn fallback(model: impl Into<String>) -> Self {
-        Self::FallbackModel(model.into())
+        Self::Fallback(model.into())
     }
 
+    /// Returns the fallback model id, if this policy is `Fallback`.
     pub fn fallback_model(&self) -> Option<&str> {
         match self {
-            Self::FallbackModel(model) => Some(model),
+            Self::Fallback(model) => Some(model),
             _ => None,
         }
     }
@@ -36,7 +66,7 @@ impl OnExceed {
 pub struct BudgetTracker {
     max_cost_usd: Option<Decimal>,
     used_cost_bits: AtomicU64,
-    on_exceed: OnExceed,
+    on_exceed: BudgetExceedPolicy,
     pricing: &'static PricingTable,
 }
 
@@ -45,7 +75,7 @@ impl Default for BudgetTracker {
         Self {
             max_cost_usd: None,
             used_cost_bits: AtomicU64::new(0),
-            on_exceed: OnExceed::default(),
+            on_exceed: BudgetExceedPolicy::default(),
             pricing: global_pricing_table(),
         }
     }
@@ -70,7 +100,7 @@ impl BudgetTracker {
         }
     }
 
-    pub fn on_exceed(mut self, on_exceed: OnExceed) -> Self {
+    pub fn on_exceed(mut self, on_exceed: BudgetExceedPolicy) -> Self {
         self.on_exceed = on_exceed;
         self
     }
@@ -114,7 +144,7 @@ impl BudgetTracker {
     }
 
     pub fn should_stop(&self) -> bool {
-        matches!(self.on_exceed, OnExceed::StopBeforeNext)
+        matches!(self.on_exceed, BudgetExceedPolicy::Stop)
             && matches!(self.check(), BudgetStatus::Exceeded { .. })
     }
 
@@ -135,8 +165,44 @@ impl BudgetTracker {
             .map(|max| (max - self.used_cost_usd_internal()).max(Decimal::ZERO))
     }
 
-    pub fn on_exceed_action(&self) -> &OnExceed {
+    pub fn on_exceed_action(&self) -> &BudgetExceedPolicy {
         &self.on_exceed
+    }
+
+    /// Compute the cost of an estimated-token request against this
+    /// tracker's pricing table. Pure — does not mutate the tracker.
+    ///
+    /// Used by the preflight path to decide whether a request would
+    /// push `used + estimated_cost` past the configured limit before
+    /// the request is sent.
+    pub fn estimate_cost(&self, model: &str, estimate: super::RequestTokenEstimate) -> Decimal {
+        let pricing = self.pricing.get(model);
+        pricing.calculate_raw(estimate.input, estimate.output, 0, 0)
+    }
+
+    /// Check whether adding `estimated_cost` to the current usage
+    /// would exceed the tracker's limit.
+    ///
+    /// Returns:
+    /// - `None` if the tracker is unlimited.
+    /// - `Some(Ok(projected))` if the call is within budget. The
+    ///   projected total (`used + estimate`) is returned for
+    ///   telemetry.
+    /// - `Some(Err((used, limit)))` if the call would overrun.
+    ///   Callers translate this into [`crate::Error::BudgetExceeded`]
+    ///   when `on_exceed_action()` is [`BudgetExceedPolicy::Stop`].
+    pub fn project(
+        &self,
+        estimated_cost: Decimal,
+    ) -> Option<std::result::Result<Decimal, (Decimal, Decimal)>> {
+        let used = self.used_cost_usd_internal();
+        let max = self.max_cost_usd?;
+        let projected = used + estimated_cost;
+        if projected > max {
+            Some(Err((used, max)))
+        } else {
+            Some(Ok(projected))
+        }
     }
 }
 
@@ -221,7 +287,7 @@ mod tests {
 
     #[test]
     fn test_warn_and_continue() {
-        let tracker = BudgetTracker::new(dec!(1)).on_exceed(OnExceed::WarnAndContinue);
+        let tracker = BudgetTracker::new(dec!(1)).on_exceed(BudgetExceedPolicy::Warn);
 
         let usage = Usage {
             input_tokens: 1_000_000,

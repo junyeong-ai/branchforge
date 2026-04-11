@@ -7,7 +7,7 @@ use dashmap::DashMap;
 use rust_decimal::Decimal;
 
 use super::pricing::global_pricing_table;
-use super::tracker::OnExceed;
+use super::tracker::BudgetExceedPolicy;
 use super::{COST_SCALE_FACTOR, cost_to_bits};
 
 #[derive(Debug)]
@@ -15,7 +15,7 @@ pub struct TenantBudget {
     pub tenant_id: String,
     max_cost_usd: Decimal,
     used_cost_usd: AtomicU64,
-    on_exceed: OnExceed,
+    on_exceed: BudgetExceedPolicy,
 }
 
 impl TenantBudget {
@@ -24,11 +24,11 @@ impl TenantBudget {
             tenant_id: tenant_id.into(),
             max_cost_usd,
             used_cost_usd: AtomicU64::new(0),
-            on_exceed: OnExceed::StopBeforeNext,
+            on_exceed: BudgetExceedPolicy::Stop,
         }
     }
 
-    pub fn on_exceed(mut self, on_exceed: OnExceed) -> Self {
+    pub fn on_exceed(mut self, on_exceed: BudgetExceedPolicy) -> Self {
         self.on_exceed = on_exceed;
         self
     }
@@ -58,15 +58,31 @@ impl TenantBudget {
     }
 
     pub fn should_stop(&self) -> bool {
-        matches!(self.on_exceed, OnExceed::StopBeforeNext) && self.is_exceeded()
+        matches!(self.on_exceed, BudgetExceedPolicy::Stop) && self.is_exceeded()
     }
 
     pub fn max_cost_usd(&self) -> Decimal {
         self.max_cost_usd
     }
 
-    pub fn on_exceed_action(&self) -> &OnExceed {
+    pub fn on_exceed_action(&self) -> &BudgetExceedPolicy {
         &self.on_exceed
+    }
+
+    /// Check whether adding `estimated_cost` to the tenant's current
+    /// usage would exceed its limit. See
+    /// [`crate::budget::BudgetTracker::project`] for the contract.
+    pub fn project(
+        &self,
+        estimated_cost: Decimal,
+    ) -> std::result::Result<Decimal, (Decimal, Decimal)> {
+        let used = self.used_cost_usd();
+        let projected = used + estimated_cost;
+        if projected > self.max_cost_usd {
+            Err((used, self.max_cost_usd))
+        } else {
+            Ok(projected)
+        }
     }
 }
 
@@ -95,7 +111,7 @@ impl TenantBudgetManager {
         &self,
         tenant_id: impl Into<String>,
         max_cost_usd: Decimal,
-        on_exceed: OnExceed,
+        on_exceed: BudgetExceedPolicy,
     ) -> Arc<TenantBudget> {
         let tenant_id = tenant_id.into();
         let budget =

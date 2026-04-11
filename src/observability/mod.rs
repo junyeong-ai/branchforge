@@ -13,7 +13,7 @@
 //! Enable the `otel` feature to export traces and metrics:
 //!
 //! ```toml
-//! branchforge = { version = "0.2", features = ["otel"] }
+//! branchforge = { version = "0.9", features = ["otel"] }
 //! ```
 //!
 //! ```rust,ignore
