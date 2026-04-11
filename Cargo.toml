@@ -1,6 +1,6 @@
 [package]
 name = "branchforge"
-version = "0.8.0"
+version = "0.9.0"
 edition = "2024"
 rust-version = "1.94"
 license = "MIT"
@@ -50,8 +50,9 @@ regex = "1"
 url = "2"
 urlencoding = "2"
 
-# Security sandbox - TOCTOU-safe file operations, process limits
-rustix = { version = "1.1", features = ["fs", "process"] }
+# Layer 2a (local-fs) — TOCTOU-safe file operations, process rlimits.
+# Pulled in by the `local-fs` feature. Transitively required by `coding-tools`.
+rustix = { version = "1.1", features = ["fs", "process"], optional = true }
 
 # Bash command analysis - AST parsing
 tree-sitter = { version = "0.26", optional = true }
@@ -127,11 +128,40 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 rustls = { version = "0.23", default-features = false, features = ["ring"] }
 
 [features]
-default = ["coding-tools"]
+# BranchForge is a general-purpose Agent SDK. The default feature set is
+# intentionally minimal — `cargo add branchforge` yields a pure Layer 1
+# build that runs chat / customer-support / server-side automation agents
+# over any of the five built-in codecs (Anthropic Messages, OpenAI Chat,
+# OpenAI Responses, Gemini, Bedrock) without pulling in filesystem, shell,
+# or cloud-provider dependencies.
+#
+# Users who want a local filesystem agent (research, knowledge management,
+# data analysis) add `features = ["local-fs"]`.
+#
+# Users who want a full coding agent add `features = ["coding-tools"]`
+# (which transitively enables `local-fs`).
+#
+# See `docs/architecture/layering.md` for the layer contract.
+default = ["anthropic-direct"]
 
-# Coding-agent tools (Read, Write, Edit, Glob, Grep, Bash, KillShell)
-# Also enables coding-domain system prompts and bash AST analysis
-coding-tools = ["tree-sitter", "tree-sitter-bash"]
+# Meta-feature: signals intent to use the Anthropic Messages direct API.
+# Pulls in no extra dependencies — the codec and DirectTransport are
+# already compiled into Layer 1 unconditionally. This exists so
+# `cargo add branchforge` produces a named feature set that communicates
+# "ready to call Anthropic out of the box" rather than a bare `default = []`.
+anthropic-direct = []
+
+# Layer 2a — Local filesystem tools for general-purpose local agents
+# (research, knowledge-management, data-analysis, documentation).
+# Enables Read/Write/Edit/Glob/Grep, Workspace, SecureFs (TOCTOU-safe file ops),
+# and path-based sandboxing (Landlock/Seatbelt). No shell execution.
+# Dependencies: rustix for openat+O_NOFOLLOW and setrlimit plumbing.
+local-fs = ["dep:rustix"]
+
+# Layer 2b — Coding agent tools (Bash, KillShell, ProcessScheduler) with
+# AST-level bash safety analysis and process-level resource limits.
+# Depends on `local-fs` for filesystem access primitives.
+coding-tools = ["local-fs", "tree-sitter", "tree-sitter-bash"]
 
 # Agent scheduling and remote triggers
 scheduling = ["cron"]
@@ -184,6 +214,7 @@ required-features = ["cli-auth", "file-resources"]
 [[example]]
 name = "all_tools_test"
 path = "examples/all_tools_test.rs"
+required-features = ["coding-tools"]
 
 [[example]]
 name = "server_tools"
@@ -193,6 +224,7 @@ required-features = ["cli-auth", "file-resources"]
 [[example]]
 name = "sandbox_verification"
 path = "examples/sandbox_verification.rs"
+required-features = ["coding-tools"]
 
 [[example]]
 name = "live_integration_test"
@@ -203,6 +235,45 @@ required-features = ["cli-auth", "coding-tools", "scheduling"]
 name = "deep_integration_test"
 path = "examples/deep_integration_test.rs"
 required-features = ["cli-auth", "coding-tools"]
+
+[[example]]
+name = "structured_output"
+path = "examples/structured_output.rs"
+
+# Range-of-scope examples — one per deployment topology the SDK supports.
+# Each declares its exact feature requirements so that `cargo build
+# --examples --no-default-features [--features ...]` validates that the
+# layering contract holds end-to-end (see C9 / docs/architecture/layering.md).
+
+# Pure Layer 1 — customer support bot with a custom knowledge-base tool.
+# Runs on the default `anthropic-direct` feature set only; no filesystem,
+# no shell, no cloud SDK.
+[[example]]
+name = "customer_support_agent"
+path = "examples/customer_support_agent.rs"
+
+# Pure Layer 1 — capability matrix + optional live execution across the
+# five built-in codecs. Demonstrates that provider diversity is a
+# Layer 1 facility: no feature flags needed.
+[[example]]
+name = "multi_provider_router"
+path = "examples/multi_provider_router.rs"
+
+# Layer 2a (local-fs) — research agent over a markdown notes directory.
+# Uses Read/Glob/Grep without ever touching Bash. Good fit for knowledge
+# workers, second-brain tools, and literature review.
+[[example]]
+name = "research_agent"
+path = "examples/research_agent.rs"
+required-features = ["local-fs"]
+
+# Layer 2a (local-fs) — data analysis agent over a mixed CSV/JSON/JSONL
+# dataset. Demonstrates that local-fs is genuinely useful for non-coding
+# work; no shell execution is involved.
+[[example]]
+name = "data_analysis_agent"
+path = "examples/data_analysis_agent.rs"
+required-features = ["local-fs"]
 
 [package.metadata.docs.rs]
 all-features = true
