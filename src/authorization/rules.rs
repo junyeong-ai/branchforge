@@ -164,78 +164,56 @@ pub struct ToolRule {
 }
 
 impl ToolRule {
-    pub fn allow(pattern: impl Into<String>) -> Self {
-        Self::new(pattern, ToolRuleDecision::Allow)
+    /// Build a rule from a DSL string with the supplied default
+    /// decision (used when the string does not include an explicit
+    /// `allow` / `deny` / `ask` keyword).
+    ///
+    /// Accepts the canonical rule grammar:
+    ///
+    /// ```text
+    /// rule       := decision? tool ( "(" subject ")" )?
+    /// decision   := "allow" | "deny" | "ask"
+    /// subject    := bare | glob | prefix_wild | domain
+    /// ```
+    ///
+    /// See [`super::dsl`] for the full grammar and subject classifier.
+    /// **Panics** on a malformed rule string — call
+    /// [`super::dsl::parse_to_tool_rule`] directly when handling
+    /// runtime-generated rule strings that may be invalid.
+    pub fn from_dsl(rule_str: &str, default_decision: ToolRuleDecision) -> Self {
+        super::dsl::parse_to_tool_rule(rule_str, default_decision)
+            .unwrap_or_else(|e| panic!("invalid permission rule `{rule_str}`: {e}"))
     }
 
-    pub fn deny(pattern: impl Into<String>) -> Self {
-        Self::new(pattern, ToolRuleDecision::Deny)
+    /// Convenience: parse `rule_str` and apply [`ToolRuleDecision::Allow`]
+    /// when the DSL string does not specify an explicit decision.
+    pub fn allow(rule_str: &str) -> Self {
+        Self::from_dsl(rule_str, ToolRuleDecision::Allow)
     }
 
-    fn new(pattern: impl Into<String>, decision: ToolRuleDecision) -> Self {
+    /// Convenience: parse `rule_str` and apply [`ToolRuleDecision::Deny`]
+    /// when the DSL string does not specify an explicit decision.
+    pub fn deny(rule_str: &str) -> Self {
+        Self::from_dsl(rule_str, ToolRuleDecision::Deny)
+    }
+
+    /// Crate-internal raw constructor used by the DSL parser. Bypasses
+    /// the DSL grammar — callers must already have parsed/validated
+    /// the pattern.
+    pub(crate) fn new_internal(
+        pattern: impl Into<String>,
+        input_pattern: Option<String>,
+        decision: ToolRuleDecision,
+    ) -> Self {
         let pattern = pattern.into();
         let anchored = anchor_pattern(&pattern);
         let compiled = Regex::new(&anchored).ok();
         Self {
             pattern,
-            input_pattern: None,
+            input_pattern,
             decision,
             reason: None,
             compiled,
-        }
-    }
-
-    pub fn from_scoped(scoped: &str, decision: ToolRuleDecision) -> Self {
-        if let Some((tool, scope)) = Self::parse_scope(scoped) {
-            let anchored = anchor_pattern(&tool);
-            let compiled = Regex::new(&anchored).ok();
-            Self {
-                pattern: tool,
-                input_pattern: Some(scope),
-                decision,
-                reason: None,
-                compiled,
-            }
-        } else {
-            Self::new(scoped, decision)
-        }
-    }
-
-    pub fn allow_scoped(scoped: &str) -> Self {
-        Self::from_scoped(scoped, ToolRuleDecision::Allow)
-    }
-
-    pub fn deny_scoped(scoped: &str) -> Self {
-        Self::from_scoped(scoped, ToolRuleDecision::Deny)
-    }
-
-    /// Create a rule from a pattern string, auto-detecting scoped patterns like `Bash(git:*)`.
-    pub fn allow_pattern(pattern: impl Into<String>) -> Self {
-        let p = pattern.into();
-        if p.contains('(') {
-            Self::allow_scoped(&p)
-        } else {
-            Self::allow(p)
-        }
-    }
-
-    /// Create a deny rule from a pattern string, auto-detecting scoped patterns.
-    pub fn deny_pattern(pattern: impl Into<String>) -> Self {
-        let p = pattern.into();
-        if p.contains('(') {
-            Self::deny_scoped(&p)
-        } else {
-            Self::deny(p)
-        }
-    }
-
-    fn parse_scope(s: &str) -> Option<(String, String)> {
-        let start = s.find('(')?;
-        let end = s.rfind(')')?;
-        if start < end {
-            Some((s[..start].to_string(), s[start + 1..end].to_string()))
-        } else {
-            None
         }
     }
 
@@ -515,13 +493,13 @@ impl ToolPolicyBuilder {
         Self::default()
     }
 
-    pub fn allow(mut self, pattern: impl Into<String>) -> Self {
-        self.policy.rules.push(ToolRule::allow_pattern(pattern));
+    pub fn allow(mut self, pattern: &str) -> Self {
+        self.policy.rules.push(ToolRule::allow(pattern));
         self
     }
 
-    pub fn deny(mut self, pattern: impl Into<String>) -> Self {
-        self.policy.rules.push(ToolRule::deny_pattern(pattern));
+    pub fn deny(mut self, pattern: &str) -> Self {
+        self.policy.rules.push(ToolRule::deny(pattern));
         self
     }
 
@@ -578,7 +556,7 @@ mod tests {
 
     #[test]
     fn test_scoped_rule() {
-        let rule = ToolRule::allow_scoped("Bash(git:*)");
+        let rule = ToolRule::allow("Bash(git:*)");
         assert_eq!(rule.pattern, "Bash");
         assert_eq!(rule.input_pattern, Some("git:*".to_string()));
     }

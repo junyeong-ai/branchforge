@@ -144,23 +144,85 @@ impl ToolRegistry {
         progress_tx: Option<super::context::ProgressSender>,
         cancel_token: Option<CancellationToken>,
     ) -> ToolResult {
+        use tracing::{Instrument, Level, field, span};
+
+        let tool_start = std::time::Instant::now();
+        // Per-tool-call observability span. Stable attribute names
+        // (`tool.name`, `tool.duration_ms`, `tool.error`,
+        // `error.category`) so downstream OTel / Honeycomb / Grafana
+        // dashboards can group by tool name without parsing text logs.
+        // Attributes start `Empty` and are recorded as the call
+        // progresses — same pattern as `ApiCallSpan`.
+        let tool_span = span!(
+            Level::INFO,
+            "tool.execute",
+            otel.name = "tool.execute",
+            "tool.name" = name,
+            "tool.duration_ms" = field::Empty,
+            "tool.error" = field::Empty,
+            "error.category" = field::Empty,
+            "otel.status_code" = field::Empty,
+        );
+
+        let result = self
+            .execute_with_progress_inner(name, input, progress_tx, cancel_token)
+            .instrument(tool_span.clone())
+            .await;
+
+        let duration_ms = tool_start.elapsed().as_millis() as u64;
+        tool_span.record("tool.duration_ms", duration_ms);
+        if result.is_error() {
+            tool_span.record("tool.error", true);
+            tool_span.record("otel.status_code", "ERROR");
+            // Coarse category: every tool-level failure rolls up to
+            // `ToolRuntime` in the FailureCategory vocabulary. A more
+            // fine-grained classification (timeout, authorization
+            // denied, unknown tool) can be derived from the ToolResult
+            // variant in a future span-to-metric bridge.
+            tool_span.record(
+                "error.category",
+                crate::FailureCategory::ToolRuntime.as_str(),
+            );
+        }
+
+        result
+    }
+
+    async fn execute_with_progress_inner(
+        &self,
+        name: &str,
+        input: serde_json::Value,
+        progress_tx: Option<super::context::ProgressSender>,
+        cancel_token: Option<CancellationToken>,
+    ) -> ToolResult {
         let tool = match self.tools.get(name) {
             Some(t) => Arc::clone(t.value()),
             None => return ToolResult::unknown_tool(name),
         };
 
         // Security validation first — catches structural violations
-        // regardless of tool policy
+        // regardless of tool policy. This entire block is Layer 2a
+        // (filesystem security) and is only compiled when the relevant
+        // feature is active. In pure Layer 1 builds no filesystem tools
+        // exist, so there is nothing to validate.
+        #[cfg(feature = "local-fs")]
         if let Err(e) = self.env.context().validate_security(name, &input) {
             return ToolResult::security_error(e);
         }
 
-        let decision = self.env.context().check_tool_policy(name, &input);
-        if decision.is_denied() {
-            return ToolResult::authorization_denied(name, decision.reason());
+        #[cfg(feature = "local-fs")]
+        {
+            let decision = self.env.context().check_tool_policy(name, &input);
+            if decision.is_denied() {
+                return ToolResult::authorization_denied(name, decision.reason());
+            }
         }
 
+        #[cfg(feature = "local-fs")]
         let limits = self.env.context().limits_for(name);
+        #[cfg(not(feature = "local-fs"))]
+        let limits = crate::authorization::ToolLimits::default();
+
         let timeout_ms = limits.timeout_ms.unwrap_or(DEFAULT_TOOL_TIMEOUT_MS);
 
         // Create a context with progress channel and cancel token if provided
@@ -264,6 +326,7 @@ impl Default for ToolRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(feature = "coding-tools")]
     use crate::tools::surface::ToolSurface;
 
     #[test]

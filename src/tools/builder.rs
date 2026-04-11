@@ -25,6 +25,7 @@ pub struct ToolRegistryBuilder {
     skill_executor: Option<crate::skills::SkillRuntime>,
     subagent_registry: Option<IndexRegistry<SubagentIndex>>,
     policy: Option<ToolPolicy>,
+    #[cfg(feature = "local-fs")]
     sandbox_config: Option<crate::security::SandboxConfig>,
     tool_state: Option<ToolState>,
     session_id: Option<SessionId>,
@@ -50,6 +51,7 @@ impl ToolRegistryBuilder {
             skill_executor: None,
             subagent_registry: None,
             policy: None,
+            #[cfg(feature = "local-fs")]
             sandbox_config: None,
             tool_state: None,
             session_id: None,
@@ -104,6 +106,7 @@ impl ToolRegistryBuilder {
         self
     }
 
+    #[cfg(feature = "local-fs")]
     pub fn sandbox_config(mut self, config: crate::security::SandboxConfig) -> Self {
         self.sandbox_config = Some(config);
         self
@@ -146,23 +149,45 @@ impl ToolRegistryBuilder {
             .working_dir
             .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
 
-        let sandbox_config = self
-            .sandbox_config
-            .unwrap_or_else(|| crate::security::SandboxConfig::disabled().working_dir(wd.clone()));
+        // Layer 2a: when the `local-fs` feature is active we construct a
+        // `SecurityContext` rooted at `wd` and use it to seed the execution
+        // context. In pure Layer 1 builds no security context exists and we
+        // fall back to `ExecutionContext::empty()` — the built ToolRegistry
+        // then only carries Layer 1 tools (Plan/TodoWrite/GraphHistory/Skill),
+        // which is the intended behaviour.
+        #[cfg(feature = "local-fs")]
+        let mut context = {
+            let sandbox_config = self.sandbox_config.unwrap_or_else(|| {
+                crate::security::SandboxConfig::disabled().working_dir(wd.clone())
+            });
 
-        let security = crate::security::SecurityContext::builder()
-            .root(&wd)
-            .sandbox(sandbox_config)
-            .build()
-            .map(|mut security| {
-                security.policy = crate::security::SecurityPolicy::new(tool_policy);
-                security
-            })
-            .or_else(|_| crate::security::SecurityContext::try_permissive())
-            .expect("failed to create security context");
+            let security = crate::security::SecurityContext::builder()
+                .root(&wd)
+                .sandbox(sandbox_config)
+                .build()
+                .map(|mut security| {
+                    security.policy = crate::security::SecurityPolicy::new(tool_policy.clone());
+                    security
+                })
+                .or_else(|_| crate::security::SecurityContext::try_permissive())
+                .expect("failed to create security context");
+
+            ExecutionContext::new(security)
+        };
+        #[cfg(not(feature = "local-fs"))]
+        let mut context = ExecutionContext::empty();
+        // `tool_policy` is consumed by the security context in local-fs builds;
+        // in pure Layer 1 we currently have nowhere to put it until the tool
+        // policy landing site becomes an extension too (Phase 2).
+        #[cfg(not(feature = "local-fs"))]
+        let _ = tool_policy;
+
+        // Always attach the workspace as an extension regardless of feature —
+        // Layer 1 tools that consult it (e.g. for generating hook cwd) work
+        // uniformly across builds.
+        context.insert_extension(crate::Workspace::new(wd.clone()));
 
         let session_id = self.session_id.unwrap_or_default();
-        let mut context = ExecutionContext::new(security);
         if let Some(ref manager) = self.session_manager {
             context = context.with_session_manager(manager.clone());
         }
@@ -259,7 +284,7 @@ impl Default for ToolRegistryBuilder {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "coding-tools"))]
 mod tests {
     use super::*;
     use crate::authorization::ToolPolicy;

@@ -248,6 +248,25 @@ impl SchemaTool for BashTool {
     async fn handle(&self, input: BashInput, context: &ExecutionContext) -> ToolResult {
         let bypass = self.should_bypass(&input, context);
 
+        // Layered bash validation: parse the command through the
+        // tree-sitter + regex [`BashAnalyzer`] and reject it if it
+        // hits any configured security concern (rm -rf, fork bombs,
+        // privilege escalation, reverse shells, remote-pipe-to-sh,
+        // path traversal, container escape …). Runs BEFORE sandbox
+        // wrapping so blocked commands never reach the shell at all.
+        //
+        // An explicit `dangerouslyDisableSandbox: true` from a
+        // caller with sufficient privilege also bypasses validation
+        // — the same escape hatch that disables sandbox wrapping.
+        if !bypass && let Err(reason) = context.validate_bash(&input.command) {
+            tracing::warn!(
+                command = %input.command,
+                reason = %reason,
+                "Bash command rejected by BashAnalyzer preflight"
+            );
+            return ToolResult::error(format!("Blocked by bash validator: {reason}"));
+        }
+
         if input.run_in_background.unwrap_or(false) {
             self.execute_background(&input.command, context, bypass)
                 .await
@@ -395,5 +414,56 @@ mod tests {
             tool1.process_manager(),
             tool2.process_manager()
         ));
+    }
+
+    /// Layered safety: `rm -rf /` matches the `DangerousCommand`
+    /// pattern set and must be rejected by the preflight validator
+    /// before reaching the shell. Without this wiring BashAnalyzer
+    /// existed but was never called.
+    #[tokio::test]
+    async fn rejects_dangerous_rm_rf_root() {
+        let tool = BashTool::default();
+        let context =
+            ExecutionContext::try_permissive().expect("failed to create permissive context");
+        let result = tool
+            .execute(serde_json::json!({"command": "rm -rf /"}), &context)
+            .await;
+
+        assert!(result.is_error(), "dangerous command must be rejected");
+        match &result.output {
+            ToolOutput::Error(msg) => assert!(
+                msg.contains("Blocked by bash validator"),
+                "expected validator rejection, got {msg}"
+            ),
+            other => panic!("expected Error output, got {other:?}"),
+        }
+    }
+
+    /// Fork-bomb pattern must not reach the shell.
+    #[tokio::test]
+    async fn rejects_fork_bomb() {
+        let tool = BashTool::default();
+        let context =
+            ExecutionContext::try_permissive().expect("failed to create permissive context");
+        let result = tool
+            .execute(serde_json::json!({"command": ":(){ :|:& };:"}), &context)
+            .await;
+        assert!(result.is_error(), "fork bomb must be rejected");
+    }
+
+    /// `sudo` (privilege escalation concern) must be rejected by the
+    /// default policy even though the concern is emulated-allowed
+    /// in the permissive bash policy. `ExecutionContext::try_permissive`
+    /// uses `BashPolicy::default()` (not `BashPolicy::permissive()`),
+    /// which denies every concern including privilege escalation.
+    #[tokio::test]
+    async fn rejects_privilege_escalation() {
+        let tool = BashTool::default();
+        let context =
+            ExecutionContext::try_permissive().expect("failed to create permissive context");
+        let result = tool
+            .execute(serde_json::json!({"command": "sudo rm /tmp/x"}), &context)
+            .await;
+        assert!(result.is_error(), "sudo must be rejected by default policy");
     }
 }

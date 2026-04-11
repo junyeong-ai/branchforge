@@ -2,6 +2,7 @@
 
 pub mod approval;
 mod denied;
+pub mod dsl;
 pub mod extractors;
 mod modes;
 mod rules;
@@ -10,6 +11,10 @@ pub use approval::{
     ApprovalReceiver, ApprovalRequest, ApprovalResponse, ApprovalSender, approval_channel,
 };
 pub use denied::AuthorizationDenied;
+pub use dsl::{
+    PermissionRuleParseError, PermissionRuleSyntax, RuleDecisionKeyword, SubjectPattern,
+    parse_permission_rule, parse_to_tool_rule,
+};
 pub use extractors::{FieldExtractor, InputExtractor};
 pub use modes::ExecutionMode;
 pub use rules::{
