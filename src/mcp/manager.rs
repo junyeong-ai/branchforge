@@ -10,8 +10,8 @@ use std::time::Duration;
 use tokio::sync::RwLock;
 
 use super::{
-    McpContent, McpError, McpResourceDefinition, McpResult, McpServerConfig, McpServerState,
-    McpToolDefinition, McpToolResult,
+    DegradedReport, LifecyclePhase, McpContent, McpError, McpResourceDefinition, McpResult,
+    McpServerConfig, McpServerState, McpToolDefinition, McpToolResult,
 };
 #[cfg(feature = "mcp")]
 use super::{McpTimeouts, ReconnectPolicy, ToolCache, make_mcp_name, parse_mcp_name};
@@ -34,6 +34,13 @@ pub struct McpManager {
     cache_ttl: Duration,
     #[cfg(feature = "mcp")]
     timeouts: McpTimeouts,
+    /// Per-manager health snapshot accumulated across `add_server`
+    /// / `add_server_tracked` calls. Readable via
+    /// [`degraded_report_snapshot`][Self::degraded_report_snapshot]
+    /// so downstream code can decide whether to warn, retry, or
+    /// continue with the healthy subset.
+    #[cfg(feature = "mcp")]
+    degraded: Arc<RwLock<DegradedReport>>,
     #[cfg(not(feature = "mcp"))]
     _phantom: std::marker::PhantomData<()>,
 }
@@ -53,7 +60,99 @@ impl McpManager {
             tool_cache: Arc::new(RwLock::new(HashMap::new())),
             cache_ttl: DEFAULT_CACHE_TTL,
             timeouts: McpTimeouts::default(),
+            degraded: Arc::new(RwLock::new(DegradedReport::default())),
         }
+    }
+
+    /// Snapshot the current [`DegradedReport`] for this manager.
+    ///
+    /// The snapshot reflects every `add_server` / `add_server_tracked`
+    /// call made so far, with later calls superseding earlier ones
+    /// for the same server name.
+    #[cfg(feature = "mcp")]
+    pub async fn degraded_report_snapshot(&self) -> DegradedReport {
+        self.degraded.read().await.clone()
+    }
+
+    /// `add_server` variant that **never fails the builder on a
+    /// per-server error**. Returns `Ok(phase)` on success and
+    /// `Err((phase, error))` on failure, and updates the manager's
+    /// internal [`DegradedReport`] either way.
+    ///
+    /// This is what agent builders should call when loading many
+    /// configured servers: a broken server gets quarantined in the
+    /// report instead of aborting the whole agent construction.
+    ///
+    /// The attached [`LifecyclePhase`] on failure is the exact
+    /// phase the client last reached before bailing out — the same
+    /// information that would be observable from
+    /// [`super::client::McpClient::current_phase`] on a retained
+    /// client — so callers can distinguish "process never spawned"
+    /// from "tools-list failed" without parsing error messages.
+    #[cfg(feature = "mcp")]
+    pub async fn add_server_tracked(
+        &self,
+        name: impl Into<String>,
+        config: McpServerConfig,
+    ) -> std::result::Result<LifecyclePhase, (LifecyclePhase, McpError)> {
+        let name = name.into();
+
+        {
+            let servers = self.servers.read().await;
+            if servers.contains_key(&name) {
+                let err = McpError::Protocol {
+                    message: format!("Server '{}' already exists", name),
+                };
+                return Err((LifecyclePhase::Queued, err));
+            }
+        }
+
+        let mut client = McpClient::new(name.clone(), config).with_timeouts(self.timeouts.clone());
+        if let Err(err) = client.connect().await {
+            let phase = client.current_phase();
+            tracing::warn!(
+                server = %name,
+                phase = phase.as_str(),
+                error = %err,
+                "MCP server failed during startup; recording in DegradedReport"
+            );
+            self.degraded
+                .write()
+                .await
+                .record_failure(&name, phase, &err);
+            return Err((phase, err));
+        }
+
+        // Populate tool cache from the freshly-connected client
+        {
+            let mut cache = self.tool_cache.write().await;
+            cache.insert(
+                name.clone(),
+                ToolCache {
+                    tools: client.tools().to_vec(),
+                    cached_at: std::time::Instant::now(),
+                    ttl: self.cache_ttl,
+                },
+            );
+        }
+
+        // Re-check after acquiring write lock to prevent race
+        let mut servers = self.servers.write().await;
+        if servers.contains_key(&name) {
+            let err = McpError::Protocol {
+                message: format!("Server '{}' already exists", name),
+            };
+            self.degraded
+                .write()
+                .await
+                .record_failure(&name, LifecyclePhase::Queued, &err);
+            return Err((LifecyclePhase::Queued, err));
+        }
+        servers.insert(name.clone(), client);
+        drop(servers);
+
+        self.degraded.write().await.record_healthy(name);
+        Ok(LifecyclePhase::Ready)
     }
 
     #[cfg(not(feature = "mcp"))]
@@ -137,6 +236,29 @@ impl McpManager {
         Err(McpError::Protocol {
             message: "MCP feature not enabled".to_string(),
         })
+    }
+
+    /// Pure-core stub for `add_server_tracked`. Always reports the
+    /// feature as disabled; never mutates the manager.
+    #[cfg(not(feature = "mcp"))]
+    pub async fn add_server_tracked(
+        &self,
+        _name: impl Into<String>,
+        _config: McpServerConfig,
+    ) -> std::result::Result<LifecyclePhase, (LifecyclePhase, McpError)> {
+        Err((
+            LifecyclePhase::Queued,
+            McpError::Protocol {
+                message: "MCP feature not enabled".to_string(),
+            },
+        ))
+    }
+
+    /// Pure-core stub for `degraded_report_snapshot`. Always returns
+    /// an empty report.
+    #[cfg(not(feature = "mcp"))]
+    pub async fn degraded_report_snapshot(&self) -> DegradedReport {
+        DegradedReport::default()
     }
 
     #[cfg(feature = "mcp")]
@@ -398,6 +520,74 @@ impl McpManager {
     }
 }
 
+/// Best-effort cleanup for dropped `McpManager` instances.
+///
+/// MCP servers are child processes and OS resources that need to be
+/// cancelled explicitly; leaking them on manager drop leads to zombie
+/// processes in long-lived agents that spawn and discard many managers
+/// (test suites, multi-tenant services).
+///
+/// This `Drop` impl spawns a detached tokio task to invoke the async
+/// close path on every registered client. It is **best-effort** for two
+/// reasons:
+///
+/// 1. `Drop::drop` cannot be `async`, so we cannot await the cleanup —
+///    the spawned task may be cancelled if the tokio runtime itself is
+///    shutting down faster than the cleanup can complete.
+/// 2. If the manager is dropped outside any tokio runtime context (which
+///    is a programming error, but we must not panic in `Drop`) there is
+///    no runtime to spawn onto and we log a warning instead.
+///
+/// For guaranteed cleanup, call [`McpManager::close_all`] explicitly
+/// before dropping the manager. This `Drop` is the safety net for the
+/// common case where the manager is owned by an `AgentRuntime` whose
+/// own shutdown path eventually releases it.
+#[cfg(feature = "mcp")]
+impl Drop for McpManager {
+    fn drop(&mut self) {
+        // Clone the Arc handles so the spawned task can still reach the
+        // backing maps after `self` has gone out of scope.
+        let servers = Arc::clone(&self.servers);
+        let tool_cache = Arc::clone(&self.tool_cache);
+
+        match tokio::runtime::Handle::try_current() {
+            Ok(handle) => {
+                handle.spawn(async move {
+                    let count = {
+                        let mut servers_guard = servers.write().await;
+                        let count = servers_guard.len();
+                        for (name, mut client) in servers_guard.drain() {
+                            if let Err(e) = client.close().await {
+                                tracing::debug!(
+                                    server = %name,
+                                    error = %e,
+                                    "MCP client close failed during Drop cleanup"
+                                );
+                            }
+                        }
+                        count
+                    };
+                    tool_cache.write().await.clear();
+                    if count > 0 {
+                        tracing::debug!(
+                            count,
+                            "McpManager dropped; closed {count} MCP server connection(s)"
+                        );
+                    }
+                });
+            }
+            Err(_) => {
+                tracing::warn!(
+                    "McpManager dropped outside a tokio runtime context; MCP \
+                     server processes may be orphaned. Call `close_all()` \
+                     explicitly before dropping the manager to guarantee \
+                     cleanup."
+                );
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -428,6 +618,104 @@ mod tests {
         let manager = McpManager::new();
         let result = manager.close_all().await;
         assert!(result.is_ok());
+    }
+
+    /// Attempting to track-add a stdio server whose command does not
+    /// exist must fail at the `Spawn` phase and land in the
+    /// DegradedReport rather than panicking or bubbling a fatal
+    /// error to the caller.
+    #[cfg(feature = "mcp")]
+    #[tokio::test]
+    async fn track_records_spawn_failure_in_degraded_report() {
+        let manager = McpManager::new();
+        let config = McpServerConfig::Stdio {
+            command: "/nonexistent-binary-please-dont-exist".to_string(),
+            args: vec![],
+            env: HashMap::new(),
+            cwd: None,
+        };
+
+        let result = manager.add_server_tracked("broken", config).await;
+        assert!(result.is_err(), "bogus command must not succeed");
+
+        let report = manager.degraded_report_snapshot().await;
+        assert!(!report.is_healthy());
+        assert_eq!(report.healthy_ids().count(), 0);
+        let entry = report
+            .servers
+            .get("broken")
+            .expect("broken server must be in the report");
+        assert!(!entry.is_healthy());
+        // Either Spawn (transport construction) or Handshake
+        // (timeout on the nonexistent process) is acceptable —
+        // platform-dependent.
+        assert!(
+            matches!(
+                entry.phase,
+                LifecyclePhase::Spawn | LifecyclePhase::Handshake
+            ),
+            "expected Spawn or Handshake, got {:?}",
+            entry.phase
+        );
+    }
+
+    /// `DegradedReport::is_healthy()` and `record_healthy`/`record_failure`
+    /// round-trip correctly without touching a real MCP server.
+    #[tokio::test]
+    async fn degraded_report_transitions() {
+        let mut report = DegradedReport::default();
+        assert!(report.is_healthy()); // empty == healthy
+
+        report.record_failure("bad", LifecyclePhase::ListTools, "tools/list timed out");
+        assert!(!report.is_healthy());
+        assert_eq!(report.failed_ids().count(), 1);
+        assert_eq!(report.healthy_ids().count(), 0);
+
+        report.record_healthy("good");
+        assert_eq!(report.healthy_ids().collect::<Vec<_>>(), vec!["good"]);
+        assert_eq!(report.failed_ids().count(), 1);
+
+        // Retrying a previously-failed server that now succeeds
+        // clears its degraded marker.
+        report.record_healthy("bad");
+        assert!(report.is_healthy());
+        assert_eq!(report.healthy_ids().count(), 2);
+    }
+
+    /// Dropping an empty `McpManager` inside a tokio runtime must not
+    /// panic or log warnings about orphaned processes. Exercises the
+    /// Drop-based best-effort cleanup path in the no-server case, which
+    /// is the only one we can assert against without spawning real MCP
+    /// child processes.
+    ///
+    /// The Drop impl is only compiled under `feature = "mcp"`; in
+    /// pure-core builds there is nothing to exercise, and `drop()` on a
+    /// non-Drop type fires the `clippy::drop_non_drop` lint.
+    #[cfg(feature = "mcp")]
+    #[tokio::test]
+    async fn test_drop_empty_manager_is_quiet() {
+        let manager = McpManager::new();
+        drop(manager);
+        // Yield so any spawned cleanup task has a chance to run.
+        tokio::task::yield_now().await;
+    }
+
+    /// When an `McpManager` is dropped *without* a tokio runtime in
+    /// scope, `Drop` must take the warning path instead of panicking.
+    /// We construct the manager inside a runtime (because `new()`
+    /// creates tokio sync primitives) but drop it from a plain thread.
+    #[cfg(feature = "mcp")]
+    #[test]
+    fn test_drop_without_runtime_does_not_panic() {
+        let manager = {
+            let rt = tokio::runtime::Runtime::new().unwrap();
+            rt.block_on(async { McpManager::new() })
+            // `rt` is dropped here; `manager` is moved out and now has
+            // no runtime handle available when it is itself dropped.
+        };
+        drop(manager);
+        // If we reach this line, the Drop path took the no-runtime
+        // branch and logged a warning rather than panicking.
     }
 
     #[tokio::test]

@@ -128,6 +128,279 @@ pub enum McpConnectionStatus {
     Disconnected,
 }
 
+/// Phase of the MCP server lifecycle that a connection attempt was
+/// in when it succeeded or failed.
+///
+/// The phases are ordered: a server that reaches `Ready` has
+/// completed every earlier phase. When a failure is recorded, the
+/// attached phase pinpoints exactly where the handshake broke down —
+/// `Spawn` failures mean the process or transport never came up,
+/// while `ListTools` failures mean the server handshake succeeded
+/// but its tool catalogue was unreadable. Agent runtimes use this to
+/// build a [`DegradedReport`] instead of treating every per-server
+/// failure as a fatal agent-build error.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LifecyclePhase {
+    /// The server is registered but no connection attempt has started.
+    #[default]
+    Queued,
+    /// Spawning the child process (stdio) or constructing the HTTP
+    /// transport (SSE).
+    Spawn,
+    /// Establishing the MCP transport — framed stdio read/write or
+    /// Streamable HTTP session.
+    Handshake,
+    /// JSON-RPC `initialize` request → response round trip.
+    InitializeProtocol,
+    /// Reading `peer_info` and validating the protocol version
+    /// against the supported-protocol list.
+    NegotiateCapabilities,
+    /// `tools/list` round trip. Failure here means the server is
+    /// handshake-healthy but its tools are unusable.
+    ListTools,
+    /// `resources/list` round trip. Best-effort — failure downgrades
+    /// the server but does not disqualify it.
+    ListResources,
+    /// `prompts/list` round trip. Best-effort — failure downgrades
+    /// the server but does not disqualify it.
+    ListPrompts,
+    /// Populating the manager-level tool cache with the discovered
+    /// tool catalogue.
+    CacheWarmup,
+    /// Server is fully connected, tool catalogue populated, and
+    /// ready to dispatch requests.
+    Ready,
+    /// Terminal failure. The attached `DegradedReport` entry carries
+    /// the specific earlier phase where the attempt broke down.
+    Failed,
+}
+
+impl LifecyclePhase {
+    /// Human-readable phase name for logs and reports. Stable so
+    /// downstream OTel / metrics labels can group by phase.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Queued => "queued",
+            Self::Spawn => "spawn",
+            Self::Handshake => "handshake",
+            Self::InitializeProtocol => "initialize_protocol",
+            Self::NegotiateCapabilities => "negotiate_capabilities",
+            Self::ListTools => "list_tools",
+            Self::ListResources => "list_resources",
+            Self::ListPrompts => "list_prompts",
+            Self::CacheWarmup => "cache_warmup",
+            Self::Ready => "ready",
+            Self::Failed => "failed",
+        }
+    }
+
+    /// `true` if the phase represents a fully-usable server state.
+    /// Only [`Self::Ready`] satisfies this.
+    pub fn is_ready(&self) -> bool {
+        matches!(self, Self::Ready)
+    }
+
+    /// Linear ordering used by the forward-only transition rule.
+    /// Lower number = earlier in the lifecycle. `Failed` is sentinel
+    /// reachable from any non-terminal state.
+    fn order(&self) -> u8 {
+        match self {
+            Self::Queued => 0,
+            Self::Spawn => 1,
+            Self::Handshake => 2,
+            Self::InitializeProtocol => 3,
+            Self::NegotiateCapabilities => 4,
+            Self::ListTools => 5,
+            Self::ListResources => 6,
+            Self::ListPrompts => 7,
+            Self::CacheWarmup => 8,
+            Self::Ready => 9,
+            Self::Failed => 255,
+        }
+    }
+
+    /// `true` if a transition from `self` to `next` is legal.
+    ///
+    /// The legal moves form a forward-only DAG: each non-terminal
+    /// phase may advance to any later non-terminal phase, OR jump
+    /// to `Failed`. Terminal phases (`Ready`, `Failed`) cannot
+    /// transition further. Self-loops are disallowed to keep
+    /// transitions observable.
+    pub fn can_transition_to(&self, next: LifecyclePhase) -> bool {
+        if matches!(self, Self::Ready | Self::Failed) {
+            return false;
+        }
+        if *self == next {
+            return false;
+        }
+        if matches!(next, Self::Failed) {
+            return true;
+        }
+        next.order() > self.order()
+    }
+}
+
+/// Per-server health record attached to a [`DegradedReport`].
+///
+/// Symmetric across healthy and failed servers — every server has
+/// a `phase` and an optional `error`. A server is "healthy" iff its
+/// phase is [`LifecyclePhase::Ready`] and `error` is `None`.
+#[derive(Clone, Debug)]
+pub struct ServerHealth {
+    /// The server name as it was registered with the manager.
+    pub server: String,
+    /// Most advanced phase the lifecycle reached. For healthy
+    /// servers this is [`LifecyclePhase::Ready`]; for failed
+    /// servers it is the last phase that was attempted.
+    pub phase: LifecyclePhase,
+    /// Stringified error message from the underlying [`McpError`],
+    /// when the server failed to reach `Ready`. Stored as `String`
+    /// so the report is `Clone + Send + Sync` even for error
+    /// variants that carry non-clone payloads.
+    pub error: Option<String>,
+}
+
+impl ServerHealth {
+    /// `true` if this server reached `Ready` without failure.
+    pub fn is_healthy(&self) -> bool {
+        self.phase.is_ready() && self.error.is_none()
+    }
+}
+
+#[cfg(test)]
+mod lifecycle_phase_tests {
+    use super::*;
+
+    #[test]
+    fn forward_transition_succeeds() {
+        assert!(LifecyclePhase::Queued.can_transition_to(LifecyclePhase::Spawn));
+        assert!(LifecyclePhase::Spawn.can_transition_to(LifecyclePhase::Handshake));
+        assert!(LifecyclePhase::Handshake.can_transition_to(LifecyclePhase::Ready));
+    }
+
+    #[test]
+    fn backward_transition_rejected() {
+        assert!(!LifecyclePhase::Ready.can_transition_to(LifecyclePhase::Spawn));
+        assert!(!LifecyclePhase::Handshake.can_transition_to(LifecyclePhase::Spawn));
+    }
+
+    #[test]
+    fn self_loop_rejected() {
+        for p in [
+            LifecyclePhase::Queued,
+            LifecyclePhase::Spawn,
+            LifecyclePhase::Handshake,
+            LifecyclePhase::Ready,
+        ] {
+            assert!(!p.can_transition_to(p));
+        }
+    }
+
+    #[test]
+    fn failed_reachable_from_any_non_terminal() {
+        for start in [
+            LifecyclePhase::Queued,
+            LifecyclePhase::Spawn,
+            LifecyclePhase::Handshake,
+            LifecyclePhase::ListTools,
+        ] {
+            assert!(start.can_transition_to(LifecyclePhase::Failed));
+        }
+    }
+
+    #[test]
+    fn terminal_phases_reject_all() {
+        for terminal in [LifecyclePhase::Ready, LifecyclePhase::Failed] {
+            for target in [
+                LifecyclePhase::Queued,
+                LifecyclePhase::Spawn,
+                LifecyclePhase::Ready,
+                LifecyclePhase::Failed,
+            ] {
+                assert!(!terminal.can_transition_to(target));
+            }
+        }
+    }
+}
+
+/// Per-manager health snapshot after a bulk `add_server` pass.
+///
+/// Agent builders call [`crate::mcp::McpManager::add_server_tracked`]
+/// in a loop and collect failures into this report instead of aborting
+/// on the first per-server error. Runtime consumers can read the
+/// report via [`crate::mcp::McpManager::degraded_report_snapshot`] to
+/// decide whether to surface a warning, retry failed servers on the
+/// background, or continue with the healthy subset.
+///
+/// The report is **symmetric** — every server is keyed under
+/// `servers` regardless of health, with [`ServerHealth::is_healthy`]
+/// telling consumers which subset is usable. Convenience accessors
+/// [`Self::healthy_ids`] / [`Self::failed_ids`] / [`Self::is_healthy`]
+/// preserve the read-mostly API.
+#[derive(Clone, Debug, Default)]
+pub struct DegradedReport {
+    /// All registered servers, keyed by name.
+    pub servers: std::collections::BTreeMap<String, ServerHealth>,
+}
+
+impl DegradedReport {
+    /// `true` if every registered server reached `Ready`. An empty
+    /// report (no servers at all) is considered non-degraded.
+    pub fn is_healthy(&self) -> bool {
+        self.servers.values().all(ServerHealth::is_healthy)
+    }
+
+    /// Iterator over names of healthy servers (alphabetically by
+    /// `BTreeMap` ordering).
+    pub fn healthy_ids(&self) -> impl Iterator<Item = &str> {
+        self.servers
+            .values()
+            .filter(|h| h.is_healthy())
+            .map(|h| h.server.as_str())
+    }
+
+    /// Iterator over names of failed servers.
+    pub fn failed_ids(&self) -> impl Iterator<Item = &str> {
+        self.servers
+            .values()
+            .filter(|h| !h.is_healthy())
+            .map(|h| h.server.as_str())
+    }
+
+    /// Record a successful handshake. Overwrites any prior entry —
+    /// a retry that reaches `Ready` clears the degraded marker.
+    pub fn record_healthy(&mut self, name: impl Into<String>) {
+        let name = name.into();
+        self.servers.insert(
+            name.clone(),
+            ServerHealth {
+                server: name,
+                phase: LifecyclePhase::Ready,
+                error: None,
+            },
+        );
+    }
+
+    /// Record a per-server failure along with the phase it reached.
+    pub fn record_failure(
+        &mut self,
+        name: impl Into<String>,
+        phase: LifecyclePhase,
+        error: impl std::fmt::Display,
+    ) {
+        let name = name.into();
+        self.servers.insert(
+            name.clone(),
+            ServerHealth {
+                server: name,
+                phase,
+                error: Some(error.to_string()),
+            },
+        );
+    }
+}
+
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct McpServerInfo {

@@ -12,8 +12,8 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 
 use super::{
-    McpConnectionStatus, McpError, McpResourceDefinition, McpResult, McpServerConfig,
-    McpServerState, McpTimeouts, McpToolDefinition, McpToolResult,
+    LifecyclePhase, McpConnectionStatus, McpError, McpResourceDefinition, McpResult,
+    McpServerConfig, McpServerState, McpTimeouts, McpToolDefinition, McpToolResult,
 };
 #[cfg(feature = "mcp")]
 use super::{McpContent, McpServerInfo};
@@ -49,6 +49,12 @@ pub struct McpClient {
     name: String,
     state: McpServerState,
     timeouts: McpTimeouts,
+    /// Lifecycle phase the client is currently in (or last reached).
+    /// Updated by `connect_stdio` / `connect_sse` as they advance so
+    /// that if an error returns partway through, the manager can
+    /// read `current_phase()` and attach it to the
+    /// [`super::DegradedReport`] entry.
+    current_phase: LifecyclePhase,
     #[cfg(feature = "mcp")]
     service: Option<Arc<RwLock<McpRunningService>>>,
     #[cfg(not(feature = "mcp"))]
@@ -62,11 +68,40 @@ impl McpClient {
             name: name.clone(),
             state: McpServerState::new(name, config),
             timeouts: McpTimeouts::default(),
+            current_phase: LifecyclePhase::Queued,
             #[cfg(feature = "mcp")]
             service: None,
             #[cfg(not(feature = "mcp"))]
             _phantom: std::marker::PhantomData,
         }
+    }
+
+    /// Returns the most advanced phase this client has reached. After
+    /// a successful `connect()` this is [`LifecyclePhase::Ready`];
+    /// after a failed one it is the last phase that was attempted.
+    pub fn current_phase(&self) -> LifecyclePhase {
+        self.current_phase
+    }
+
+    /// Validated phase advancement. Returns an error and leaves
+    /// the phase unchanged if the move is illegal (backwards
+    /// transition, self-loop, or terminal mutation). Connect paths
+    /// use this instead of direct field assignment so a future bug
+    /// in the handshake sequence cannot silently corrupt the
+    /// observable lifecycle state.
+    #[cfg(feature = "mcp")]
+    fn advance_phase(&mut self, next: LifecyclePhase) -> McpResult<()> {
+        if !self.current_phase.can_transition_to(next) {
+            return Err(McpError::Protocol {
+                message: format!(
+                    "illegal MCP lifecycle transition: {} → {}",
+                    self.current_phase.as_str(),
+                    next.as_str()
+                ),
+            });
+        }
+        self.current_phase = next;
+        Ok(())
     }
 
     /// Create a client with custom timeouts.
@@ -111,6 +146,7 @@ impl McpClient {
     ) -> McpResult<()> {
         use tokio::time::timeout;
 
+        self.advance_phase(LifecyclePhase::Spawn)?;
         let transport = TokioChildProcess::new(Command::new(&command).configure(|cmd| {
             cmd.args(&args);
             for (key, value) in &env {
@@ -121,6 +157,7 @@ impl McpClient {
             message: format!("Failed to create transport: {}", e),
         })?;
 
+        self.advance_phase(LifecyclePhase::Handshake)?;
         let connect_timeout = self.timeouts.connection;
         let service: McpRunningService = timeout(connect_timeout, ().serve(transport))
             .await
@@ -131,6 +168,7 @@ impl McpClient {
                 message: format!("Failed to connect: {}", e),
             })?;
 
+        self.advance_phase(LifecyclePhase::NegotiateCapabilities)?;
         if let Some(info) = service.peer_info() {
             let protocol_version = info.protocol_version.to_string();
 
@@ -151,6 +189,7 @@ impl McpClient {
         }
         self.state.status = McpConnectionStatus::Connected;
 
+        self.advance_phase(LifecyclePhase::ListTools)?;
         let tools_result = service
             .list_tools(Default::default())
             .await
@@ -166,6 +205,7 @@ impl McpClient {
             })
             .collect();
 
+        self.advance_phase(LifecyclePhase::ListResources)?;
         if let Ok(resources_result) = service.list_resources(Default::default()).await {
             self.state.resources = resources_result
                 .resources
@@ -180,6 +220,7 @@ impl McpClient {
         }
 
         self.service = Some(Arc::new(RwLock::new(service)));
+        self.advance_phase(LifecyclePhase::Ready)?;
 
         Ok(())
     }
@@ -201,6 +242,7 @@ impl McpClient {
         };
         use tokio::time::timeout;
 
+        self.advance_phase(LifecyclePhase::Spawn)?;
         // Build custom headers map for rmcp
         let mut custom_headers: HashMap<HeaderName, HeaderValue> = HashMap::new();
         for (key, value) in &headers {
@@ -220,6 +262,7 @@ impl McpClient {
 
         let transport = StreamableHttpClientTransport::from_config(config);
 
+        self.advance_phase(LifecyclePhase::Handshake)?;
         let connect_timeout = self.timeouts.connection;
         let service: McpRunningService = timeout(connect_timeout, ().serve(transport))
             .await
@@ -233,6 +276,7 @@ impl McpClient {
                 message: format!("SSE connection to '{}' failed: {}", url, e),
             })?;
 
+        self.advance_phase(LifecyclePhase::NegotiateCapabilities)?;
         if let Some(info) = service.peer_info() {
             let protocol_version = info.protocol_version.to_string();
 
@@ -253,6 +297,7 @@ impl McpClient {
         }
         self.state.status = McpConnectionStatus::Connected;
 
+        self.advance_phase(LifecyclePhase::ListTools)?;
         let tools_result = service
             .list_tools(Default::default())
             .await
@@ -268,6 +313,7 @@ impl McpClient {
             })
             .collect();
 
+        self.advance_phase(LifecyclePhase::ListResources)?;
         if let Ok(resources_result) = service.list_resources(Default::default()).await {
             self.state.resources = resources_result
                 .resources
@@ -282,6 +328,7 @@ impl McpClient {
         }
 
         self.service = Some(Arc::new(RwLock::new(service)));
+        self.advance_phase(LifecyclePhase::Ready)?;
 
         Ok(())
     }
