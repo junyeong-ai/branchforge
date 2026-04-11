@@ -1,8 +1,12 @@
 //! Context management with progressive disclosure for optimal token usage.
 
 pub mod builder;
+pub mod environment_source;
+#[cfg(feature = "local-fs")]
 pub mod import_extractor;
 pub mod level;
+pub mod memory_content;
+#[cfg(feature = "local-fs")]
 pub mod memory_loader;
 pub mod orchestrator;
 pub mod prompt_frame;
@@ -12,12 +16,18 @@ pub mod rule_index;
 pub mod static_context;
 
 pub use builder::ContextBuilder;
+pub use environment_source::{EnvironmentFact, EnvironmentSource, collect_facts};
+#[cfg(feature = "local-fs")]
 pub use import_extractor::ImportExtractor;
 pub use level::{LeveledMemoryProvider, enterprise_base_path, user_base_path};
-pub use memory_loader::{MemoryContent, MemoryLoader, MemoryLoaderConfig};
+pub use memory_content::MemoryContent;
+#[cfg(feature = "local-fs")]
+pub use memory_loader::{MemoryLoader, MemoryLoaderConfig};
 pub use orchestrator::PromptOrchestrator;
 pub use prompt_frame::PromptFrame;
-pub use provider::{FileMemoryProvider, MemoryContextProvider, MemoryProvider};
+#[cfg(feature = "local-fs")]
+pub use provider::FileMemoryProvider;
+pub use provider::{MemoryContextProvider, MemoryProvider};
 pub use routing::RoutingStrategy;
 pub use rule_index::RuleIndex;
 pub use static_context::{McpToolMeta, StaticContext};

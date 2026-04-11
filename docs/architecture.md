@@ -16,7 +16,7 @@
 ## Core Design
 
 - `SessionGraph` is canonical state.
-- `Session.messages` is a derived projection for message-based APIs.
+- Message lists are derived on demand via `Session::current_branch_messages()`; there is no cached `messages` field.
 - Replay, export, bookmarks, and checkpoints operate on graph state.
 - Persistence backends rebuild projections from graph state.
 - Provider-specific behavior stays inside client adapter layers.

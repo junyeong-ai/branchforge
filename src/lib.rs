@@ -28,9 +28,13 @@
 //!
 //! #[tokio::main]
 //! async fn main() -> Result<(), branchforge::Error> {
+//!     // `ToolSurface::coding()` selects the full coding tool surface
+//!     // (filesystem + shell). For a research or knowledge agent use
+//!     // `ToolSurface::local_fs()`; for a pure-API agent use
+//!     // `ToolSurface::core()`.
 //!     let agent = Agent::builder()
 //!         .model("claude-sonnet-4-5")
-//!         .tools(ToolSurface::core())
+//!         .tools(ToolSurface::coding())
 //!         .working_dir("./project")
 //!         .build()
 //!         .await?;
@@ -69,6 +73,7 @@ pub mod hooks;
 pub mod ir;
 pub mod mcp;
 pub mod models;
+pub mod network_sandbox;
 pub mod observability;
 pub mod orchestration;
 pub mod output_style;
@@ -78,6 +83,7 @@ pub mod prelude;
 pub mod prompts;
 #[cfg(feature = "scheduling")]
 pub mod scheduling;
+#[cfg(feature = "local-fs")]
 pub mod security;
 pub mod session;
 pub mod skills;
@@ -85,6 +91,7 @@ pub mod subagents;
 pub mod tokens;
 pub mod tools;
 pub mod types;
+pub mod workspace;
 
 // =========================================================================
 // Core API re-exports (user-facing types)
@@ -103,14 +110,17 @@ pub use authorization::{
 
 // Provider client stack — the only LLM call surface. There is no longer
 // a monolithic `Client` type; applications either compose a
-// `ProviderClient` directly or pick an opinionated [`Preset`] and let
-// the agent runtime resolve the right (codec, transport) pair.
+// `ProviderClient` directly or look up a named [`ProviderProfile`]
+// from the [`ProfileRegistry`] and let it resolve the
+// (codec, transport, credential) triple.
 pub use client::codec::{
     AnthropicMessagesCodec, BedrockConverseCodec, EncodedRequest, EndpointShape,
     GeminiGenerateCodec, InvocationMode, ModelCodec, OpenAiChatCodec, OpenAiResponsesCodec,
 };
 pub use client::llm_call::{CircuitBrokenClient, FallingBackClient, LlmCall, RetryingClient};
-pub use client::preset::{Preset, from_env as preset_from_env};
+pub use client::preset::{
+    CredentialHint, ProfileRegistry, ProviderProfile, from_env as profile_from_env,
+};
 pub use client::provider_client::{ChunkStream, ProviderClient};
 #[cfg(feature = "aws")]
 pub use client::transport::BedrockTransport;
@@ -153,10 +163,12 @@ pub use auth::{CredentialProvider, OAuthConfig};
 pub use budget::report::{CostSummary, ModelCostEntry};
 pub use client::{FallbackConfig, RetryPolicy};
 pub use common::circuit::{CircuitBreaker, CircuitConfig, CircuitState};
-pub use common::{ContentSource, Index, IndexRegistry, Named, SourceType, ToolRestricted};
-pub use context::{
-    ContextBuilder, MemoryLoader, MemoryProvider, PromptOrchestrator, RuleIndex, StaticContext,
+pub use common::{
+    ContentSource, Extensions, Index, IndexRegistry, Named, SourceType, ToolRestricted,
 };
+#[cfg(feature = "local-fs")]
+pub use context::MemoryLoader;
+pub use context::{ContextBuilder, MemoryProvider, PromptOrchestrator, RuleIndex, StaticContext};
 pub use hooks::{CommandHook, Hook, HookContext, HookEvent, HookOutput, HookRegistry};
 pub use output_style::OutputStyle;
 pub use session::{
@@ -165,6 +177,7 @@ pub use session::{
 };
 pub use skills::{SkillIndex, SkillResult, SkillRuntime};
 pub use subagents::{SubagentIndex, builtin_subagents};
+pub use workspace::Workspace;
 
 #[cfg(feature = "cli-auth")]
 pub use auth::ClaudeCliProvider;
@@ -315,6 +328,17 @@ pub enum Error {
         transport: &'static str,
         reason: &'static str,
     },
+
+    /// A provider response violated the declared `ResponseFormat::JsonSchema`
+    /// at runtime. Raised by `ProviderClient::send` when `spec.strict` is
+    /// true and the decoded body fails post-decode validation — either the
+    /// body is not JSON at all or the JSON does not conform to the schema.
+    ///
+    /// `pointer` is an RFC 6901 JSON pointer into the response document
+    /// (empty string for the root). When the body was unparseable, the
+    /// pointer is empty and `reason` carries the serde_json parser message.
+    #[error("structured output invalid at {}: {reason}", if pointer.is_empty() { "root" } else { pointer.as_str() })]
+    StructuredOutputInvalid { pointer: String, reason: String },
 }
 
 /// Error helpers for the new codec/transport stack.
@@ -344,21 +368,160 @@ pub mod error {
     }
 }
 
-/// Error category for unified error handling.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ErrorCategory {
-    /// Authentication or authorization failures (401, 403)
-    Authorization,
-    /// Configuration, parsing, or setup errors
-    Configuration,
-    /// Network, rate limit, or transient errors that may succeed on retry
-    Transient,
-    /// Session, MCP, or other stateful operation errors
-    Stateful,
-    /// Internal errors (IO, JSON, unexpected states)
+/// Coarse-grained failure classification for unified error handling,
+/// recovery policies, and observability vocabularies.
+///
+/// `FailureCategory` is the single source of truth mapped from every
+/// [`Error`] variant via [`Error::category`]. It exists for three
+/// distinct consumers that all need *the same* vocabulary:
+///
+/// 1. **OpenTelemetry `error.category` attribute** — spans and metrics
+///    that record a failure embed the variant's
+///    [`as_str`][FailureCategory::as_str] form so dashboards can group
+///    by cause without inspecting the full error message.
+/// 2. **Recovery Recipe selection** (Phase 2+ follow-up) — a recipe
+///    engine can match on category to decide whether to retry, escalate,
+///    or compact context.
+/// 3. **User-facing error handling** — library consumers can branch on
+///    a small finite set of categories without exhaustively matching
+///    every `Error` variant.
+///
+/// This replaces the older 6-variant `ErrorCategory` which was too
+/// coarse to drive recovery decisions (e.g. it could not distinguish
+/// `RateLimit` from `Quota` from `Network`, all three of which need
+/// different retry strategies).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum FailureCategory {
+    /// 401/403 authentication or expired OAuth token.
+    Auth,
+    /// Authorization denied by policy (HITL deny, deny rule, hook
+    /// returning `{decision: "block"}`).
+    PolicyDenied,
+    /// Network / TLS / DNS failure before the request reached the
+    /// provider.
+    Transport,
+    /// 429 rate-limited.
+    RateLimit,
+    /// Billing quota / account-level limit (not per-request rate).
+    Quota,
+    /// Context window exceeded (pre-flight or 413 from provider).
+    ContextWindow,
+    /// Budget cap exceeded by an in-flight or future request.
+    Budget,
+    /// Output blocked by content / safety filter.
+    ContentPolicy,
+    /// Response did not conform to the requested JSON Schema (NEW-3
+    /// response validation surface).
+    SchemaMismatch,
+    /// 4xx request shape rejected by provider (invalid model, bad
+    /// argument, …).
+    BadRequest,
+    /// 5xx provider-side server error.
+    ProviderServer,
+    /// Request was cancelled before completion (client abort, parent
+    /// task drop).
+    Cancelled,
+    /// Per-call deadline elapsed.
+    Timeout,
+    /// Tool execution raised an error (internal to the tool, not a
+    /// framework-level issue).
+    ToolRuntime,
+    /// Pre- / post-tool-use hook failed, timed out, or returned a
+    /// non-recoverable error.
+    HookFailure,
+    /// MCP handshake / tool discovery failure (stdio or HTTP transport
+    /// could not be brought up).
+    McpHandshake,
+    /// MCP tool invocation failed after a successful handshake.
+    McpInvocation,
+    /// Session persistence or checkpoint / fork operation failed.
+    Persistence,
+    /// Configuration, parsing, or environment-variable lookup error.
+    Config,
+    /// Circuit breaker is open; upstream is being protected from load.
+    CircuitOpen,
+    /// Operating-system resource exhausted (memory, file descriptors,
+    /// child processes).
+    Resource,
+    /// Catch-all for IO/JSON/panics and other unexpected internal
+    /// states. Observability should alert on elevated rates.
     Internal,
-    /// Resource limits (budget, context, timeout)
-    ResourceLimit,
+}
+
+impl FailureCategory {
+    /// Stable lowercase string form for OTel `error.category` attribute
+    /// and log keys. These strings are part of the public contract and
+    /// **must not change** without a major version bump — dashboards,
+    /// alert rules, and recovery recipes depend on them.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Auth => "auth",
+            Self::PolicyDenied => "policy_denied",
+            Self::Transport => "transport",
+            Self::RateLimit => "rate_limit",
+            Self::Quota => "quota",
+            Self::ContextWindow => "context_window",
+            Self::Budget => "budget",
+            Self::ContentPolicy => "content_policy",
+            Self::SchemaMismatch => "schema_mismatch",
+            Self::BadRequest => "bad_request",
+            Self::ProviderServer => "provider_server",
+            Self::Cancelled => "cancelled",
+            Self::Timeout => "timeout",
+            Self::ToolRuntime => "tool_runtime",
+            Self::HookFailure => "hook_failure",
+            Self::McpHandshake => "mcp_handshake",
+            Self::McpInvocation => "mcp_invocation",
+            Self::Persistence => "persistence",
+            Self::Config => "config",
+            Self::CircuitOpen => "circuit_open",
+            Self::Resource => "resource",
+            Self::Internal => "internal",
+        }
+    }
+
+    /// Whether a recovery recipe can reasonably retry the same request
+    /// against the same provider without mutating the input.
+    ///
+    /// This is a *category*-level hint, not an absolute guarantee; an
+    /// individual [`Error::Provider`] carries its own `retryable` flag
+    /// that may override this default for vendor-specific edge cases.
+    pub const fn is_transient(self) -> bool {
+        matches!(
+            self,
+            Self::Transport
+                | Self::RateLimit
+                | Self::ProviderServer
+                | Self::Timeout
+                | Self::CircuitOpen
+        )
+    }
+
+    /// Whether the failure was caused by a policy decision (user
+    /// authorization, hook denial, content filter, bad request shape).
+    /// These are *not* retryable — the same input will keep failing
+    /// until the user or upstream policy changes.
+    pub const fn is_user_actionable(self) -> bool {
+        matches!(
+            self,
+            Self::Auth
+                | Self::PolicyDenied
+                | Self::BadRequest
+                | Self::ContentPolicy
+                | Self::Config
+                | Self::Quota
+                | Self::ContextWindow
+                | Self::Budget
+                | Self::SchemaMismatch
+        )
+    }
+}
+
+impl std::fmt::Display for FailureCategory {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
 }
 
 impl Error {
@@ -368,49 +531,64 @@ impl Error {
         }
     }
 
-    pub fn category(&self) -> ErrorCategory {
+    /// Classify this error into a coarse-grained [`FailureCategory`] for
+    /// observability, recovery, and user-facing dispatch.
+    ///
+    /// The match is intentionally exhaustive — adding a new [`Error`]
+    /// variant requires updating this function, which is the whole
+    /// point: every error must map somewhere in the vocabulary.
+    pub fn category(&self) -> FailureCategory {
         match self {
-            Error::Authentication { .. } => ErrorCategory::Authorization,
-            Error::Authorization(_) | Error::HookFailed { .. } | Error::HookTimeout { .. } => {
-                ErrorCategory::Authorization
-            }
+            // -- Authentication / authorization --
+            Error::Authentication { .. } => FailureCategory::Auth,
+            Error::Authorization(_) => FailureCategory::PolicyDenied,
+            Error::HookFailed { .. } | Error::HookTimeout { .. } => FailureCategory::HookFailure,
 
-            Error::Config(_) | Error::Parse(_) | Error::Env(_) | Error::InvalidRequest(_) => {
-                ErrorCategory::Configuration
-            }
+            // -- Configuration & request shape --
+            Error::Config(_)
+            | Error::Parse(_)
+            | Error::Env(_)
+            | Error::InvalidRequest(_)
+            | Error::InvalidComposition { .. }
+            | Error::StructuredOutputInvalid { .. } => FailureCategory::Config,
+            Error::NotSupported { .. } => FailureCategory::BadRequest,
 
-            Error::Network(_)
-            | Error::RateLimit { .. }
-            | Error::ModelOverloaded { .. }
-            | Error::CircuitOpen => ErrorCategory::Transient,
+            // -- Transport / rate limiting / circuit --
+            Error::Network(_) => FailureCategory::Transport,
+            Error::RateLimit { .. } => FailureCategory::RateLimit,
+            Error::ModelOverloaded { .. } => FailureCategory::ProviderServer,
+            Error::CircuitOpen => FailureCategory::CircuitOpen,
 
-            Error::Session(_) | Error::Mcp(_) | Error::Stream(_) => ErrorCategory::Stateful,
+            // -- Resource & budget limits --
+            Error::BudgetExceeded { .. } => FailureCategory::Budget,
+            Error::ContextWindowExceeded { .. } => FailureCategory::ContextWindow,
+            Error::Timeout(_) => FailureCategory::Timeout,
+            Error::ResourceExhausted(_) => FailureCategory::Resource,
 
-            Error::BudgetExceeded { .. }
-            | Error::ContextWindowExceeded { .. }
-            | Error::Timeout(_)
-            | Error::ResourceExhausted(_) => ErrorCategory::ResourceLimit,
+            // -- Stateful subsystems --
+            Error::Session(_) => FailureCategory::Persistence,
+            Error::Mcp(_) => FailureCategory::McpInvocation,
+            Error::Stream(_) => FailureCategory::Transport,
+            Error::Tool(_) => FailureCategory::ToolRuntime,
 
-            Error::Io(_) | Error::Json(_) | Error::Tool(_) | Error::NotSupported { .. } => {
-                ErrorCategory::Internal
-            }
+            // -- Internal / unexpected --
+            Error::Io(_) | Error::Json(_) => FailureCategory::Internal,
 
+            // -- Provider-side classified errors --
             Error::Provider { kind, .. } => match kind {
-                error::ProviderErrorKind::Auth | error::ProviderErrorKind::Quota => {
-                    ErrorCategory::Authorization
-                }
-                error::ProviderErrorKind::RateLimit
-                | error::ProviderErrorKind::Server
-                | error::ProviderErrorKind::Network => ErrorCategory::Transient,
-                error::ProviderErrorKind::BadRequest
-                | error::ProviderErrorKind::ContentFilter
-                | error::ProviderErrorKind::Cancelled => ErrorCategory::Configuration,
-                error::ProviderErrorKind::PayloadTooLarge => ErrorCategory::ResourceLimit,
+                error::ProviderErrorKind::Auth => FailureCategory::Auth,
+                error::ProviderErrorKind::Quota => FailureCategory::Quota,
+                error::ProviderErrorKind::RateLimit => FailureCategory::RateLimit,
+                error::ProviderErrorKind::Server => FailureCategory::ProviderServer,
+                error::ProviderErrorKind::Network => FailureCategory::Transport,
+                error::ProviderErrorKind::BadRequest => FailureCategory::BadRequest,
+                error::ProviderErrorKind::ContentFilter => FailureCategory::ContentPolicy,
+                error::ProviderErrorKind::Cancelled => FailureCategory::Cancelled,
+                error::ProviderErrorKind::PayloadTooLarge => FailureCategory::ContextWindow,
             },
-            Error::InvalidComposition { .. } => ErrorCategory::Configuration,
 
             #[cfg(feature = "plugins")]
-            Error::Plugin(_) => ErrorCategory::Configuration,
+            Error::Plugin(_) => FailureCategory::Config,
         }
     }
 
@@ -504,6 +682,7 @@ impl From<graph::GraphError> for Error {
     }
 }
 
+#[cfg(feature = "local-fs")]
 impl From<security::SecurityError> for Error {
     fn from(err: security::SecurityError) -> Self {
         match err {
@@ -531,6 +710,7 @@ impl From<security::SecurityError> for Error {
     }
 }
 
+#[cfg(feature = "local-fs")]
 impl From<security::sandbox::SandboxError> for Error {
     fn from(err: security::sandbox::SandboxError) -> Self {
         match err {
@@ -571,17 +751,17 @@ pub type Result<T> = std::result::Result<T, Error>;
 
 /// Simple one-shot query helper.
 ///
-/// Resolves a [`Preset`] from `BRANCHFORGE_PROVIDER` (and the vendor's
-/// usual env vars), sends a single user message via [`ProviderClient`],
-/// and returns the joined text content. The model is taken from
-/// `BRANCHFORGE_MODEL` if set.
+/// Resolves a [`ProviderProfile`] from `BRANCHFORGE_PROVIDER` (and
+/// the profile's declared credential source), sends a single user
+/// message via [`ProviderClient`], and returns the joined text
+/// content. The model is taken from `BRANCHFORGE_MODEL` if set.
 pub async fn query(prompt: &str) -> Result<String> {
     let pc = client::preset::from_env().await?;
     let model = std::env::var("BRANCHFORGE_MODEL").ok();
     query_with_provider(&pc, model.as_deref(), prompt).await
 }
 
-/// Query with a specific model id, resolving the preset from env vars.
+/// Query with a specific model id, resolving the profile from env vars.
 pub async fn query_with_model(model: &str, prompt: &str) -> Result<String> {
     let pc = client::preset::from_env().await?;
     query_with_provider(&pc, Some(model), prompt).await
@@ -616,22 +796,171 @@ mod tests {
     }
 
     #[test]
-    fn test_error_category() {
-        let rate_limit = Error::RateLimit { retry_after: None };
-        assert_eq!(rate_limit.category(), ErrorCategory::Transient);
+    fn test_failure_category_maps_each_error_variant() {
+        // Representative sample covering each major FailureCategory
+        // discriminant. The full exhaustive match lives in
+        // `Error::category` so any newly added variant forces an update
+        // there; this test guards that the observable classification
+        // stays stable across refactors.
+        assert_eq!(Error::auth("bad").category(), FailureCategory::Auth);
+        assert_eq!(
+            Error::Authorization("denied".into()).category(),
+            FailureCategory::PolicyDenied
+        );
+        assert_eq!(
+            Error::RateLimit { retry_after: None }.category(),
+            FailureCategory::RateLimit
+        );
+        assert_eq!(
+            Error::ModelOverloaded { model: "x".into() }.category(),
+            FailureCategory::ProviderServer
+        );
+        assert_eq!(
+            Error::Timeout(std::time::Duration::from_secs(1)).category(),
+            FailureCategory::Timeout
+        );
+        assert_eq!(Error::CircuitOpen.category(), FailureCategory::CircuitOpen);
+        assert_eq!(
+            Error::BudgetExceeded {
+                used: rust_decimal::Decimal::ONE,
+                limit: rust_decimal::Decimal::ONE
+            }
+            .category(),
+            FailureCategory::Budget
+        );
+        assert_eq!(
+            Error::ContextWindowExceeded {
+                estimated: 10,
+                limit: 5,
+                overage: 5
+            }
+            .category(),
+            FailureCategory::ContextWindow
+        );
+        assert_eq!(
+            Error::ResourceExhausted("oom".into()).category(),
+            FailureCategory::Resource
+        );
+        assert_eq!(
+            Error::HookFailed {
+                hook: "pre".into(),
+                reason: "bad".into()
+            }
+            .category(),
+            FailureCategory::HookFailure
+        );
+        assert_eq!(
+            Error::Config("missing key".into()).category(),
+            FailureCategory::Config
+        );
+        assert_eq!(
+            Error::NotSupported {
+                provider: "openai",
+                operation: "cache_control"
+            }
+            .category(),
+            FailureCategory::BadRequest
+        );
+    }
 
-        let server_error = Error::Provider {
-            provider: "anthropic",
-            kind: error::ProviderErrorKind::Server,
-            message: "Internal error".to_string(),
-            hint: None,
-            retryable: true,
-            status: Some(500),
-        };
-        assert_eq!(server_error.category(), ErrorCategory::Transient);
+    #[test]
+    fn test_failure_category_provider_kinds() {
+        let cases = [
+            (error::ProviderErrorKind::Auth, FailureCategory::Auth),
+            (error::ProviderErrorKind::Quota, FailureCategory::Quota),
+            (
+                error::ProviderErrorKind::RateLimit,
+                FailureCategory::RateLimit,
+            ),
+            (
+                error::ProviderErrorKind::Server,
+                FailureCategory::ProviderServer,
+            ),
+            (
+                error::ProviderErrorKind::Network,
+                FailureCategory::Transport,
+            ),
+            (
+                error::ProviderErrorKind::BadRequest,
+                FailureCategory::BadRequest,
+            ),
+            (
+                error::ProviderErrorKind::ContentFilter,
+                FailureCategory::ContentPolicy,
+            ),
+            (
+                error::ProviderErrorKind::Cancelled,
+                FailureCategory::Cancelled,
+            ),
+            (
+                error::ProviderErrorKind::PayloadTooLarge,
+                FailureCategory::ContextWindow,
+            ),
+        ];
+        for (kind, expected) in cases {
+            let err = Error::Provider {
+                provider: "test",
+                kind,
+                message: "case".into(),
+                hint: None,
+                retryable: false,
+                status: None,
+            };
+            assert_eq!(
+                err.category(),
+                expected,
+                "provider kind {kind:?} should map to {expected:?}"
+            );
+        }
+    }
 
-        let auth_error = Error::auth("Invalid token");
-        assert_eq!(auth_error.category(), ErrorCategory::Authorization);
+    #[test]
+    fn test_failure_category_transient_hints() {
+        // Categories that a recovery recipe may treat as "retry after
+        // backoff".
+        assert!(FailureCategory::Transport.is_transient());
+        assert!(FailureCategory::RateLimit.is_transient());
+        assert!(FailureCategory::ProviderServer.is_transient());
+        assert!(FailureCategory::Timeout.is_transient());
+        assert!(FailureCategory::CircuitOpen.is_transient());
+
+        // Categories that are never retryable without user action.
+        assert!(!FailureCategory::Auth.is_transient());
+        assert!(!FailureCategory::BadRequest.is_transient());
+        assert!(!FailureCategory::ContentPolicy.is_transient());
+        assert!(!FailureCategory::Budget.is_transient());
+        assert!(!FailureCategory::ContextWindow.is_transient());
+    }
+
+    #[test]
+    fn test_failure_category_user_actionable() {
+        // "User-actionable" = the user (or upstream policy) needs to do
+        // something; no retry will fix it.
+        assert!(FailureCategory::Auth.is_user_actionable());
+        assert!(FailureCategory::PolicyDenied.is_user_actionable());
+        assert!(FailureCategory::Budget.is_user_actionable());
+        assert!(FailureCategory::ContextWindow.is_user_actionable());
+        assert!(FailureCategory::SchemaMismatch.is_user_actionable());
+
+        // Transient failures are NOT user-actionable — they self-heal.
+        assert!(!FailureCategory::Transport.is_user_actionable());
+        assert!(!FailureCategory::ProviderServer.is_user_actionable());
+    }
+
+    #[test]
+    fn test_failure_category_as_str_stable_contract() {
+        // These strings are part of the public OTel attribute contract
+        // and must not change between releases without a version bump.
+        assert_eq!(FailureCategory::Auth.as_str(), "auth");
+        assert_eq!(FailureCategory::RateLimit.as_str(), "rate_limit");
+        assert_eq!(FailureCategory::ContextWindow.as_str(), "context_window");
+        assert_eq!(FailureCategory::ContentPolicy.as_str(), "content_policy");
+        assert_eq!(FailureCategory::SchemaMismatch.as_str(), "schema_mismatch");
+        assert_eq!(FailureCategory::McpHandshake.as_str(), "mcp_handshake");
+        assert_eq!(FailureCategory::CircuitOpen.as_str(), "circuit_open");
+
+        // Display is identical to as_str.
+        assert_eq!(format!("{}", FailureCategory::Auth), "auth");
     }
 
     #[test]

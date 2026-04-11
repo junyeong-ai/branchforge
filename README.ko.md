@@ -1,6 +1,6 @@
 # branchforge
 
-Rust로 작성된 stateful coding agent runtime입니다.
+Rust로 작성된 stateful agent runtime — 순수 API 에이전트, 로컬 머신 지식 에이전트, 풀 코딩 에이전트까지 모두 지원하며, 4개 레이어 아키텍처로 필요한 기능만 골라 쓸 수 있도록 설계되었습니다.
 
 [![CI](https://github.com/junyeong-ai/branchforge/actions/workflows/ci.yml/badge.svg)](https://github.com/junyeong-ai/branchforge/actions/workflows/ci.yml)
 [![Rust](https://img.shields.io/badge/rust-1.94%2B-orange.svg)](https://www.rust-lang.org)
@@ -21,11 +21,25 @@ Rust로 작성된 stateful coding agent runtime입니다.
 - 안전한 로컬 도구 실행과 인가 제어
 - Claude CLI의 `.claude/` 레이아웃과 호환되는 워크스페이스 리소스 활용
 
+## 4-레이어 아키텍처
+
+`branchforge`는 4개의 레이어로 구성되어 있으며, 각 레이어는 별도의 Cargo feature로 게이팅됩니다. 배포 환경에 필요한 surface만 선택할 수 있습니다.
+
+| 레이어 | Feature | 추가되는 기능 | 대표 사용 사례 |
+|-------|---------|--------------|-----------|
+| **1 — Pure core** | (항상 켜짐) | Agent runtime, IR, provider client, session graph, hooks, budget, observability, 네트워크 egress 샌드박스. 파일/셸 의존성 없음. | 서버 사이드 API 에이전트, 고객 지원 봇, 워크플로 오케스트레이터. |
+| **2a — Local FS** | `local-fs` | `Workspace`, `SecureFs` (TOCTOU-safe), Read/Write/Edit/Glob/Grep, Landlock/Seatbelt 경로 샌드박스, 범용 markdown memory loader, `explore`/`plan` 서브에이전트. | 연구 에이전트, 지식 노동자, 로컬 데이터 분석가. |
+| **2b — Coding tools** | `coding-tools` | tree-sitter AST 검증을 거치는 Bash, 프로세스 스케줄러, 컨테이너 감지, CLAUDE.md 디스커버리, git 컨텍스트, `bash` 서브에이전트. Layer 2a에 의존. | Claude Code급 코딩 에이전트. |
+| **3 — Cloud providers** | `aws` / `gcp` / `azure` / `cloud-all` | Bedrock, Vertex (Gemini + Anthropic), Azure AI Foundry transport. Layer 1에 의존. | 멀티 클라우드 / 엔터프라이즈 배포. |
+
+기본 features는 `coding-tools` (Layer 2a 자동 활성화). Pure API 사용자는 `default-features = false`로 끄고 `anthropic-direct`만 켜면 됩니다. 자세한 의존성 계약은 [`docs/architecture/layering.md`](docs/architecture/layering.md) 참고.
+
 ## 문서
 
 | 가이드 | 설명 |
 |--------|------|
 | [아키텍처](docs/architecture.md) | 시스템 경계와 설계 원칙 |
+| [레이어링](docs/architecture/layering.md) | 4-레이어 feature 게이팅 계약 |
 | [세션 & 그래프](docs/session.md) | Graph-first 세션 모델과 퍼시스턴스 |
 | [도구](docs/tools.md) | 내장 도구, 접근 제어, 커스텀 도구 |
 | [스킬](docs/skills.md) | Progressive disclosure와 스킬 시스템 |
@@ -37,11 +51,11 @@ Rust로 작성된 stateful coding agent runtime입니다.
 
 ## 핵심 가치
 
-- `SessionGraph`를 canonical state로 사용합니다.
-- `Session.messages`는 message-based API를 위한 projection으로 유지합니다.
+- `SessionGraph`를 canonical state로 사용합니다. 메시지 리스트는 `Session::current_branch_messages()`로 그래프에서 매번 재구성되며, 별도의 `messages` 필드는 존재하지 않습니다.
 - 세션은 분기, replay, export가 가능한 작업 그래프로 관리됩니다.
 - JSONL, PostgreSQL, Redis persistence를 지원합니다.
 - built-in tools, MCP, subagents, skills를 같은 runtime 안에서 조합할 수 있습니다.
+- 구조화된 출력은 provider-neutral `JsonSchemaSpec` 으로 IR 에 담기고, 5 개 codec 이 공유하는 `SchemaPolicy` 파이프라인을 통해 encode 시점에 provider 별 subset 으로 변환됩니다. 탈락된 키워드는 `ModelWarning::LossyEncode` 로 사용자에게 표면화됩니다.
 
 ## 빠른 시작
 
@@ -49,7 +63,7 @@ Rust로 작성된 stateful coding agent runtime입니다.
 
 ```toml
 [dependencies]
-branchforge = "0.7"
+branchforge = "0.9"
 tokio = { version = "1", features = ["full"] }
 ```
 

@@ -1,6 +1,7 @@
 pub mod circuit;
 mod content_source;
 mod directory;
+mod extensions;
 #[cfg(feature = "file-resources")]
 mod file_provider;
 mod frontmatter;
@@ -20,6 +21,7 @@ pub use content_source::ContentSource;
 pub(crate) use directory::is_skill_file;
 #[cfg(feature = "file-resources")]
 pub(crate) use directory::{is_markdown, load_files};
+pub use extensions::Extensions;
 
 pub(crate) fn home_dir() -> Option<PathBuf> {
     directories::UserDirs::new().map(|d| d.home_dir().to_path_buf())

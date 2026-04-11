@@ -7,8 +7,8 @@
 //! Reference: <https://code.claude.com/docs/en/sandboxing>
 
 mod config;
+mod detect;
 mod error;
-mod network;
 
 #[cfg(target_os = "linux")]
 mod landlock;
@@ -16,8 +16,16 @@ mod landlock;
 mod macos;
 
 pub use config::{NetworkConfig, SandboxConfig};
+pub use detect::{ContainerRuntime, detect_container, is_container};
 pub use error::{SandboxError, SandboxResult};
-pub use network::{DomainCheck, NetworkSandbox};
+// `NetworkSandbox` was relocated to `crate::network_sandbox` during the Layer 1
+// / Layer 2a split. It is domain-whitelist HTTP egress control with no
+// filesystem or shell coupling (verified V5 audit), so it belongs in pure
+// core, not behind the `local-fs` feature. Re-exported here only so callers
+// inside the security subtree that still reach it through the sandbox path
+// keep compiling during migration; the canonical path is
+// `crate::network_sandbox::{NetworkSandbox, DomainCheck}`.
+pub use crate::network_sandbox::{DomainCheck, NetworkSandbox};
 
 use std::collections::HashMap;
 use std::path::Path;
