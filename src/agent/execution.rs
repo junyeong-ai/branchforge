@@ -8,9 +8,9 @@ use tracing::{debug, info, instrument, warn};
 use super::AgentMetrics;
 use super::common::{
     self, BudgetContext, accumulate_inner_usage, accumulate_response_usage, emit_cost_report,
-    emit_tokens_consumed, emit_tool_executed, handle_compaction, is_context_overflow_error,
-    maybe_emit_budget_alert, maybe_invoke_explicit_skill_command, run_post_tool_hooks,
-    run_stop_hooks, try_activate_dynamic_rules, try_recover,
+    emit_tokens_consumed, emit_tool_executed, handle_compaction, maybe_emit_budget_alert,
+    maybe_invoke_explicit_skill_command, run_post_tool_hooks, run_stop_hooks,
+    try_activate_dynamic_rules,
 };
 use super::events::AgentResult;
 use super::executor::Agent;
@@ -350,27 +350,31 @@ impl Agent {
 
             let api_start = Instant::now();
             let ir_request = request_builder.build(messages, &dynamic_rules_context);
+
+            // Preflight budget check — reject before sending when the
+            // estimated cost would push the session or tenant over
+            // the limit.
+            let preflight_ctx = BudgetContext {
+                tracker: &self.runtime.budget_tracker,
+                tenant: self.runtime.tenant_budget.as_deref(),
+                config: &self.runtime.config.budget,
+            };
+            preflight_ctx.preflight(&ir_request)?;
+
             let response = match self.runtime.llm.send(&ir_request).await {
                 Ok(resp) => resp,
-                Err(e) if is_context_overflow_error(&e) => {
-                    if let Some(action) = try_recover(
-                        &e,
-                        &self.state,
-                        &self.runtime,
-                        max_tokens,
-                        &mut recovery_attempts,
-                    )
-                    .await
-                    {
-                        use crate::session::compact::recovery::RecoveryAction;
-                        match action {
-                            RecoveryAction::Retry | RecoveryAction::CompactAndRetry => continue,
-                            RecoveryAction::Abort => return Err(e),
-                        }
+                Err(e) => {
+                    let executor = super::recovery_executor::RecoveryExecutor {
+                        registry: &self.runtime.recovery_recipes,
+                        tool_state: &self.state,
+                        llm: Some(self.runtime.llm.as_ref()),
+                        event_bus: self.runtime.event_bus.as_deref(),
+                    };
+                    match executor.apply(&e, &mut recovery_attempts).await {
+                        super::recovery_executor::RecoveryOutcome::Retry => continue,
+                        super::recovery_executor::RecoveryOutcome::Abort => return Err(e),
                     }
-                    return Err(e);
                 }
-                Err(e) => return Err(e),
             };
             recovery_attempts = 0;
             let api_duration_ms = api_start.elapsed().as_millis() as u64;
@@ -400,6 +404,12 @@ impl Agent {
                 &self.runtime.config.model.primary,
                 &response.usage,
             )?;
+
+            // Reconcile preflight estimate against actual usage —
+            // emits a structured debug event so OTel pipelines can
+            // calibrate the estimator over time. Stateless; no agent
+            // state is mutated.
+            let _drift = crate::budget::EstimateReconciler::observe(&ir_request, &response.usage);
 
             emit_tokens_consumed(
                 self.runtime.event_bus.as_deref(),
@@ -709,7 +719,7 @@ impl Agent {
 
     pub(crate) fn hook_context(&self) -> HookContext {
         let ctx = HookContext::new(&*self.session_id)
-            .cwd(self.runtime.config.working_dir.clone().unwrap_or_default())
+            .cwd(self.runtime.config.workspace_root_buf().unwrap_or_default())
             .env(self.runtime.config.security.env.clone());
         match self.runtime.context_scope {
             Some(ref scope) => ctx.context_scope(Arc::clone(scope)),

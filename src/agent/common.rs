@@ -75,6 +75,93 @@ impl BudgetContext<'_> {
     pub fn fallback_model(&self) -> Option<&str> {
         self.tracker.should_fallback()
     }
+
+    /// Preflight budget check: estimate the token/cost footprint of
+    /// `request` and reject it with [`crate::Error::BudgetExceeded`]
+    /// if sending it would push the session or tenant over its
+    /// configured limit.
+    ///
+    /// Behavior is gated on [`crate::budget::OnExceed`]:
+    ///
+    /// - `StopBeforeNext` → fail-fast with `BudgetExceeded` before
+    ///   sending.
+    /// - `WarnAndContinue` → emit a tracing warning but allow the
+    ///   call through; the post-hoc [`check`] will still enforce
+    ///   eventual termination.
+    /// - `FallbackModel` → do nothing here. The caller has already
+    ///   switched models via [`fallback_model`] earlier in the
+    ///   iteration, so the preflight estimate already reflects the
+    ///   cheaper model.
+    ///
+    /// This is the root-cause fix for budget bursting: prior versions
+    /// only checked historical spend, so a single large request could
+    /// push spend arbitrarily past the limit in one step. Preflight
+    /// catches it before the TCP bytes leave the host.
+    pub fn preflight(&self, request: &crate::ir::ModelRequest) -> Result<(), crate::Error> {
+        use crate::budget::{BudgetExceedPolicy, estimate_request_tokens};
+
+        let estimate = estimate_request_tokens(request);
+        let estimated_cost = self.tracker.estimate_cost(&request.model, estimate);
+
+        // Session tracker.
+        if let Some(outcome) = self.tracker.project(estimated_cost) {
+            match outcome {
+                Ok(_projected) => {}
+                Err((used, limit)) => match self.tracker.on_exceed_action() {
+                    BudgetExceedPolicy::Stop => {
+                        warn!(
+                            used = %used,
+                            limit = %limit,
+                            estimate = %estimated_cost,
+                            model = %request.model,
+                            "Preflight blocked request — would exceed session budget"
+                        );
+                        return Err(crate::Error::BudgetExceeded { used, limit });
+                    }
+                    BudgetExceedPolicy::Warn => {
+                        warn!(
+                            used = %used,
+                            limit = %limit,
+                            estimate = %estimated_cost,
+                            "Preflight projected over session budget — continuing (WarnAndContinue)"
+                        );
+                    }
+                    BudgetExceedPolicy::Fallback(_) => {}
+                },
+            }
+        }
+
+        // Tenant budget.
+        if let Some(tenant) = self.tenant {
+            match tenant.project(estimated_cost) {
+                Ok(_) => {}
+                Err((used, limit)) => match tenant.on_exceed_action() {
+                    BudgetExceedPolicy::Stop => {
+                        warn!(
+                            tenant_id = %tenant.tenant_id,
+                            used = %used,
+                            limit = %limit,
+                            estimate = %estimated_cost,
+                            "Preflight blocked request — would exceed tenant budget"
+                        );
+                        return Err(crate::Error::BudgetExceeded { used, limit });
+                    }
+                    BudgetExceedPolicy::Warn => {
+                        warn!(
+                            tenant_id = %tenant.tenant_id,
+                            used = %used,
+                            limit = %limit,
+                            estimate = %estimated_cost,
+                            "Preflight projected over tenant budget — continuing (WarnAndContinue)"
+                        );
+                    }
+                    BudgetExceedPolicy::Fallback(_) => {}
+                },
+            }
+        }
+
+        Ok(())
+    }
 }
 
 /// Accumulate usage from an API response into total_usage, metrics, and budget.
@@ -285,11 +372,14 @@ pub(crate) async fn maybe_invoke_explicit_skill_command(
     }
 
     let actual_input = pre_output.updated_input.unwrap_or(raw_input);
-    let permission = tools
-        .context()
-        .check_explicit_skill_permission(&actual_input);
-    if !permission.is_allowed() {
-        return Err(crate::Error::Authorization(permission.reason().to_string()));
+    #[cfg(feature = "local-fs")]
+    {
+        let permission = tools
+            .context()
+            .check_explicit_skill_permission(&actual_input);
+        if !permission.is_allowed() {
+            return Err(crate::Error::Authorization(permission.reason().to_string()));
+        }
     }
 
     let typed_input: crate::skills::SkillInput = serde_json::from_value(actual_input.clone())
@@ -512,96 +602,11 @@ pub(crate) async fn handle_compaction(
     }
 }
 
-/// Check whether an error is a context overflow that can be recovered from.
-pub(crate) fn is_context_overflow_error(err: &crate::Error) -> bool {
-    matches!(
-        err,
-        crate::Error::ContextWindowExceeded { .. }
-            | crate::Error::Provider {
-                kind: crate::error::ProviderErrorKind::PayloadTooLarge,
-                ..
-            }
-    )
-}
-
-/// Attempt context recovery using the configured strategy.
-///
-/// Returns `Some(RecoveryAction)` if recovery was attempted, `None` if no
-/// strategy is configured or the error is not a context overflow.
-pub(crate) async fn try_recover(
-    error: &crate::Error,
-    tool_state: &ToolState,
-    runtime: &super::runtime::AgentRuntime,
-    max_tokens: u64,
-    attempt: &mut u32,
-) -> Option<crate::session::compact::recovery::RecoveryAction> {
-    use crate::session::compact::recovery::{RecoveryContext, RecoveryErrorKind};
-
-    let strategy = runtime.recovery_strategy.as_ref()?;
-
-    let error_kind = match error {
-        crate::Error::ContextWindowExceeded {
-            estimated, limit, ..
-        } => RecoveryErrorKind::ContextOverflow {
-            estimated: *estimated,
-            limit: *limit,
-        },
-        crate::Error::Provider {
-            kind: crate::error::ProviderErrorKind::PayloadTooLarge,
-            message,
-            ..
-        } => RecoveryErrorKind::ApiPayloadTooLarge {
-            message: message.clone(),
-        },
-        crate::Error::Authentication { .. }
-        | crate::Error::Provider {
-            kind: crate::error::ProviderErrorKind::Auth,
-            ..
-        } => RecoveryErrorKind::AuthFailure {
-            message: error.to_string(),
-        },
-        _ => return None,
-    };
-
-    let ctx = RecoveryContext {
-        error_kind,
-        attempt: *attempt,
-        max_attempts: 3,
-        current_tokens: tool_state.with_session(|s| s.current_input_tokens).await,
-        max_tokens,
-    };
-
-    let result = strategy
-        .attempt_recovery(&ctx, tool_state, Some(runtime.llm.as_ref()), None)
-        .await;
-
-    *attempt += 1;
-
-    match result {
-        Ok(action) => {
-            info!(
-                strategy = strategy.name(),
-                attempt = *attempt,
-                action = ?action,
-                "Context recovery attempted"
-            );
-            if let Some(bus) = runtime.event_bus.as_ref() {
-                bus.emit_simple(
-                    crate::events::EventKind::Custom("context_recovery"),
-                    serde_json::json!({
-                        "attempt": *attempt,
-                        "action": format!("{:?}", action),
-                    }),
-                );
-            }
-            Some(action)
-        }
-        Err(e) => {
-            warn!(error = %e, "Context recovery failed");
-            None
-        }
-    }
-}
+// Recovery handling moved to the typed `RecoveryExecutor` in
+// `agent::recovery_executor`, which interprets the action returned
+// by `RecipeRegistry::decide`. The legacy `RecoveryStrategy` trait
+// + `try_recover` shim were removed in favour of that single
+// pipeline.
 
 /// Extract file path from tool input for rule activation.
 pub(crate) fn extract_file_path(tool_name: &str, input: &Value) -> Option<String> {
@@ -674,6 +679,85 @@ mod tests {
             config: &config,
         };
         assert!(ctx.check().is_ok());
+    }
+
+    #[test]
+    fn preflight_blocks_request_that_would_burst_budget() {
+        use crate::budget::BudgetExceedPolicy;
+        use crate::ir::{Message, ModelRequest, ModelSettings};
+
+        // $0.01 limit is far below the cost of a 1M-input / 4k-output
+        // claude-sonnet-4-5 request (~$3/M input = $3.00 minimum).
+        let tracker = BudgetTracker::new(dec!(0.01)).on_exceed(BudgetExceedPolicy::Stop);
+        let config = BudgetConfig::default();
+        let ctx = BudgetContext {
+            tracker: &tracker,
+            tenant: None,
+            config: &config,
+        };
+
+        // Build a large request: ~4 MB of text ≈ 1M tokens.
+        let bulk = "x".repeat(4_000_000);
+        let mut req = ModelRequest::new("claude-sonnet-4-5", vec![Message::user(bulk.as_str())]);
+        req.settings = ModelSettings::default().with_max_output_tokens(4096);
+
+        let err = ctx.preflight(&req).expect_err("preflight must block");
+        assert!(matches!(err, crate::Error::BudgetExceeded { .. }));
+    }
+
+    #[test]
+    fn preflight_passes_small_request_within_budget() {
+        use crate::budget::BudgetExceedPolicy;
+        use crate::ir::{Message, ModelRequest, ModelSettings};
+
+        let tracker = BudgetTracker::new(dec!(5)).on_exceed(BudgetExceedPolicy::Stop);
+        let config = BudgetConfig::default();
+        let ctx = BudgetContext {
+            tracker: &tracker,
+            tenant: None,
+            config: &config,
+        };
+
+        let mut req = ModelRequest::new("claude-sonnet-4-5", vec![Message::user("hello")]);
+        req.settings = ModelSettings::default().with_max_output_tokens(64);
+        ctx.preflight(&req)
+            .expect("small request must fit under $5 budget");
+    }
+
+    #[test]
+    fn preflight_warn_and_continue_never_blocks() {
+        use crate::budget::BudgetExceedPolicy;
+        use crate::ir::{Message, ModelRequest};
+
+        let tracker = BudgetTracker::new(dec!(0.000001)).on_exceed(BudgetExceedPolicy::Warn);
+        let config = BudgetConfig::default();
+        let ctx = BudgetContext {
+            tracker: &tracker,
+            tenant: None,
+            config: &config,
+        };
+
+        let req = ModelRequest::new("claude-sonnet-4-5", vec![Message::user("hi")]);
+        ctx.preflight(&req)
+            .expect("WarnAndContinue must never fail preflight");
+    }
+
+    #[test]
+    fn preflight_unlimited_tracker_never_blocks() {
+        use crate::ir::{Message, ModelRequest};
+
+        let tracker = BudgetTracker::unlimited();
+        let config = BudgetConfig::default();
+        let ctx = BudgetContext {
+            tracker: &tracker,
+            tenant: None,
+            config: &config,
+        };
+
+        let bulk = "y".repeat(10_000_000);
+        let req = ModelRequest::new("claude-opus-4-6", vec![Message::user(bulk.as_str())]);
+        ctx.preflight(&req)
+            .expect("unlimited budget must always preflight-pass");
     }
 
     #[test]

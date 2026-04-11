@@ -5,6 +5,7 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 use tokio_util::sync::CancellationToken;
 
+use super::recovery_recipes::RecipeRegistry;
 use crate::authorization::{ApprovalSender, ExecutionMode};
 use crate::budget::{BudgetTracker, TenantBudget};
 use crate::client::LlmCall;
@@ -14,7 +15,6 @@ use crate::events::EventBus;
 use crate::hooks::HookRegistry;
 use crate::orchestration::{AgentDirectory, Coordination};
 use crate::session::compact::CompactionChain;
-use crate::session::compact::recovery::RecoveryStrategy;
 use crate::tools::{ToolRegistry, ToolSearchEngine};
 
 use super::config::AgentConfig;
@@ -34,8 +34,11 @@ use super::config::AgentConfig;
 /// - **Resource accounting** — `budget_tracker`, `tenant_budget`,
 ///   `mcp_manager`, `tool_search_manager`. External services and budgets
 ///   that influence what tools and how many tokens the agent may consume.
-/// - **Session lifecycle** — `compaction_chain`, `recovery_strategy`. Hooks
-///   that fire on session compaction and recovery, both optional.
+/// - **Session lifecycle** — `compaction_chain`, `recovery_recipes`.
+///   Hooks that fire on session compaction and recovery. The recipe
+///   registry is always present (defaults to the canonical builtin
+///   set) so the recovery loop has a single, uniform decision
+///   surface.
 /// - **Multi-agent coordination** — `orchestrator`, `coordination`,
 ///   `agent_directory`. All `Option` so single-agent execution pays
 ///   no cost.
@@ -63,7 +66,7 @@ pub struct AgentRuntime {
 
     // ── Session lifecycle ────────────────────────────────────────────
     pub(crate) compaction_chain: Option<Arc<CompactionChain>>,
-    pub(crate) recovery_strategy: Option<Arc<dyn RecoveryStrategy>>,
+    pub(crate) recovery_recipes: Arc<RecipeRegistry>,
 
     // ── Multi-agent coordination ─────────────────────────────────────
     pub(crate) orchestrator: Option<Arc<RwLock<PromptOrchestrator>>>,

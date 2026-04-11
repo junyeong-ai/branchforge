@@ -111,8 +111,8 @@ pub struct AgentBuilder {
     pub(super) compaction_chain: Option<std::sync::Arc<crate::session::compact::CompactionChain>>,
     pub(super) memory_store: Option<std::sync::Arc<dyn crate::session::MemoryStore>>,
     pub(super) coordination: Option<std::sync::Arc<dyn crate::orchestration::Coordination>>,
-    pub(super) recovery_strategy:
-        Option<std::sync::Arc<dyn crate::session::compact::recovery::RecoveryStrategy>>,
+    pub(super) recovery_recipes:
+        Option<std::sync::Arc<crate::agent::recovery_recipes::RecipeRegistry>>,
     pub(super) initial_messages: Option<Vec<crate::ir::Message>>,
     pub(super) resume_session_id: Option<String>,
     pub(super) resumed_session: Option<crate::session::Session>,
@@ -169,7 +169,7 @@ impl AgentBuilder {
     ///
     /// ```rust,no_run
     /// # async fn example() -> branchforge::Result<()> {
-    /// let pc = branchforge::Preset::VertexGemini.build_from_env().await?;
+    /// let pc = branchforge::ProfileRegistry::with_builtins().build("vertex-gemini")?;
     /// let agent = branchforge::Agent::builder()
     ///     .provider_client(pc)
     ///     .model("gemini-2.5-flash")
@@ -510,9 +510,16 @@ impl AgentBuilder {
     // Execution
     // =========================================================================
 
-    /// Sets the working directory for file operations.
+    /// Sets the workspace root for filesystem tools (Read/Write/Edit/Glob/Grep/Bash).
+    ///
+    /// This inserts a [`Workspace`][crate::Workspace] into
+    /// [`AgentConfig::extensions`]. Pure-API agents (Layer 1 only) have no
+    /// reason to call this. Local filesystem agents (Layer 2a, `local-fs`
+    /// feature) and coding agents (Layer 2b, `coding-tools` feature) must
+    /// call it — the tools consult the workspace through the Extensions
+    /// container.
     pub fn working_dir(mut self, path: impl Into<PathBuf>) -> Self {
-        self.config.working_dir = Some(path.into());
+        self.config.extensions.insert(crate::Workspace::new(path));
         self
     }
 
@@ -650,25 +657,37 @@ impl AgentBuilder {
         self
     }
 
-    /// Adds a rule to allow a tool or pattern (e.g., `"Read"` or `"Bash(git:*)"`)
-    pub fn allow_tool(mut self, pattern: impl Into<String>) -> Self {
+    /// Adds a permission rule using the canonical DSL grammar.
+    ///
+    /// `pattern` is a [`crate::authorization::dsl`] rule string. The decision
+    /// keyword (`allow` / `deny` / `ask`) may appear inside the
+    /// string; when omitted, defaults to **Allow**.
+    ///
+    /// Examples:
+    /// - `"Read"` — allow the Read tool
+    /// - `"Bash(git:*)"` — allow Bash commands beginning with `git:`
+    /// - `"deny Bash(rm:*)"` — explicit deny inside the string
+    /// - `"WebFetch(domain:github.com)"` — domain-scoped allow
+    pub fn allow_tool(mut self, pattern: &str) -> Self {
         self.authorization_policy_explicit = true;
         self.config
             .security
             .authorization_policy
             .rules
-            .push(ToolRule::allow_pattern(pattern));
+            .push(ToolRule::allow(pattern));
         self
     }
 
-    /// Adds a rule to deny a tool or pattern (e.g., `"Write"` or `"Bash(rm:*)"`)
-    pub fn deny_tool(mut self, pattern: impl Into<String>) -> Self {
+    /// Adds a permission rule using the canonical DSL grammar with
+    /// **Deny** as the default decision when the rule string omits
+    /// the keyword. See [`Self::allow_tool`] for the grammar.
+    pub fn deny_tool(mut self, pattern: &str) -> Self {
         self.authorization_policy_explicit = true;
         self.config
             .security
             .authorization_policy
             .rules
-            .push(ToolRule::deny_pattern(pattern));
+            .push(ToolRule::deny(pattern));
         self
     }
 
@@ -1150,18 +1169,19 @@ impl AgentBuilder {
     // Recovery
     // =========================================================================
 
-    /// Sets a custom context recovery strategy for handling context overflow errors.
-    pub fn recovery_strategy(
+    /// Replaces the agent's recovery recipe registry with a custom
+    /// one. The default registry, applied when this builder method
+    /// is not called, contains the canonical
+    /// [`crate::agent::recovery_recipes::builtin_general_recipes`]
+    /// set: rate-limit backoff, transport retry, context-overflow
+    /// collapse-then-compact, provider-server fallback, and
+    /// auth-failure single retry.
+    pub fn recovery_recipes(
         mut self,
-        strategy: impl crate::session::compact::recovery::RecoveryStrategy + 'static,
+        registry: crate::agent::recovery_recipes::RecipeRegistry,
     ) -> Self {
-        self.recovery_strategy = Some(std::sync::Arc::new(strategy));
+        self.recovery_recipes = Some(std::sync::Arc::new(registry));
         self
-    }
-
-    /// Enables the default context recovery strategy ([`ContextRecovery`](crate::session::ContextRecovery)).
-    pub fn default_recovery(self) -> Self {
-        self.recovery_strategy(crate::session::compact::recovery::ContextRecovery::default())
     }
 
     // =========================================================================

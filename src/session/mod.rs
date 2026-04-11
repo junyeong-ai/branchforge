@@ -23,9 +23,6 @@ pub use archive::{
     ArchivePolicy, RestoreVerificationReport, RestoreVerifier, SessionArchiveBundle,
     SessionArchiver,
 };
-pub use compact::recovery::{
-    ContextRecovery, RecoveryAction, RecoveryContext, RecoveryErrorKind, RecoveryStrategy,
-};
 pub use compact::{
     CompactConfig, CompactionChain, CompactionChainBuilder, CompactionContext, CompactionPlan,
     CompactionStrategy, Compactor, ContentOverrideEntry, DEFAULT_COMPACT_THRESHOLD, FullCompaction,

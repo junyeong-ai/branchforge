@@ -111,8 +111,8 @@ impl AgentBuilder {
             agent.runtime_mut().coordination = Some(coordination);
         }
 
-        if let Some(strategy) = self.recovery_strategy {
-            agent.runtime_mut().recovery_strategy = Some(strategy);
+        if let Some(registry) = self.recovery_recipes {
+            agent.runtime_mut().recovery_recipes = registry;
         }
 
         agent.persist_session_state().await?;
@@ -146,7 +146,7 @@ impl AgentBuilder {
 
         let mut chain = ChainOutputStyleProvider::new().provider(builtins);
 
-        if let Some(ref working_dir) = self.config.working_dir {
+        if let Some(working_dir) = self.config.workspace_root() {
             let project = file_output_style_provider()
                 .project_path(working_dir)
                 .priority(20)
@@ -214,12 +214,15 @@ impl AgentBuilder {
             .take()
             .unwrap_or_else(|| std::sync::Arc::new(crate::mcp::McpManager::new()));
 
+        // Use the tracked variant so one broken server does not abort
+        // the whole agent build — its failure is recorded in the
+        // manager's DegradedReport and the remaining healthy servers
+        // are still connected. Callers that want fail-fast-on-any-MCP
+        // semantics can inspect
+        // `McpManager::degraded_report_snapshot` on the finished
+        // runtime.
         for (name, config) in std::mem::take(&mut self.mcp_configs) {
-            manager.add_server(&name, config).await.map_err(|e| {
-                crate::Error::Mcp(crate::mcp::McpError::ConnectionFailed {
-                    message: format!("{}: {}", name, e),
-                })
-            })?;
+            let _ = manager.add_server_tracked(&name, config).await;
         }
 
         self.mcp_manager = Some(manager);
@@ -419,14 +422,20 @@ impl AgentBuilder {
 
         let working_dir = self
             .config
-            .working_dir
-            .clone()
+            .workspace_root_buf()
             .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
 
+        // Sandbox config conversion is only meaningful when the `local-fs`
+        // feature is active — pure Layer 1 has no filesystem sandbox to
+        // configure. Settings are still parsed and retained on the builder
+        // either way so that a future enable of the feature reuses them.
+        #[cfg(feature = "local-fs")]
         let sandbox_config = self
             .sandbox_settings
             .take()
             .map(|s| s.to_sandbox_config(working_dir.clone()));
+        #[cfg(not(feature = "local-fs"))]
+        let _ = self.sandbox_settings.take();
 
         let (tool_state, session_id) = match self.resumed_session.take() {
             Some(session) => {
@@ -472,6 +481,7 @@ impl AgentBuilder {
         } else {
             builder = builder.delegation_runtime(delegation_runtime);
         }
+        #[cfg(feature = "local-fs")]
         if let Some(sc) = sandbox_config {
             builder = builder.sandbox_config(sc);
         }
@@ -519,25 +529,31 @@ impl AgentBuilder {
     }
 
     async fn build_llm(&mut self) -> crate::Result<std::sync::Arc<dyn crate::client::LlmCall>> {
-        use crate::client::preset::Preset;
+        use crate::client::preset::ProfileRegistry;
         use crate::client::{LlmCall, RetryingClient};
 
         let provider = self.cloud_provider.unwrap_or_else(CloudProvider::from_env);
-        let preset = match provider {
-            CloudProvider::Anthropic => Preset::Anthropic,
+        // Map the legacy CloudProvider enum to a canonical profile id.
+        // The profile id is the single source of truth — this match
+        // is the *only* place CloudProvider influences provider
+        // selection. Future cloud providers add a variant here and
+        // a registered profile in `client::preset`.
+        let profile_id: &str = match provider {
+            CloudProvider::Anthropic => "anthropic",
             #[cfg(feature = "aws")]
-            CloudProvider::Bedrock => Preset::Bedrock,
+            CloudProvider::Bedrock => "bedrock",
             #[cfg(feature = "gcp")]
-            CloudProvider::Vertex => Preset::VertexAnthropic,
+            CloudProvider::Vertex => "vertex-anthropic",
             #[cfg(feature = "azure")]
-            CloudProvider::Foundry => Preset::FoundryAnthropic,
+            CloudProvider::Foundry => "foundry-anthropic",
             #[cfg(feature = "openai")]
-            CloudProvider::OpenAi => Preset::OpenAi,
+            CloudProvider::OpenAi => "openai",
             #[cfg(feature = "gemini")]
-            CloudProvider::Gemini => Preset::Gemini,
+            CloudProvider::Gemini => "gemini",
         };
 
-        // Build ProviderClient — either from explicit provider_client or from preset
+        // Build ProviderClient — either from explicit provider_client
+        // or by looking up the profile in the builtin registry.
         let pc: Arc<dyn LlmCall> = if let Some(pc) = self.provider_client.take() {
             tracing::info!(
                 codec = pc.codec_id(),
@@ -546,8 +562,12 @@ impl AgentBuilder {
             );
             Arc::new(pc)
         } else {
-            tracing::info!(preset = preset.id(), "Building ProviderClient from preset");
-            Arc::new(preset.build_from_env().await?)
+            tracing::info!(
+                profile = profile_id,
+                "Building ProviderClient from profile registry"
+            );
+            let registry = ProfileRegistry::with_builtins();
+            Arc::new(registry.build(profile_id)?)
         };
 
         // Wrap with retry

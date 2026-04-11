@@ -507,7 +507,7 @@ mod tests {
 ///
 /// Resolves from `CLAUDE_CODE_USE_*` env vars and supplies the right
 /// [`ModelConfig`] defaults. Provider routing for the actual HTTP call
-/// is now handled by [`crate::Preset`] / [`crate::ProviderClient`]; this
+/// is now handled by [`crate::ProfileRegistry`] / [`crate::ProviderClient`]; this
 /// enum only exists for *model-id defaulting* in the agent layer.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum CloudProvider {

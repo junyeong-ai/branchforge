@@ -490,6 +490,11 @@ impl SessionManager {
         )
     }
 
+    /// Test-only convenience wrapper that replays the message list at a
+    /// named checkpoint. Production callers should use
+    /// [`fork_from_checkpoint`] (which materialises a full `Session`) or
+    /// the `ScopedSessionManager::replay_from_checkpoint` public API via
+    /// a scope-restricted manager.
     #[cfg(test)]
     pub async fn replay_from_checkpoint(
         &self,
@@ -510,7 +515,23 @@ impl SessionManager {
         )
     }
 
-    #[cfg(test)]
+    /// Fork a new session branch starting at the named bookmark.
+    ///
+    /// Looks up the bookmark `label` on the specified branch (or the
+    /// primary branch if `branch_id` is `None`), then creates a new
+    /// session whose history descends from that bookmark's target node.
+    /// The parent session is unchanged; the returned `Session` is an
+    /// independent workspace sharing ancestry with the parent up to the
+    /// fork point.
+    ///
+    /// Useful for exploring "what-if" continuations from a specific
+    /// decision point without disturbing the original branch.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SessionError::Storage`] if the session is not found,
+    /// the bookmark label does not resolve on the target branch, or the
+    /// underlying persistence layer rejects the fork.
     pub async fn fork_from_bookmark(
         &self,
         id: &SessionId,
@@ -531,7 +552,25 @@ impl SessionManager {
         .await
     }
 
-    #[cfg(test)]
+    /// Fork a new session branch starting at the named checkpoint.
+    ///
+    /// This is the canonical "restore" semantic for an append-only
+    /// session graph: the original session history is preserved, and a
+    /// new branch is created whose state matches what the session
+    /// looked like at the checkpoint. The checkpoint itself is
+    /// unaffected and can be forked from again later.
+    ///
+    /// Prefer this over any notion of "rewinding" a session —
+    /// `SessionGraph` is event-sourced and append-only, so rewinding in
+    /// place would violate the SSoT invariant. Forking achieves the
+    /// user-facing goal ("continue from this point") without breaking
+    /// the history.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SessionError::Storage`] if the session is not found,
+    /// the checkpoint label does not resolve on the target branch, or
+    /// the underlying persistence layer rejects the fork.
     pub async fn fork_from_checkpoint(
         &self,
         id: &SessionId,
@@ -550,6 +589,55 @@ impl SessionManager {
             crate::graph::GraphReferenceResolver::node_id(&reference),
         )
         .await
+    }
+
+    /// List all checkpoints on a session, optionally restricted to one
+    /// branch.
+    ///
+    /// Pairs with [`Self::fork_from_checkpoint`] — call this first to
+    /// discover the available labels, then fork into the one you want.
+    /// Returns owned `Checkpoint` values (label, node id, timestamp,
+    /// tags) so callers can display them without holding a lock on the
+    /// session graph.
+    pub async fn list_checkpoints(
+        &self,
+        id: &SessionId,
+        branch_id: Option<crate::graph::BranchId>,
+    ) -> SessionResult<Vec<crate::graph::Checkpoint>> {
+        let session = self.get(id).await?;
+        let checkpoints = match branch_id {
+            Some(branch) => session
+                .graph
+                .checkpoints_for_branch(branch)
+                .into_iter()
+                .cloned()
+                .collect(),
+            None => session.graph.checkpoints().values().cloned().collect(),
+        };
+        Ok(checkpoints)
+    }
+
+    /// List all bookmarks on a session, optionally restricted to one
+    /// branch.
+    ///
+    /// Pairs with [`Self::fork_from_bookmark`] — call this first to
+    /// discover the available labels, then fork into the one you want.
+    pub async fn list_bookmarks(
+        &self,
+        id: &SessionId,
+        branch_id: Option<crate::graph::BranchId>,
+    ) -> SessionResult<Vec<crate::graph::Bookmark>> {
+        let session = self.get(id).await?;
+        let bookmarks = match branch_id {
+            Some(branch) => session
+                .graph
+                .bookmarks_for_branch(branch)
+                .into_iter()
+                .cloned()
+                .collect(),
+            None => session.graph.bookmarks().values().cloned().collect(),
+        };
+        Ok(bookmarks)
     }
 
     #[cfg(test)]
@@ -1504,6 +1592,70 @@ mod tests {
 
         assert_eq!(diff.left_only_count, 1);
         assert_eq!(diff.right_only_count, 1);
+    }
+
+    /// Exercises the public `fork_from_checkpoint` / `list_checkpoints`
+    /// API path that task T1-5 promoted out of `#[cfg(test)]`.
+    ///
+    /// Previously `fork_from_checkpoint` was a test-only helper; after
+    /// T1-5 it is a supported public method on `SessionManager`. This
+    /// test verifies that:
+    /// 1. `list_checkpoints` returns the expected labels.
+    /// 2. `fork_from_checkpoint` materialises an independent session
+    ///    whose message list matches the checkpoint's snapshot and
+    ///    whose id differs from the parent.
+    /// 3. The parent session is unaffected by the fork — subsequent
+    ///    messages on the parent do not appear in the forked session.
+    #[tokio::test]
+    async fn test_public_fork_from_checkpoint_api() {
+        use crate::ir::ContentPart;
+
+        let manager = SessionManager::in_memory();
+        let parent = manager.create(SessionConfig::default()).await.unwrap();
+        let parent_id = parent.id;
+
+        manager
+            .add_message(
+                &parent_id,
+                SessionMessage::user(vec![ContentPart::text("first turn")]),
+            )
+            .await
+            .unwrap();
+
+        {
+            let mut session = manager.get(&parent_id).await.unwrap();
+            session
+                .checkpoint_current_head("after-first", None, vec!["milestone".into()])
+                .unwrap();
+            manager.persistence.save(&session).await.unwrap();
+        }
+
+        manager
+            .add_message(
+                &parent_id,
+                SessionMessage::assistant(vec![ContentPart::text("continued")]),
+            )
+            .await
+            .unwrap();
+
+        // 1. list_checkpoints surfaces the saved label.
+        let checkpoints = manager.list_checkpoints(&parent_id, None).await.unwrap();
+        assert_eq!(checkpoints.len(), 1);
+        assert_eq!(checkpoints[0].label, "after-first");
+
+        // 2. fork_from_checkpoint creates an independent session rooted
+        //    at the checkpoint's snapshot.
+        let forked = manager
+            .fork_from_checkpoint(&parent_id, "after-first", None)
+            .await
+            .unwrap();
+        assert_ne!(forked.id, parent_id);
+        assert_eq!(forked.current_branch_messages().len(), 1);
+
+        // 3. Parent remains intact and continues to include the later
+        //    message that followed the checkpoint.
+        let parent_again = manager.get(&parent_id).await.unwrap();
+        assert_eq!(parent_again.current_branch_messages().len(), 2);
     }
 
     #[tokio::test]

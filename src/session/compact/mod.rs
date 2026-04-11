@@ -29,7 +29,6 @@
 pub mod chain;
 pub mod full;
 pub mod micro;
-pub mod recovery;
 mod result;
 mod service;
 pub mod strategy;

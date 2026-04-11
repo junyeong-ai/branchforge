@@ -1,7 +1,7 @@
 //! Request building utilities for agent execution.
 
 use std::collections::BTreeMap;
-use std::path::PathBuf;
+use std::path::Path;
 use std::sync::Arc;
 
 use crate::agent::config::{AgentConfig, CacheConfig, SystemPromptMode};
@@ -34,7 +34,7 @@ impl RequestBuilder {
     ) -> Self {
         let base_system_prompt = Self::generate_base_prompt(
             &config.model.primary,
-            config.working_dir.as_ref(),
+            config.workspace_root(),
             config.prompt.output_style.as_ref(),
         );
 
@@ -221,9 +221,16 @@ impl RequestBuilder {
             ));
         }
 
-        // Dynamic rules are never cached (they change frequently)
+        // Dynamic rules are never cached (they change frequently).
+        // Insert a structural boundary marker first so codecs that
+        // implement prompt caching can apply their cache breakpoint
+        // to the block immediately preceding it — the cacheable
+        // prefix terminates exactly at the boundary, even when the
+        // dynamic suffix changes shape between calls. The boundary
+        // block carries no wire content; every codec drops it.
         if !dynamic_rules.is_empty() {
-            blocks.push(ir::SystemBlock::uncached(dynamic_rules));
+            blocks.push(ir::SystemBlock::boundary());
+            blocks.push(ir::SystemBlock::dynamic(dynamic_rules));
         }
 
         if blocks.is_empty() {
@@ -321,7 +328,7 @@ impl RequestBuilder {
 
     fn generate_base_prompt(
         model: &str,
-        working_dir: Option<&PathBuf>,
+        working_dir: Option<&Path>,
         output_style: Option<&OutputStyle>,
     ) -> String {
         let mut generator = SystemPromptGenerator::new().model(model);

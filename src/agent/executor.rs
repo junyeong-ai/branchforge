@@ -31,7 +31,7 @@ impl Agent {
     pub fn new(llm: Arc<dyn crate::client::LlmCall>, config: AgentConfig) -> Self {
         let tools = ToolRegistry::default_tools(
             config.security.tool_surface.clone(),
-            config.working_dir.clone(),
+            config.workspace_root_buf(),
             Some(config.security.authorization_policy.clone()),
         );
         Self::from_parts(
@@ -87,7 +87,10 @@ impl Agent {
             coordination: None,
             agent_directory: None,
             compaction_chain: None,
-            recovery_strategy: None,
+            recovery_recipes: Arc::new(
+                super::recovery_recipes::RecipeRegistry::new()
+                    .with_boxed_recipes(super::recovery_recipes::builtin_general_recipes()),
+            ),
             budget_tracker: Arc::new(budget_tracker),
             tenant_budget: None,
             mcp_manager: None,

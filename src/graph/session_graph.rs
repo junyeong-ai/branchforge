@@ -77,35 +77,176 @@ impl SessionGraph {
 
     // ── Archival ─────────────────────────────────────────────────────
 
+    /// Maximum number of walk-back iterations when adjusting the
+    /// archive watermark to preserve tool-pair integrity.
+    ///
+    /// The algorithm converges in at most one step per distinct
+    /// `tool_call_id` in the graph, so this bound only trips on
+    /// pathological inputs. It exists so the loop cannot deadlock.
+    pub const MAX_WATERMARK_WALKBACK: usize = 256;
+
     /// Mark all primary-branch nodes before `watermark` as archived.
     ///
     /// Archived nodes remain in the graph (preserving `parent_id` chains
     /// and checkpoint/bookmark references) but are skipped by the session
     /// layer's message projection (`Session::current_branch_messages()`).
     ///
+    /// # Tool-pair integrity
+    ///
+    /// If the requested watermark would fall *between* a `ToolCall`
+    /// content part and its matching `ToolResult`, the watermark is
+    /// **walked back** until every visible `ToolResult` on the primary
+    /// branch has its matching `ToolCall` visible as well. This protects
+    /// downstream providers (OpenAI Chat Completions, Gemini
+    /// `generateContent`) from receiving an orphaned `tool` role message
+    /// and returning a `400 invalid_request` error — the production bug
+    /// that `claw-code` documented as
+    /// [compact.rs:121-159](https://github.com/ultraworkers/claw-code).
+    ///
+    /// The walk-back is bounded by [`SessionGraph::MAX_WATERMARK_WALKBACK`] iterations.
+    /// If the bound is exceeded (pathological graph with thousands of
+    /// interleaved tool pairs), the method returns
+    /// [`GraphError::WatermarkUnresolvable`] and leaves the graph's
+    /// existing watermark untouched — archival failure is always safer
+    /// than corrupting projection.
+    ///
     /// Returns the number of primary-branch nodes that precede the
-    /// watermark (i.e. the archived count).
+    /// **effective** watermark (after walk-back adjustment), i.e. the
+    /// archived count.
     pub fn archive_before(&mut self, watermark: NodeId) -> Result<usize, GraphError> {
         if !self.nodes.contains_key(&watermark) {
             return Err(GraphError::MissingNode { node_id: watermark });
         }
+
+        let effective = self.tool_pair_adjusted_watermark(watermark)?;
         let primary = self.primary_branch;
-        let watermark_created_at = self.nodes[&watermark].created_at;
+        let watermark_created_at = self.nodes[&effective].created_at;
         let count = self
             .nodes
             .values()
             .filter(|n| n.branch_id == primary && n.created_at < watermark_created_at)
             .count();
 
-        self.archived_watermark = Some(watermark);
+        self.archived_watermark = Some(effective);
         self.events.push(GraphEvent::with_metadata(
             EventMetadata::new(None),
             GraphEventBody::EventsArchived {
-                watermark_node_id: watermark,
+                watermark_node_id: effective,
                 archived_count: count,
             },
         ));
         Ok(count)
+    }
+
+    /// Adjust `desired` backward so no visible `ToolResult` ends up
+    /// orphaned from its matching `ToolCall`.
+    ///
+    /// Algorithm:
+    ///
+    /// 1. Build a `tool_call_id → (call_node, result_node)` index across
+    ///    all primary-branch nodes. (Independent of the current watermark.)
+    /// 2. Starting from `desired`, loop: find every pair where
+    ///    `call.created_at < current_wm AND result.created_at >= current_wm`
+    ///    — these are the crossing pairs that would orphan a `ToolResult`.
+    ///    If there are none, `current_wm` is the answer. Otherwise, move
+    ///    the watermark backward to the earliest `call.created_at` across
+    ///    all crossing pairs. That folds every currently-crossing pair
+    ///    back into the visible set; widening the visible set may expose
+    ///    new `ToolResult`s whose matching `ToolCall`s sit even earlier,
+    ///    so re-check.
+    /// 3. Bounded by [`MAX_WATERMARK_WALKBACK`] iterations.
+    ///
+    /// This helper is the only place tool-pair integrity is enforced;
+    /// the `GraphValidator::validate` invariant `archived_watermark_*`
+    /// confirms the outcome after the fact but does not repair it.
+    fn tool_pair_adjusted_watermark(&self, desired: NodeId) -> Result<NodeId, GraphError> {
+        use crate::ir::ContentPart;
+        use std::collections::HashMap;
+
+        let primary = self.primary_branch;
+
+        // Walk all primary-branch nodes in chronological order and
+        // extract every ToolCall / ToolResult by `tool_call_id`.
+        struct PairEndpoint {
+            node_id: NodeId,
+            created_at: chrono::DateTime<chrono::Utc>,
+        }
+        let mut calls: HashMap<String, PairEndpoint> = HashMap::new();
+        let mut results: HashMap<String, PairEndpoint> = HashMap::new();
+
+        for node in self.nodes.values().filter(|n| n.branch_id == primary) {
+            let Some(content_value) = node.payload.get("content") else {
+                continue;
+            };
+            let Ok(parts) = serde_json::from_value::<Vec<ContentPart>>(content_value.clone())
+            else {
+                continue;
+            };
+            for part in parts {
+                match part {
+                    ContentPart::ToolCall { id, .. } => {
+                        calls.insert(
+                            id,
+                            PairEndpoint {
+                                node_id: node.id,
+                                created_at: node.created_at,
+                            },
+                        );
+                    }
+                    ContentPart::ToolResult { tool_call_id, .. } => {
+                        results.insert(
+                            tool_call_id,
+                            PairEndpoint {
+                                node_id: node.id,
+                                created_at: node.created_at,
+                            },
+                        );
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        // Pair table: (call_time, result_time, call_node_id) for every
+        // tool call that has a matching result on the same branch.
+        // Orphaned results without a matching call are ignored — the
+        // graph is already broken in a different way and the walker
+        // cannot fix it.
+        let pairs: Vec<(
+            chrono::DateTime<chrono::Utc>,
+            chrono::DateTime<chrono::Utc>,
+            NodeId,
+        )> = calls
+            .into_iter()
+            .filter_map(|(id, call)| {
+                results
+                    .remove(&id)
+                    .map(|result| (call.created_at, result.created_at, call.node_id))
+            })
+            .collect();
+
+        // Iterative walk-back.
+        let mut current = desired;
+        for _ in 0..Self::MAX_WATERMARK_WALKBACK {
+            let current_ts = self.nodes[&current].created_at;
+
+            // Find the earliest call_time among crossing pairs.
+            let earliest_crossing_call = pairs
+                .iter()
+                .filter(|(call_ts, result_ts, _)| *call_ts < current_ts && *result_ts >= current_ts)
+                .map(|(_, _, call_node)| *call_node)
+                .min_by_key(|node| self.nodes[node].created_at);
+
+            match earliest_crossing_call {
+                None => return Ok(current), // fixed point reached
+                Some(call_node) => current = call_node,
+            }
+        }
+
+        Err(GraphError::WatermarkUnresolvable {
+            desired_watermark: desired,
+            walkback_limit: Self::MAX_WATERMARK_WALKBACK,
+        })
     }
 
     // ── Incremental event application ─────────────────────────────────
@@ -1083,5 +1224,207 @@ mod tests {
         graph.apply_event(&archive_event);
 
         assert_eq!(graph.archived_watermark, Some(n1));
+    }
+
+    // ---------------------------------------------------------------
+    // archive_before — tool-pair integrity walk-back (T1-3)
+    // ---------------------------------------------------------------
+
+    /// Build a graph with a tool call / result pair so archival tests
+    /// can reason about pair integrity. Layout on the primary branch:
+    ///
+    /// ```text
+    ///   n0 (User "query")
+    ///   n1 (Assistant with ToolCall id="t1")
+    ///   n2 (User with ToolResult tool_call_id="t1")
+    ///   n3 (Assistant "final answer")
+    /// ```
+    fn tool_pair_graph() -> (SessionGraph, [NodeId; 4]) {
+        use crate::ir::ContentPart;
+        let mut graph = SessionGraph::default();
+        let primary = graph.primary_branch;
+
+        let n0 = graph
+            .append_node(
+                primary,
+                NodeKind::User,
+                serde_json::json!({
+                    "content": [ContentPart::text("query")],
+                }),
+            )
+            .unwrap();
+        let n1 = graph
+            .append_node(
+                primary,
+                NodeKind::Assistant,
+                serde_json::json!({
+                    "content": [ContentPart::ToolCall {
+                        id: "t1".to_string(),
+                        name: "echo".to_string(),
+                        arguments: serde_json::json!({}),
+                        origin: crate::ir::ToolOrigin::Local,
+                    }],
+                }),
+            )
+            .unwrap();
+        let n2 = graph
+            .append_node(
+                primary,
+                NodeKind::User,
+                serde_json::json!({
+                    "content": [ContentPart::ToolResult {
+                        tool_call_id: "t1".to_string(),
+                        tool_name: Some("echo".to_string()),
+                        content: crate::ir::ToolResultContent::Text("ok".to_string()),
+                        is_error: false,
+                    }],
+                }),
+            )
+            .unwrap();
+        let n3 = graph
+            .append_node(
+                primary,
+                NodeKind::Assistant,
+                serde_json::json!({
+                    "content": [ContentPart::text("final answer")],
+                }),
+            )
+            .unwrap();
+
+        (graph, [n0, n1, n2, n3])
+    }
+
+    #[test]
+    fn archive_before_leaves_watermark_alone_when_no_pair_crosses() {
+        let (mut graph, nodes) = tool_pair_graph();
+        // Archive everything up to n3 — this archives n0, n1, n2 and
+        // leaves only n3 visible. No tool pair is visible (because n2
+        // becomes archived too), so walk-back is not needed.
+        let count = graph.archive_before(nodes[3]).unwrap();
+        assert_eq!(count, 3);
+        assert_eq!(graph.archived_watermark, Some(nodes[3]));
+    }
+
+    #[test]
+    fn archive_before_walks_back_to_include_matching_tool_call() {
+        let (mut graph, nodes) = tool_pair_graph();
+        // Request watermark at n2 (the ToolResult). This would archive
+        // n0, n1 and leave n2, n3 visible — orphaning n2's ToolResult
+        // from its matching ToolCall at n1. The walk-back must shift
+        // the watermark back to n1 so both sides of the pair stay
+        // visible together.
+        let count = graph.archive_before(nodes[2]).unwrap();
+        assert_eq!(
+            graph.archived_watermark,
+            Some(nodes[1]),
+            "watermark must walk back to the ToolCall node"
+        );
+        // After walk-back, only n0 is archived (the User query before
+        // the ToolCall).
+        assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn archive_before_with_no_crossing_is_identity() {
+        let (mut graph, nodes) = tool_pair_graph();
+        // Archive before n1 — this archives only n0 and leaves the
+        // whole pair plus the final answer visible. No crossing, no
+        // walk-back needed.
+        let count = graph.archive_before(nodes[1]).unwrap();
+        assert_eq!(count, 1);
+        assert_eq!(graph.archived_watermark, Some(nodes[1]));
+    }
+
+    #[test]
+    fn archive_before_walks_back_past_multiple_pairs() {
+        // Layout:
+        //   n0 User, n1 Asst ToolCall t1, n2 User ToolResult t1,
+        //   n3 Asst ToolCall t2, n4 User ToolResult t2, n5 Asst "done".
+        // Requesting watermark at n4 would visible-set = {n4, n5} and
+        // archive {n0..n3}. But n4's ToolResult t2 has its matching
+        // ToolCall at n3 (archived). Walk-back goes to n3; now visible
+        // set = {n3, n4, n5} and {n0, n1, n2} archived. n3 has no
+        // dangling ToolResult. Stop. Final watermark = n3.
+        use crate::ir::ContentPart;
+        let mut graph = SessionGraph::default();
+        let primary = graph.primary_branch;
+        let _n0 = graph
+            .append_node(
+                primary,
+                NodeKind::User,
+                serde_json::json!({ "content": [ContentPart::text("q")] }),
+            )
+            .unwrap();
+        let _n1 = graph
+            .append_node(
+                primary,
+                NodeKind::Assistant,
+                serde_json::json!({
+                    "content": [ContentPart::ToolCall {
+                        id: "t1".into(),
+                        name: "e".into(),
+                        arguments: serde_json::json!({}),
+                        origin: crate::ir::ToolOrigin::Local,
+                    }],
+                }),
+            )
+            .unwrap();
+        let _n2 = graph
+            .append_node(
+                primary,
+                NodeKind::User,
+                serde_json::json!({
+                    "content": [ContentPart::ToolResult {
+                        tool_call_id: "t1".into(),
+                        tool_name: Some("e".into()),
+                        content: crate::ir::ToolResultContent::Text("r1".into()),
+                        is_error: false,
+                    }],
+                }),
+            )
+            .unwrap();
+        let n3 = graph
+            .append_node(
+                primary,
+                NodeKind::Assistant,
+                serde_json::json!({
+                    "content": [ContentPart::ToolCall {
+                        id: "t2".into(),
+                        name: "e".into(),
+                        arguments: serde_json::json!({}),
+                        origin: crate::ir::ToolOrigin::Local,
+                    }],
+                }),
+            )
+            .unwrap();
+        let n4 = graph
+            .append_node(
+                primary,
+                NodeKind::User,
+                serde_json::json!({
+                    "content": [ContentPart::ToolResult {
+                        tool_call_id: "t2".into(),
+                        tool_name: Some("e".into()),
+                        content: crate::ir::ToolResultContent::Text("r2".into()),
+                        is_error: false,
+                    }],
+                }),
+            )
+            .unwrap();
+
+        let _count = graph.archive_before(n4).unwrap();
+        assert_eq!(
+            graph.archived_watermark,
+            Some(n3),
+            "walk-back must stop at the second pair's ToolCall"
+        );
+    }
+
+    #[test]
+    fn archive_before_missing_node_returns_error() {
+        let mut graph = SessionGraph::default();
+        let fake = NodeId::from_uuid(uuid::Uuid::new_v4());
+        let err = graph.archive_before(fake).unwrap_err();
+        assert!(matches!(err, GraphError::MissingNode { .. }));
     }
 }

@@ -46,7 +46,7 @@ impl AgentBuilder {
     ) -> crate::Result<Self> {
         let path = path.as_ref();
         self = self.auth(Auth::ClaudeCli).await?;
-        self.config.working_dir = Some(path.to_path_buf());
+        self.config.extensions.insert(crate::Workspace::new(path));
         Ok(self)
     }
 
@@ -128,8 +128,8 @@ impl AgentBuilder {
     }
 
     pub(super) async fn load_project_resources(&mut self) {
-        let Some(working_dir) = self.config.working_dir.clone() else {
-            tracing::warn!("working_dir not set, call from_claude_cli_workspace() first");
+        let Some(working_dir) = self.config.workspace_root_buf() else {
+            tracing::warn!("workspace not set, call from_claude_cli_workspace() first");
             return;
         };
 
@@ -141,8 +141,8 @@ impl AgentBuilder {
     }
 
     pub(super) async fn load_local_resources(&mut self) {
-        let Some(working_dir) = self.config.working_dir.clone() else {
-            tracing::warn!("working_dir not set, call from_claude_cli_workspace() first");
+        let Some(working_dir) = self.config.workspace_root_buf() else {
+            tracing::warn!("workspace not set, call from_claude_cli_workspace() first");
             return;
         };
 

@@ -475,17 +475,10 @@ fn restricted_tool_surface(
         _ => match base {
             ToolSurface::None => ToolSurface::None,
             ToolSurface::Core => {
-                let filtered: HashSet<String> = ToolSurface::core_tools()
-                    .into_iter()
-                    .filter(|tool| !matches_denied_pattern(&denied, tool))
-                    .map(str::to_string)
-                    .collect();
-                if filtered.is_empty() {
-                    ToolSurface::None
-                } else {
-                    ToolSurface::Only(filtered)
-                }
+                filter_tier(ToolSurface::core_tool_names().iter().copied(), &denied)
             }
+            ToolSurface::LocalFs => filter_tier(ToolSurface::local_fs_surface_tools(), &denied),
+            ToolSurface::Coding => filter_tier(ToolSurface::coding_surface_tools(), &denied),
             ToolSurface::All => {
                 if denied.is_empty() {
                     ToolSurface::All
@@ -511,6 +504,26 @@ fn restricted_tool_surface(
                 ToolSurface::Except(merged)
             }
         },
+    }
+}
+
+/// Filter a flat list of tier tool names against a denied-pattern set,
+/// returning `ToolSurface::None` when everything is filtered out and
+/// `ToolSurface::Only` otherwise. Shared by the `Core` / `LocalFs` /
+/// `Coding` branches of [`restricted_tool_surface`].
+fn filter_tier<I>(tools: I, denied: &HashSet<String>) -> ToolSurface
+where
+    I: IntoIterator<Item = &'static str>,
+{
+    let filtered: HashSet<String> = tools
+        .into_iter()
+        .filter(|tool| !matches_denied_pattern(denied, tool))
+        .map(str::to_string)
+        .collect();
+    if filtered.is_empty() {
+        ToolSurface::None
+    } else {
+        ToolSurface::Only(filtered)
     }
 }
 
@@ -549,7 +562,12 @@ fn apply_mcp_server_tool_filter(
 
     match access {
         ToolSurface::None => ToolSurface::None,
+        // Layered tiers do not inherently include MCP tools, so the MCP
+        // allowlist restriction is a no-op — the tier itself already
+        // excludes anything outside its native tool list.
         ToolSurface::Core => ToolSurface::Core,
+        ToolSurface::LocalFs => ToolSurface::LocalFs,
+        ToolSurface::Coding => ToolSurface::Coding,
         ToolSurface::All => {
             if denied_mcp_tools.is_empty() {
                 ToolSurface::All
@@ -583,12 +601,12 @@ fn restricted_tool_policy(
 ) -> ToolPolicy {
     let mut policy = base.clone();
     for tool in disallowed {
-        policy.rules.push(ToolRule::deny_pattern(tool));
+        policy.rules.push(ToolRule::deny(tool));
     }
-    policy.rules.push(ToolRule::deny_pattern("Task"));
-    policy.rules.push(ToolRule::deny_pattern("TaskOutput"));
+    policy.rules.push(ToolRule::deny("Task"));
+    policy.rules.push(ToolRule::deny("TaskOutput"));
     if !skills_enabled {
-        policy.rules.push(ToolRule::deny_pattern("Skill"));
+        policy.rules.push(ToolRule::deny("Skill"));
     }
     policy
 }

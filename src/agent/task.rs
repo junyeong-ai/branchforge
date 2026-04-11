@@ -656,10 +656,21 @@ mod tests {
         let mut subagent_registry = IndexRegistry::new();
         subagent_registry.register_all(builtin_subagents());
 
-        assert!(subagent_registry.contains("bash"));
-        assert!(subagent_registry.contains("explore"));
-        assert!(subagent_registry.contains("plan"));
+        // `general` is Layer 1 — always present.
         assert!(subagent_registry.contains("general"));
+
+        // `explore` and `plan` are Layer 2a (`local-fs`) — present only
+        // when that feature is active.
+        #[cfg(feature = "local-fs")]
+        {
+            assert!(subagent_registry.contains("explore"));
+            assert!(subagent_registry.contains("plan"));
+        }
+
+        // `bash` is Layer 2b (`coding-tools`) — present only under that
+        // feature.
+        #[cfg(feature = "coding-tools")]
+        assert!(subagent_registry.contains("bash"));
 
         let _tool = TaskTool::new(registry).subagent_registry(subagent_registry);
     }

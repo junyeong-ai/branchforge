@@ -3,15 +3,17 @@
 //! Domain-separated configuration for clarity and maintainability.
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use rust_decimal::Decimal;
 
 use crate::agent::types::DEFAULT_MAX_TOKENS;
 use crate::authorization::ToolPolicy;
+use crate::common::Extensions;
 use crate::output_style::OutputStyle;
 use crate::tools::ToolSurface;
+use crate::workspace::Workspace;
 
 /// Model-related configuration.
 #[derive(Debug, Clone)]
@@ -517,6 +519,18 @@ impl Default for StreamConfig {
 }
 
 /// Complete agent configuration combining all domain configs.
+///
+/// # Extensions
+///
+/// Feature-gated concerns that do not belong in Layer 1 — workspace (file
+/// root), security policy (filesystem sandbox), git state, tenant markers,
+/// telemetry sinks — live in [`extensions`][Self::extensions] as type-keyed
+/// entries. This keeps `AgentConfig` honest for pure-API agents that have
+/// no notion of a filesystem or shell, while still allowing coding agents
+/// and local-filesystem agents to carry the state they need.
+///
+/// See `docs/architecture/layering.md` §4 and §5 for the Extensions pattern
+/// and the per-layer extension types.
 #[derive(Debug, Clone, Default)]
 pub struct AgentConfig {
     pub model: AgentModelConfig,
@@ -527,9 +541,14 @@ pub struct AgentConfig {
     pub prompt: PromptConfig,
     pub cache: CacheConfig,
     pub stream: StreamConfig,
-    pub working_dir: Option<PathBuf>,
     pub server_tools: ServerToolsConfig,
     pub coding_mode: bool,
+    /// Type-keyed heterogeneous storage for feature-gated and user-provided
+    /// configuration. Never pull a Layer 2+ concern into a named field here
+    /// — insert it as an extension instead. See [`Workspace`], the
+    /// forthcoming `LocalFsExtension` / `CodingExtension`, and any
+    /// user-defined extension types.
+    pub extensions: Extensions,
 }
 
 impl AgentConfig {
@@ -577,9 +596,42 @@ impl AgentConfig {
         self
     }
 
+    /// Set the agent's filesystem working directory by inserting a
+    /// [`Workspace`] into [`extensions`][Self::extensions].
+    ///
+    /// This is a convenience over `self.extensions.insert(Workspace::new(dir))`.
+    /// The workspace is retrieved by Layer 2a tools (Read/Write/Edit/Glob/Grep
+    /// under `local-fs`) and Layer 2b tools (Bash under `coding-tools`) via
+    /// `ctx.extensions().get::<Workspace>()`. A pure-core agent with no
+    /// workspace simply never calls this setter.
     pub fn working_dir(mut self, dir: impl Into<PathBuf>) -> Self {
-        self.working_dir = Some(dir.into());
+        self.extensions.insert(Workspace::new(dir));
         self
+    }
+
+    /// Attach a [`Workspace`] directly. Equivalent to inserting it into
+    /// [`extensions`][Self::extensions]; prefer this when you already hold
+    /// a `Workspace` instance (e.g. cloned from another config).
+    pub fn workspace(mut self, workspace: Workspace) -> Self {
+        self.extensions.insert(workspace);
+        self
+    }
+
+    /// Convenience accessor: returns the workspace root path if a
+    /// [`Workspace`] has been inserted via [`working_dir`][Self::working_dir]
+    /// or [`workspace`][Self::workspace], otherwise `None`.
+    ///
+    /// This is the canonical read site for legacy callers that want the
+    /// "working directory" as a path. New code should prefer
+    /// `self.extensions.get::<Workspace>()` directly.
+    pub fn workspace_root(&self) -> Option<&Path> {
+        self.extensions.get::<Workspace>().map(Workspace::root)
+    }
+
+    /// Returns the workspace root as an owned `PathBuf`, or `None` if no
+    /// workspace has been attached.
+    pub fn workspace_root_buf(&self) -> Option<PathBuf> {
+        self.extensions.get::<Workspace>().map(Workspace::root_buf)
     }
 
     pub fn server_tools(mut self, config: ServerToolsConfig) -> Self {
@@ -658,7 +710,26 @@ mod tests {
 
         assert_eq!(config.model.primary, "claude-opus-4-6");
         assert_eq!(config.budget.max_cost_usd, Some(dec!(5)));
-        assert_eq!(config.working_dir, Some(PathBuf::from("/project")));
+        assert_eq!(config.workspace_root(), Some(Path::new("/project")));
+    }
+
+    #[test]
+    fn test_workspace_extension_roundtrip() {
+        let ws = Workspace::new("/tmp/extroundtrip");
+        let config = AgentConfig::new().workspace(ws);
+        let retrieved = config.extensions.get::<Workspace>().unwrap();
+        assert_eq!(retrieved.root(), Path::new("/tmp/extroundtrip"));
+        assert_eq!(
+            config.workspace_root_buf(),
+            Some(PathBuf::from("/tmp/extroundtrip"))
+        );
+    }
+
+    #[test]
+    fn test_agent_config_default_has_no_workspace() {
+        let config = AgentConfig::default();
+        assert!(config.workspace_root().is_none());
+        assert!(config.extensions.get::<Workspace>().is_none());
     }
 
     #[test]

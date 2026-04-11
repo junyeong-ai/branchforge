@@ -234,6 +234,11 @@ struct StreamState {
     thinking_signature: Option<crate::ir::ReasoningSignature>,
     finish_reason: Option<crate::ir::FinishReason>,
     total_usage: crate::ir::Usage,
+    /// Token estimate from the most recent preflight. Stashed here so
+    /// the finish-chunk path can reconcile it against
+    /// `accumulated_usage` when the response completes. Reset per
+    /// iteration in `do_start_request`.
+    last_request_estimate: Option<crate::budget::RequestTokenEstimate>,
     phase: Phase,
     all_non_retryable: bool,
     session_started: bool,
@@ -268,6 +273,7 @@ impl StreamState {
             thinking_signature: None,
             finish_reason: None,
             total_usage: crate::ir::Usage::default(),
+            last_request_estimate: None,
             phase: Phase::StartRequest,
             all_non_retryable: false,
             session_started: false,
@@ -733,36 +739,51 @@ impl StreamState {
             .request_builder
             .build(messages, &self.dynamic_rules);
 
-        let chunk_stream = match self.cfg.runtime.llm.send_stream(&ir_request).await {
+        // Preflight budget check: estimate the cost of the pending
+        // request against the session / tenant budgets and bail out
+        // before hitting the wire if it would overrun. Prevents
+        // bursting where a single large call blows past a limit that
+        // historical spend alone had not yet tripped.
+        let preflight_ctx = BudgetContext {
+            tracker: &self.cfg.runtime.budget_tracker,
+            tenant: self.cfg.runtime.tenant_budget.as_deref(),
+            config: &self.cfg.runtime.config.budget,
+        };
+        if let Err(e) = preflight_ctx.preflight(&ir_request) {
+            self.phase = Phase::Done;
+            return Some(Err(e));
+        }
+
+        // Stash the token estimate so the finish-chunk path can
+        // reconcile it against the provider's reported usage. See
+        // [`crate::budget::EstimateReconciler::observe`].
+        self.last_request_estimate = Some(crate::budget::estimate_request_tokens(&ir_request));
+
+        let chunk_stream = match self
+            .cfg
+            .runtime
+            .llm
+            .send_stream(&ir_request, self.cfg.runtime.shutdown.child_token())
+            .await
+        {
             Ok(s) => s,
-            Err(e) if super::common::is_context_overflow_error(&e) => {
-                if let Some(action) = super::common::try_recover(
-                    &e,
-                    &self.cfg.tool_state,
-                    &self.cfg.runtime,
-                    context_window::for_model(&self.cfg.runtime.config.model.primary),
-                    &mut self.recovery_attempts,
-                )
-                .await
-                {
-                    use crate::session::compact::recovery::RecoveryAction;
-                    match action {
-                        RecoveryAction::Retry | RecoveryAction::CompactAndRetry => {
-                            self.phase = Phase::StartRequest;
-                            return None;
-                        }
-                        RecoveryAction::Abort => {
-                            self.phase = Phase::Done;
-                            return Some(Err(e));
-                        }
+            Err(e) => {
+                let executor = super::recovery_executor::RecoveryExecutor {
+                    registry: &self.cfg.runtime.recovery_recipes,
+                    tool_state: &self.cfg.tool_state,
+                    llm: Some(self.cfg.runtime.llm.as_ref()),
+                    event_bus: self.cfg.runtime.event_bus.as_deref(),
+                };
+                match executor.apply(&e, &mut self.recovery_attempts).await {
+                    super::recovery_executor::RecoveryOutcome::Retry => {
+                        self.phase = Phase::StartRequest;
+                        return None;
+                    }
+                    super::recovery_executor::RecoveryOutcome::Abort => {
+                        self.phase = Phase::Done;
+                        return Some(Err(e));
                     }
                 }
-                self.phase = Phase::Done;
-                return Some(Err(e));
-            }
-            Err(e) => {
-                self.phase = Phase::Done;
-                return Some(Err(e));
             }
         };
         self.recovery_attempts = 0;
@@ -782,7 +803,22 @@ impl StreamState {
         stream: &mut ChunkStream,
         accumulated_usage: &mut crate::ir::Usage,
     ) -> StreamPollResult {
-        let chunk_result = tokio::time::timeout(self.chunk_timeout, stream.next()).await;
+        // Race chunk read against runtime shutdown so cancel takes effect
+        // mid-stream instead of only between iterations. The inner
+        // `ChunkStream` is also wired to the same shutdown token at
+        // `send_stream` time, so dropping the stream here will release
+        // the underlying HTTP body as well.
+        let shutdown = self.cfg.runtime.shutdown.clone();
+        let chunk_result = tokio::select! {
+            biased;
+            _ = shutdown.cancelled() => {
+                self.phase = Phase::Done;
+                return StreamPollResult::Event(Err(crate::Error::Stream(
+                    "Streaming cancelled by runtime shutdown".into(),
+                )));
+            }
+            res = tokio::time::timeout(self.chunk_timeout, stream.next()) => res,
+        };
 
         match chunk_result {
             Ok(Some(Ok(chunk))) => {
@@ -972,6 +1008,27 @@ impl StreamState {
             &accumulated_usage,
         ) {
             return Some(Err(e));
+        }
+
+        // Reconcile preflight estimate against actual usage. The
+        // estimate was stashed in `last_request_estimate` before the
+        // request was sent; comparing here lets operators calibrate
+        // the 4-chars-per-token heuristic over time via structured
+        // tracing events.
+        if let Some(estimate) = self.last_request_estimate.take() {
+            let drift = crate::budget::EstimateReconciler::compute(estimate, &accumulated_usage);
+            tracing::debug!(
+                target: "branchforge::budget::estimate_drift",
+                model = %self.cfg.runtime.config.model.primary,
+                estimated_input = drift.estimated_input,
+                actual_input = drift.actual_input,
+                estimated_output = drift.estimated_output,
+                actual_output = drift.actual_output,
+                input_ratio = drift.input_ratio.unwrap_or(f64::NAN),
+                output_ratio = drift.output_ratio.unwrap_or(f64::NAN),
+                is_close = drift.is_close(),
+                "Token estimate drift recorded"
+            );
         }
 
         emit_tokens_consumed(

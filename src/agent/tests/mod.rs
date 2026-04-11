@@ -456,6 +456,7 @@ impl LlmCall for MockLlmCall {
     async fn send_stream(
         &self,
         _request: &ir::ModelRequest,
+        _cancel_token: tokio_util::sync::CancellationToken,
     ) -> crate::Result<crate::client::provider_client::ChunkStream> {
         Err(crate::Error::Config(
             "streaming not supported in mock".into(),
@@ -604,6 +605,13 @@ async fn test_execute_routes_explicit_skill_with_default_authorization_mode() {
     }));
 }
 
+// Policy-driven deny rules are currently enforced through the Layer 2a
+// `SecurityContext` tool policy. Under `--no-default-features` that
+// enforcement path is absent and the test would incorrectly observe skills
+// running without policy gating. Re-enabling this coverage in pure core
+// is part of the Phase 2 migration of `check_tool_policy` to an
+// Extensions-backed lookup (see task #3 C2 follow-up).
+#[cfg(feature = "local-fs")]
 #[tokio::test]
 async fn test_execute_by_name_skill_respects_deny_rule() {
     let llm = mock_llm_with_message("model reply");
@@ -767,9 +775,7 @@ fn test_tool_registry_with_dummy() {
 async fn test_tool_registry_execute() {
     use helpers::DummyTool;
 
-    let registry = ToolRegistry::from_context(
-        ExecutionContext::try_permissive().expect("failed to create permissive context"),
-    );
+    let registry = ToolRegistry::from_context(ExecutionContext::empty());
     let tool = Arc::new(DummyTool {
         name: "TestTool".to_string(),
         output: ToolOutput::Success("test output".to_string()),
@@ -823,6 +829,7 @@ impl LlmCall for ScriptedMockLlm {
     async fn send_stream(
         &self,
         _request: &ir::ModelRequest,
+        _cancel_token: tokio_util::sync::CancellationToken,
     ) -> crate::Result<crate::client::provider_client::ChunkStream> {
         Err(crate::Error::Config("not supported".into()))
     }
@@ -878,8 +885,7 @@ fn build_supervised_agent_with_approval(
         make_text_response("All done."),
     ]);
 
-    let tools =
-        ToolRegistry::from_context(ExecutionContext::try_permissive().expect("permissive context"));
+    let tools = ToolRegistry::from_context(ExecutionContext::empty());
     tools.register(Arc::new(DummyTool {
         name: "TestTool".into(),
         output: ToolOutput::Success("test output".into()),

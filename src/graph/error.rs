@@ -59,4 +59,19 @@ pub enum GraphError {
         node_id: NodeId,
         branch_id: BranchId,
     },
+
+    /// The requested `archive_before` watermark cannot be walked back
+    /// to a position that preserves tool-pair integrity within the
+    /// allowed iteration bound. Indicates a pathological graph with
+    /// thousands of interleaved tool pairs; the caller should either
+    /// compact via summary instead of archival, or extend the bound
+    /// (see `SessionGraph::MAX_WATERMARK_WALKBACK`).
+    #[error(
+        "Cannot adjust archive watermark for node {desired_watermark} within \
+         {walkback_limit} iterations without splitting tool pairs"
+    )]
+    WatermarkUnresolvable {
+        desired_watermark: NodeId,
+        walkback_limit: usize,
+    },
 }

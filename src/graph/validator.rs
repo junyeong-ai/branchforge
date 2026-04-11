@@ -179,6 +179,39 @@ impl GraphValidator {
             }
         }
 
+        // Archived-watermark invariant — the watermark, if set, must:
+        //   1. Point at a real node in the graph (otherwise message
+        //      projection would silently break).
+        //   2. Belong to the primary branch — `archive_before` is a
+        //      primary-branch operation (it drops message-projection
+        //      visibility for older primary-branch nodes). A watermark
+        //      on a sibling branch would be meaningless and indicates a
+        //      programmer error or a corrupted persistence snapshot.
+        //
+        // These two checks catch the class of bug where a session is
+        // forked, the fork's branch gets archived, and then the
+        // archival pointer is confused with the parent's primary
+        // branch on reload.
+        if let Some(watermark) = graph.archived_watermark() {
+            match graph.nodes.get(&watermark) {
+                None => issues.push(issue(
+                    "archived_watermark_missing_node",
+                    format!(
+                        "Archived watermark {} does not refer to any node in the graph",
+                        watermark
+                    ),
+                )),
+                Some(node) if node.branch_id != graph.primary_branch => issues.push(issue(
+                    "archived_watermark_off_primary",
+                    format!(
+                        "Archived watermark {} belongs to branch {} but the primary branch is {}",
+                        watermark, node.branch_id, graph.primary_branch
+                    ),
+                )),
+                Some(_) => {}
+            }
+        }
+
         GraphValidationReport {
             valid: issues.is_empty(),
             issues,
@@ -1074,5 +1107,76 @@ mod tests {
         );
         assert_eq!(graph.branches.len(), 2);
         assert_eq!(graph.nodes.len(), 3);
+    }
+
+    // ---------------------------------------------------------------
+    // archived_watermark invariants (T1-6)
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn archived_watermark_absent_is_valid() {
+        let graph = linear_graph(3);
+        assert!(graph.archived_watermark().is_none());
+        let report = GraphValidator::validate(&graph);
+        assert!(report.is_valid(), "{:?}", report.issues);
+    }
+
+    #[test]
+    fn archived_watermark_referring_to_real_primary_node_is_valid() {
+        let mut graph = linear_graph(3);
+        let mid = *graph
+            .nodes
+            .iter()
+            .find(|(_, node)| node.branch_id == graph.primary_branch)
+            .map(|(id, _)| id)
+            .unwrap();
+        graph.archive_before(mid).unwrap();
+
+        let report = GraphValidator::validate(&graph);
+        assert!(
+            report.is_valid(),
+            "valid archived watermark must not produce issues: {:?}",
+            report.issues
+        );
+    }
+
+    #[test]
+    fn archived_watermark_missing_node_is_flagged() {
+        let mut graph = linear_graph(2);
+        // Fabricate an id that does not exist in the graph, then
+        // poison the watermark directly. This simulates a corrupted
+        // persistence snapshot where `archived_watermark` was serialised
+        // without its target node (or the node was pruned by hand).
+        let fake_id = NodeId::from_uuid(Uuid::new_v4());
+        graph.archived_watermark = Some(fake_id);
+
+        let report = GraphValidator::validate(&graph);
+        assert!(!report.is_valid());
+        assert!(
+            has_issue(&report, "archived_watermark_missing_node"),
+            "expected archived_watermark_missing_node, got: {:?}",
+            report.issues
+        );
+    }
+
+    #[test]
+    fn archived_watermark_off_primary_branch_is_flagged() {
+        let (mut graph, _root, side) = forked_graph();
+        // Pick a node that lives on the non-primary `side` branch.
+        let side_node = *graph
+            .nodes
+            .iter()
+            .find(|(_, node)| node.branch_id == side)
+            .map(|(id, _)| id)
+            .unwrap();
+        graph.archived_watermark = Some(side_node);
+
+        let report = GraphValidator::validate(&graph);
+        assert!(!report.is_valid());
+        assert!(
+            has_issue(&report, "archived_watermark_off_primary"),
+            "expected archived_watermark_off_primary, got: {:?}",
+            report.issues
+        );
     }
 }
