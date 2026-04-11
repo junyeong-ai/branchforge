@@ -12,7 +12,7 @@
 #[cfg(feature = "gcp")]
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    use branchforge::client::preset::Preset;
+    use branchforge::client::preset::ProfileRegistry;
     use branchforge::ir::{Message, ModelRequest, ModelSettings, ModelStreamChunk};
     use futures::StreamExt;
 
@@ -35,7 +35,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     eprintln!("=> model: {model}");
     eprintln!("=> prompt: {prompt:?}");
 
-    let client = Preset::VertexGemini.build_from_env().await?;
+    let client = ProfileRegistry::with_builtins().build("vertex-gemini")?;
     eprintln!(
         "=> codec: {}, transport: {}",
         client.codec_id(),
@@ -49,7 +49,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         ..ModelRequest::new("ignored", vec![])
     };
 
-    let mut stream = client.send_stream(&request).await?;
+    let mut stream = client
+        .send_stream(&request, tokio_util::sync::CancellationToken::new())
+        .await?;
     println!("\n--- streaming output ---");
     let mut text = String::new();
     let mut start_id = String::new();

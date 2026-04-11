@@ -3,7 +3,14 @@
 //! Tests for memory loading, context building, session management, persistence,
 //! settings, and compact strategy.
 //!
+//! The `MemoryLoader` exercised here walks a real filesystem tree looking
+//! for CLAUDE.md and related Claude Code convention files; it lives under
+//! the `local-fs` feature. Pure Layer 1 builds use `MemoryContextProvider`
+//! with programmatic content instead and are not exercised by this suite.
+//!
 //! Run: cargo nextest run --test context_and_session_tests --all-features
+
+#![cfg(feature = "local-fs")]
 
 use branchforge::context::{ContextBuilder, MemoryLoader};
 use tempfile::tempdir;

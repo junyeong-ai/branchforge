@@ -389,7 +389,7 @@ mod skill_tool_tests {
 
         let executor = SkillRuntime::new(skill_registry);
         let tool = SkillTool::new(executor);
-        let ctx = ExecutionContext::try_permissive().expect("failed to create permissive context");
+        let ctx = ExecutionContext::empty();
 
         let result = tool
             .execute(
@@ -425,7 +425,7 @@ Execute the user's request: $ARGUMENTS
 
         let executor = SkillRuntime::new(skill_registry);
         let skill_tool = SkillTool::new(executor);
-        let ctx = ExecutionContext::try_permissive().expect("failed to create permissive context");
+        let ctx = ExecutionContext::empty();
 
         let result = skill_tool
             .execute(
@@ -468,6 +468,10 @@ mod rule_index_tests {
         assert!(security_rule.matches_path(std::path::Path::new("any/file.txt")));
     }
 
+    /// Uses `MemoryLoader` to scan the `.claude/rules/` directory — the
+    /// loader is a Layer 2a (`local-fs`) facility, so this test is only
+    /// compiled when that feature is active.
+    #[cfg(feature = "local-fs")]
     #[tokio::test]
     async fn test_rule_index_lazy_load_content() {
         let dir = tempdir().unwrap();

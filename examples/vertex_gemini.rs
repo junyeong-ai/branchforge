@@ -20,7 +20,7 @@
 #[cfg(feature = "gcp")]
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    use branchforge::client::preset::Preset;
+    use branchforge::client::preset::ProfileRegistry;
     use branchforge::ir::{Message, ModelRequest, ModelSettings};
 
     // Disambiguate rustls CryptoProvider — both ring and aws-lc-rs are
@@ -40,7 +40,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     eprintln!("=> model: {model}");
     eprintln!("=> prompt: {prompt:?}");
 
-    let client = Preset::VertexGemini.build_from_env().await?;
+    let client = ProfileRegistry::with_builtins().build("vertex-gemini")?;
     eprintln!(
         "=> codec: {}, transport: {}",
         client.codec_id(),

@@ -40,7 +40,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let agent = builder
                     .model("claude-haiku-4-5")
                     .advanced_compaction()
-                    .default_recovery()
                     .build()
                     .await;
 
@@ -273,7 +272,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     .model("claude-haiku-4-5")
                     .coordination(Coordinator::builder().max_workers(3).build())
                     .advanced_compaction()
-                    .default_recovery()
                     .build()
                     .await;
 

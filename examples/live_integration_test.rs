@@ -546,16 +546,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // =====================================================================
-    // Test 16: RecoveryStrategy configuration
+    // Test 16: Recovery recipe registry (default builtin set)
     // =====================================================================
-    println!("\n[Test 16] RecoveryStrategy configuration");
+    println!("\n[Test 16] Recovery recipe registry");
     {
+        use branchforge::agent::recovery_recipes::{RecipeRegistry, builtin_general_recipes};
         use branchforge::{Agent, Auth};
         match Agent::builder().auth(Auth::ClaudeCli).await {
             Ok(builder) => {
+                let registry = RecipeRegistry::new().with_boxed_recipes(builtin_general_recipes());
                 let agent = builder
                     .model("claude-haiku-4-5")
-                    .default_recovery()
+                    .recovery_recipes(registry)
                     .advanced_compaction()
                     .build()
                     .await;

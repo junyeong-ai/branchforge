@@ -3,6 +3,14 @@
 //! Tests for security context, guards, authorization, hooks, and network sandbox.
 //!
 //! Run: cargo nextest run --test security_and_permissions_tests --all-features
+//!
+//! The `security_tests` submodule exercises `SecurityContext` and related
+//! Layer 2a types which are only compiled under the `local-fs` feature.
+//! Under `--no-default-features` the submodule is simply absent and the
+//! remaining authorization/hook/network tests (which live in Layer 1) still
+//! run.
+
+#![cfg(feature = "local-fs")]
 
 // =============================================================================
 // Security

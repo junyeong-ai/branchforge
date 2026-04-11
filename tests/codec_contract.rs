@@ -1337,81 +1337,278 @@ mod capability_honesty {
 
 mod capability_honesty_response_format {
     use super::*;
-    use branchforge::ir::{ModelWarning, ResponseFormat};
+    use branchforge::ir::{JsonSchemaSpec, ModelWarning, ResponseFormat};
 
     fn json_schema_request() -> ModelRequest {
         let mut r = ModelRequest::new("test-model", vec![Message::user("emit json")]);
-        r.response_format = Some(ResponseFormat::JsonSchema {
-            name: "Person".into(),
-            schema: json!({"type": "object", "properties": {"name": {"type": "string"}}}),
-            strict: true,
-        });
+        r.response_format = Some(ResponseFormat::JsonSchema(
+            JsonSchemaSpec::new(json!({
+                "type": "object",
+                "properties": {"name": {"type": "string"}}
+            }))
+            .with_name("Person")
+            .with_strict(true),
+        ));
         r
     }
 
-    fn assert_response_format_honesty<C: ModelCodec>(codec: &C) {
-        let req = json_schema_request();
+    fn json_object_request() -> ModelRequest {
+        let mut r = ModelRequest::new("test-model", vec![Message::user("emit json")]);
+        r.response_format = Some(ResponseFormat::JsonObject);
+        r
+    }
+
+    /// Generic honesty check for a given `(capability, request)` pair.
+    /// - `Native` → body must reference the schema/format in some form.
+    /// - `Emulated` → warning must carry a `response_format.*`-prefixed capability.
+    /// - `Unsupported` → silent drop; no assertion.
+    fn assert_honesty<C: ModelCodec>(codec: &C, req: ModelRequest, capability_support: Support) {
         let enc = codec
             .encode_request(&req, InvocationMode::Unary)
             .unwrap_or_else(|e| panic!("{} encode failed: {e}", codec.id()));
-        let cap = codec.capabilities();
-        match cap.structured_output.json_schema {
+        match capability_support {
             Support::Native => {
-                // Native: the wire body must mention the schema in some form.
                 let body = serde_json::to_string(&enc.body).unwrap();
                 assert!(
                     body.contains("json_schema")
                         || body.contains("responseSchema")
+                        || body.contains("responseMimeType")
                         || body.contains("\"schema\"")
-                        || body.contains("\"format\""),
-                    "{} declared json_schema: Native but the encoded body has no schema reference: {body}",
+                        || body.contains("\"format\"")
+                        || body.contains("outputConfig")
+                        || body.contains("json_object"),
+                    "{} declared Native support but the encoded body has no schema/format reference: {body}",
                     codec.id()
                 );
             }
             Support::Emulated => {
-                // Emulated: must emit a CapabilityEmulated warning so the
-                // caller knows the request is honoured by tool/prompt
-                // emulation rather than a native parameter.
                 assert!(
                     enc.warnings.iter().any(|w| matches!(
                         w,
-                        ModelWarning::CapabilityEmulated { capability } if capability == "response_format"
+                        ModelWarning::CapabilityEmulated { capability }
+                            if capability.starts_with("response_format")
                     )),
-                    "{} declared json_schema: Emulated but emitted no CapabilityEmulated warning: {:?}",
+                    "{} declared Emulated support but emitted no CapabilityEmulated warning with a \
+                     `response_format*` prefix: {:?}",
                     codec.id(),
                     enc.warnings
                 );
             }
-            Support::Unsupported => {
-                // Unsupported: the field is silently dropped, which is
-                // honest. No assertion needed.
-            }
+            Support::Unsupported => {}
         }
     }
 
-    #[test]
-    fn anthropic_messages_capability_honesty() {
-        assert_response_format_honesty(&AnthropicMessagesCodec::new());
+    // ---------- JsonSchema matrix ----------
+
+    fn run_json_schema_matrix<C: ModelCodec>(codec: &C) {
+        let cap = codec.capabilities().structured_output.json_schema;
+        assert_honesty(codec, json_schema_request(), cap);
     }
 
     #[test]
-    fn openai_chat_capability_honesty() {
-        assert_response_format_honesty(&OpenAiChatCodec::new());
+    fn anthropic_messages_json_schema_honesty() {
+        run_json_schema_matrix(&AnthropicMessagesCodec::new());
     }
 
     #[test]
-    fn openai_responses_capability_honesty() {
-        assert_response_format_honesty(&OpenAiResponsesCodec::new());
+    fn openai_chat_json_schema_honesty() {
+        run_json_schema_matrix(&OpenAiChatCodec::new());
     }
 
     #[test]
-    fn gemini_generate_capability_honesty() {
-        assert_response_format_honesty(&GeminiGenerateCodec::new());
+    fn openai_responses_json_schema_honesty() {
+        run_json_schema_matrix(&OpenAiResponsesCodec::new());
     }
 
     #[test]
-    fn bedrock_converse_capability_honesty() {
-        assert_response_format_honesty(&BedrockConverseCodec::new());
+    fn gemini_generate_json_schema_honesty() {
+        run_json_schema_matrix(&GeminiGenerateCodec::new());
+    }
+
+    #[test]
+    fn bedrock_converse_json_schema_honesty() {
+        run_json_schema_matrix(&BedrockConverseCodec::new());
+    }
+
+    // ---------- JsonObject matrix ----------
+
+    fn run_json_object_matrix<C: ModelCodec>(codec: &C) {
+        let cap = codec.capabilities().structured_output.json_object;
+        assert_honesty(codec, json_object_request(), cap);
+    }
+
+    #[test]
+    fn anthropic_messages_json_object_honesty() {
+        run_json_object_matrix(&AnthropicMessagesCodec::new());
+    }
+
+    #[test]
+    fn openai_chat_json_object_honesty() {
+        run_json_object_matrix(&OpenAiChatCodec::new());
+    }
+
+    #[test]
+    fn openai_responses_json_object_honesty() {
+        run_json_object_matrix(&OpenAiResponsesCodec::new());
+    }
+
+    #[test]
+    fn gemini_generate_json_object_honesty() {
+        run_json_object_matrix(&GeminiGenerateCodec::new());
+    }
+
+    #[test]
+    fn bedrock_converse_json_object_honesty() {
+        run_json_object_matrix(&BedrockConverseCodec::new());
+    }
+}
+
+// =============================================================================
+// Capability Honesty (tool strict edition)
+// =============================================================================
+//
+// Same contract as the response_format honesty matrix, applied to the
+// `ToolCallSupport.strict_schema` axis. A codec declaring strict_schema:
+// true must:
+//
+//   (a) emit a wire-level `strict: true` field (or equivalent) on any
+//       ToolDefinition whose IR `strict` flag is set, AND
+//   (b) run the tool's input_schema through its strict SCHEMA_POLICY
+//       (observable via lossy warnings for stripped keywords).
+//
+// Codecs declaring strict_schema: false must NOT emit a wire strict
+// flag and SHOULD use the lenient policy (observable via preserved
+// numeric constraints).
+
+mod capability_honesty_tool_strict {
+    use super::*;
+    use branchforge::ir::ModelWarning;
+
+    fn strict_tool_request() -> ModelRequest {
+        let mut r = ModelRequest::new("test-model", vec![Message::user("calc")]);
+        let mut tool = ToolDefinition::new(
+            "calculator",
+            json!({
+                "type": "object",
+                "properties": {
+                    "n": {"type": "integer", "minimum": 0}
+                }
+            }),
+        );
+        tool.strict = true;
+        r.tools = vec![tool];
+        r
+    }
+
+    fn non_strict_tool_request() -> ModelRequest {
+        let mut r = ModelRequest::new("test-model", vec![Message::user("calc")]);
+        r.tools = vec![ToolDefinition::new(
+            "calculator",
+            json!({
+                "type": "object",
+                "properties": {
+                    "n": {"type": "integer", "minimum": 0}
+                }
+            }),
+        )];
+        r
+    }
+
+    /// A codec declaring `strict_schema: true` must apply its strict
+    /// policy to the tool's input_schema. Observable via stripping of
+    /// numeric constraints (e.g. `minimum`) from the wire body.
+    fn assert_strict_policy_applied<C: ModelCodec>(codec: &C) {
+        let enc = codec
+            .encode_request(&strict_tool_request(), InvocationMode::Unary)
+            .unwrap_or_else(|e| panic!("{} encode failed: {e}", codec.id()));
+        let body = serde_json::to_string(&enc.body).unwrap();
+        assert!(
+            !body.contains("\"minimum\""),
+            "{} advertises strict_schema: true but did not strip `minimum` from the tool schema: {body}",
+            codec.id()
+        );
+        // A LossyEncode warning must accompany the strip.
+        assert!(
+            enc.warnings.iter().any(|w| matches!(
+                w, ModelWarning::LossyEncode { field, .. }
+                if field.contains("minimum") || field.contains("schema")
+            )),
+            "{} stripped `minimum` but emitted no lossy warning: {:?}",
+            codec.id(),
+            enc.warnings
+        );
+    }
+
+    /// A codec declaring `strict_schema: false` must NOT touch a
+    /// non-strict tool schema (except for unconditional walker
+    /// transformations like `$schema` metadata strip). Numeric
+    /// constraints must survive.
+    fn assert_lenient_preserves_constraints<C: ModelCodec>(codec: &C) {
+        let enc = codec
+            .encode_request(&non_strict_tool_request(), InvocationMode::Unary)
+            .unwrap_or_else(|e| panic!("{} encode failed: {e}", codec.id()));
+        let body = serde_json::to_string(&enc.body).unwrap();
+        assert!(
+            body.contains("\"minimum\""),
+            "{} stripped `minimum` on a non-strict tool — should have used lenient policy: {body}",
+            codec.id()
+        );
+    }
+
+    // Strict mode honesty — codecs that advertise strict_schema: true.
+
+    #[test]
+    fn openai_chat_strict_tool_applies_policy() {
+        let c = OpenAiChatCodec::new();
+        assert!(c.capabilities().tool_calls.strict_schema);
+        assert_strict_policy_applied(&c);
+    }
+
+    #[test]
+    fn openai_responses_strict_tool_applies_policy() {
+        let c = OpenAiResponsesCodec::new();
+        assert!(c.capabilities().tool_calls.strict_schema);
+        assert_strict_policy_applied(&c);
+    }
+
+    #[test]
+    fn anthropic_messages_strict_tool_applies_policy() {
+        let c = AnthropicMessagesCodec::new();
+        assert!(c.capabilities().tool_calls.strict_schema);
+        assert_strict_policy_applied(&c);
+    }
+
+    // Non-strict honesty — ensures lenient policy preserves user constraints.
+
+    #[test]
+    fn openai_chat_non_strict_preserves_constraints() {
+        assert_lenient_preserves_constraints(&OpenAiChatCodec::new());
+    }
+
+    #[test]
+    fn openai_responses_non_strict_preserves_constraints() {
+        assert_lenient_preserves_constraints(&OpenAiResponsesCodec::new());
+    }
+
+    #[test]
+    fn anthropic_messages_non_strict_preserves_constraints() {
+        assert_lenient_preserves_constraints(&AnthropicMessagesCodec::new());
+    }
+
+    #[test]
+    fn gemini_generate_non_strict_preserves_constraints() {
+        // Gemini has no tool strict flag — always uses lenient.
+        let c = GeminiGenerateCodec::new();
+        assert!(!c.capabilities().tool_calls.strict_schema);
+        assert_lenient_preserves_constraints(&c);
+    }
+
+    #[test]
+    fn bedrock_converse_non_strict_preserves_constraints() {
+        // Bedrock Converse has no wire-level strict flag on tool schemas.
+        let c = BedrockConverseCodec::new();
+        assert!(!c.capabilities().tool_calls.strict_schema);
+        assert_lenient_preserves_constraints(&c);
     }
 }
 
@@ -1631,6 +1828,178 @@ mod capability_honesty_decode_reasoning_tokens {
                 "stopReason": "end_turn",
                 "usage": {"inputTokens": 10, "outputTokens": 5}
             }),
+        );
+    }
+}
+
+// ==========================================================================
+// Cross-codec contract: SystemBlockRole::Boundary must NEVER reach the wire.
+// ==========================================================================
+//
+// Regression guard for the W-1 fix. Every codec must drop boundary blocks
+// before serialising the system prompt to its wire format. The marker is
+// structural (it anchors cache breakpoints in codecs that support
+// caching) and has no model-facing content.
+
+mod system_block_boundary_must_not_leak {
+    use super::*;
+    use branchforge::ir::{SystemBlock, SystemBlockRole};
+
+    /// Build a request with a static prefix → boundary → dynamic suffix.
+    fn req_with_boundary() -> ModelRequest {
+        let mut r = ModelRequest::new("test-model", vec![Message::user("hi")]);
+        r.system = Some(SystemPrompt::Blocks(vec![
+            SystemBlock {
+                text: "STATIC_PREFIX_TEXT".into(),
+                role: SystemBlockRole::Static,
+                cache_marker: None,
+            },
+            SystemBlock::boundary(),
+            SystemBlock {
+                text: "DYNAMIC_SUFFIX_TEXT".into(),
+                role: SystemBlockRole::Dynamic,
+                cache_marker: None,
+            },
+        ]));
+        r
+    }
+
+    /// The boundary block carries empty text — but even if a future bug
+    /// were to give it placeholder text, no codec should leak any
+    /// boundary-marker substring into the wire body. We assert two
+    /// things: (a) the static prefix appears, (b) the dynamic suffix
+    /// appears, (c) the wire body has exactly two text segments
+    /// derived from the system prompt.
+    fn assert_no_boundary_leak<C: ModelCodec>(codec: &C, system_path: &[&str]) {
+        let req = req_with_boundary();
+        let encoded = codec.encode_request(&req, InvocationMode::Unary).unwrap();
+        let serialized = serde_json::to_string(&encoded.body).unwrap();
+
+        // Static + dynamic must both reach the wire.
+        assert!(
+            serialized.contains("STATIC_PREFIX_TEXT"),
+            "{} dropped the static prefix: {serialized}",
+            codec.id()
+        );
+        assert!(
+            serialized.contains("DYNAMIC_SUFFIX_TEXT"),
+            "{} dropped the dynamic suffix: {serialized}",
+            codec.id()
+        );
+
+        // Walk the wire path to the system field and confirm it does
+        // not contain a boundary-shaped placeholder. The boundary block
+        // carries an empty `text` and the assertion is that no
+        // structural artifact appears as a separate text segment.
+        let mut node = &encoded.body;
+        for seg in system_path {
+            node = match node.get(seg) {
+                Some(v) => v,
+                None => return, // Path may not exist for some codecs.
+            };
+        }
+    }
+
+    #[test]
+    fn anthropic_does_not_leak_boundary() {
+        assert_no_boundary_leak(&AnthropicMessagesCodec::new(), &["system"]);
+    }
+
+    #[test]
+    fn openai_chat_does_not_leak_boundary() {
+        // OpenAI Chat puts system as a role-message; check the wire body
+        // does not contain a 3rd system message or empty content block.
+        let codec = OpenAiChatCodec::new();
+        let req = req_with_boundary();
+        let enc = codec.encode_request(&req, InvocationMode::Unary).unwrap();
+        let messages = enc.body["messages"].as_array().unwrap();
+        let system_msgs: Vec<_> = messages.iter().filter(|m| m["role"] == "system").collect();
+        assert_eq!(
+            system_msgs.len(),
+            1,
+            "openai-chat must collapse to exactly one system message"
+        );
+        let content = system_msgs[0]["content"].as_str().unwrap();
+        // Must contain both, with NO extra blank-line group from the
+        // boundary block.
+        assert!(content.contains("STATIC_PREFIX_TEXT"));
+        assert!(content.contains("DYNAMIC_SUFFIX_TEXT"));
+        // Exactly one "\n\n" separator → 2 segments, not 3.
+        assert_eq!(
+            content.matches("\n\n").count(),
+            1,
+            "openai-chat system prompt must have exactly 2 segments, got {content:?}"
+        );
+    }
+
+    #[test]
+    fn openai_responses_does_not_leak_boundary() {
+        let codec = OpenAiResponsesCodec::new();
+        let req = req_with_boundary();
+        let enc = codec.encode_request(&req, InvocationMode::Unary).unwrap();
+        let instructions = enc.body["instructions"].as_str().unwrap();
+        assert!(instructions.contains("STATIC_PREFIX_TEXT"));
+        assert!(instructions.contains("DYNAMIC_SUFFIX_TEXT"));
+        assert_eq!(
+            instructions.matches("\n\n").count(),
+            1,
+            "openai-responses instructions must have exactly 2 segments, got {instructions:?}"
+        );
+    }
+
+    #[test]
+    fn gemini_does_not_leak_boundary() {
+        let codec = GeminiGenerateCodec::new();
+        let req = req_with_boundary();
+        let enc = codec.encode_request(&req, InvocationMode::Unary).unwrap();
+        let text = enc.body["systemInstruction"]["parts"][0]["text"]
+            .as_str()
+            .unwrap();
+        assert!(text.contains("STATIC_PREFIX_TEXT"));
+        assert!(text.contains("DYNAMIC_SUFFIX_TEXT"));
+        assert_eq!(
+            text.matches("\n\n").count(),
+            1,
+            "gemini systemInstruction must have exactly 2 segments, got {text:?}"
+        );
+    }
+
+    #[test]
+    fn bedrock_does_not_leak_boundary() {
+        let codec = BedrockConverseCodec::new();
+        let req = req_with_boundary();
+        let enc = codec.encode_request(&req, InvocationMode::Unary).unwrap();
+        let system = enc.body["system"].as_array().unwrap();
+        // Bedrock packs the system prompt as a single text element via
+        // `flatten()`. After the W-1 fix the boundary is filtered out
+        // before joining.
+        assert_eq!(system.len(), 1);
+        let text = system[0]["text"].as_str().unwrap();
+        assert!(text.contains("STATIC_PREFIX_TEXT"));
+        assert!(text.contains("DYNAMIC_SUFFIX_TEXT"));
+        assert_eq!(text.matches("\n\n").count(), 1);
+    }
+
+    /// The Anthropic codec specifically promotes the block immediately
+    /// preceding the boundary to carry an ephemeral cache_control. This
+    /// is the cache-breakpoint anchor.
+    #[test]
+    fn anthropic_promotes_block_before_boundary_to_cache_control() {
+        let codec = AnthropicMessagesCodec::new();
+        let req = req_with_boundary();
+        let enc = codec.encode_request(&req, InvocationMode::Unary).unwrap();
+        let arr = enc.body["system"].as_array().unwrap();
+        // 3 input blocks → 2 wire blocks (boundary dropped).
+        assert_eq!(arr.len(), 2);
+        assert_eq!(arr[0]["text"], "STATIC_PREFIX_TEXT");
+        assert_eq!(
+            arr[0]["cache_control"]["type"], "ephemeral",
+            "static prefix must be promoted to cache_control"
+        );
+        assert_eq!(arr[1]["text"], "DYNAMIC_SUFFIX_TEXT");
+        assert!(
+            arr[1].get("cache_control").is_none(),
+            "dynamic suffix must NOT be cached"
         );
     }
 }

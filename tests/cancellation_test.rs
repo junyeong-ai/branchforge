@@ -61,11 +61,10 @@ impl Tool for SlowTool {
 }
 
 fn registry_with_slow_tool(duration_ms: u64) -> ToolRegistry {
-    // Build a permissive registry — security and authorization checks
-    // would otherwise reject "slow" because it isn't in the default
-    // ToolSurface whitelist. This test only cares about cancellation
-    // propagation, not about policy enforcement.
-    let ctx = ExecutionContext::try_permissive().expect("permissive context");
+    // Build a minimal registry. The Layer 1 empty() constructor gives us
+    // everything we need — this test only cares about cancellation
+    // propagation, not about filesystem security or tool policy.
+    let ctx = ExecutionContext::empty();
     let registry = ToolRegistry::from_context(ctx);
     registry.register(Arc::new(SlowTool { duration_ms }));
     registry
