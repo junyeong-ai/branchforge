@@ -10,6 +10,7 @@
 
 use async_trait::async_trait;
 use std::sync::Arc;
+use tokio_util::sync::CancellationToken;
 
 use super::RetryPolicy;
 use super::provider_client::ChunkStream;
@@ -26,7 +27,18 @@ pub trait LlmCall: Send + Sync + std::fmt::Debug {
     async fn send(&self, request: &ModelRequest) -> Result<ModelResponse>;
 
     /// Streaming request → chunk stream.
-    async fn send_stream(&self, request: &ModelRequest) -> Result<ChunkStream>;
+    ///
+    /// `cancel_token` propagates shutdown into the HTTP body read loop:
+    /// when it fires, the in-flight `bytes_stream` is dropped and the
+    /// underlying TCP connection is released back to the pool — not
+    /// merely flagged at the consumer side. Callers that do not need
+    /// cancellation can pass `CancellationToken::new()` (a detached
+    /// token that never fires).
+    async fn send_stream(
+        &self,
+        request: &ModelRequest,
+        cancel_token: CancellationToken,
+    ) -> Result<ChunkStream>;
 }
 
 // ---------------------------------------------------------------------------
@@ -39,8 +51,12 @@ impl LlmCall for super::provider_client::ProviderClient {
         self.send(request).await
     }
 
-    async fn send_stream(&self, request: &ModelRequest) -> Result<ChunkStream> {
-        self.send_stream(request).await
+    async fn send_stream(
+        &self,
+        request: &ModelRequest,
+        cancel_token: CancellationToken,
+    ) -> Result<ChunkStream> {
+        self.send_stream(request, cancel_token).await
     }
 }
 
@@ -90,10 +106,14 @@ impl LlmCall for RetryingClient {
         Err(last_err.expect("retry loop exhausted; last_err must be Some when max_retries reached"))
     }
 
-    async fn send_stream(&self, request: &ModelRequest) -> Result<ChunkStream> {
+    async fn send_stream(
+        &self,
+        request: &ModelRequest,
+        cancel_token: CancellationToken,
+    ) -> Result<ChunkStream> {
         let mut last_err = None;
         for attempt in 0..=self.policy.max_retries {
-            match self.inner.send_stream(request).await {
+            match self.inner.send_stream(request, cancel_token.clone()).await {
                 Ok(stream) => return Ok(stream),
                 Err(e) if e.is_retryable() && attempt < self.policy.max_retries => {
                     let delay = self.policy.delay_for(attempt + 1, e.retry_after());
@@ -167,8 +187,16 @@ impl LlmCall for FallingBackClient {
         }
     }
 
-    async fn send_stream(&self, request: &ModelRequest) -> Result<ChunkStream> {
-        match self.primary.send_stream(request).await {
+    async fn send_stream(
+        &self,
+        request: &ModelRequest,
+        cancel_token: CancellationToken,
+    ) -> Result<ChunkStream> {
+        match self
+            .primary
+            .send_stream(request, cancel_token.clone())
+            .await
+        {
             Ok(stream) => Ok(stream),
             Err(e) if self.should_fallback(&e) => {
                 tracing::warn!(
@@ -178,7 +206,7 @@ impl LlmCall for FallingBackClient {
                 );
                 let mut fb_request = request.clone();
                 fb_request.model = self.fallback_model.clone();
-                self.fallback.send_stream(&fb_request).await
+                self.fallback.send_stream(&fb_request, cancel_token).await
             }
             Err(e) => Err(e),
         }
@@ -232,13 +260,17 @@ impl LlmCall for CircuitBrokenClient {
         }
     }
 
-    async fn send_stream(&self, request: &ModelRequest) -> Result<ChunkStream> {
+    async fn send_stream(
+        &self,
+        request: &ModelRequest,
+        cancel_token: CancellationToken,
+    ) -> Result<ChunkStream> {
         if !self.breaker.allow_request() {
             return Err(crate::Error::Config(
                 "Circuit breaker is open — too many recent failures".into(),
             ));
         }
-        match self.inner.send_stream(request).await {
+        match self.inner.send_stream(request, cancel_token).await {
             Ok(stream) => {
                 self.breaker.record_success();
                 Ok(stream)

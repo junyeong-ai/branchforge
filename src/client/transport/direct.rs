@@ -29,6 +29,12 @@ pub enum DirectAuth {
         param: &'static str,
         value: SecretString,
     },
+    /// No authentication. First-class case for local providers
+    /// (Ollama, llama.cpp, vLLM, custom self-hosted gateways) where
+    /// the server does not require credentials. The transport
+    /// short-circuits `authorize` and adds no auth header or query
+    /// parameter.
+    None,
 }
 
 impl std::fmt::Debug for DirectAuth {
@@ -41,6 +47,7 @@ impl std::fmt::Debug for DirectAuth {
                 .field("param", param)
                 .field("value", &"[redacted]")
                 .finish(),
+            Self::None => f.write_str("None"),
         }
     }
 }
@@ -289,6 +296,10 @@ impl ModelTransport for DirectTransport {
             // Query param auth was already appended to the URL during
             // endpoint resolution; nothing to do here.
             DirectAuth::QueryParam { .. } => req,
+            // No-auth providers (Ollama, llama.cpp, custom local
+            // gateways) get no header injection. The request hits
+            // the wire as-is.
+            DirectAuth::None => req,
         };
         Ok(req)
     }

@@ -26,15 +26,18 @@
 use serde_json::{Value, json};
 
 use super::{ApiVersionHint, EncodedRequest, EndpointShape, InvocationMode, ModelCodec};
-use crate::client::schema::transform_for_strict;
+use crate::client::schema::{PreparedSchema, SchemaPolicy, prepare_schema, prepare_tool_schema};
 use crate::ir::{
-    CacheGranularity, CacheSupport, ContentPart, Continuation, FinishReason, MediaSource, Message,
-    ModelRequest, ModelResponse, ModelStreamChunk, ModelWarning, ProviderCapabilities,
-    ReasoningContent, ReasoningKind, ReasoningSignature, ReasoningSupport, ResponseFormat, Role,
-    StreamDecodeState, StructuredOutputSupport, Support, SystemPromptShape, ToolCallSupport,
-    ToolDefinition, ToolIdSemantics, ToolOrigin, ToolResultContent, Usage, VisionSupport,
+    CacheGranularity, CacheSupport, ContentPart, Continuation, FinishReason, JsonSchemaSpec,
+    MediaSource, Message, ModelRequest, ModelResponse, ModelStreamChunk, ModelWarning,
+    ProviderCapabilities, ReasoningContent, ReasoningKind, ReasoningSignature, ReasoningSupport,
+    ResponseFormat, Role, StreamDecodeState, StructuredOutputSupport, Support, SystemPromptShape,
+    ToolCallSupport, ToolDefinition, ToolIdSemantics, ToolOrigin, ToolResultContent, Usage,
+    VisionSupport,
 };
 use crate::{Error, Result};
+
+const SCHEMA_POLICY: SchemaPolicy = SchemaPolicy::openai_strict();
 
 const CODEC_ID: &str = "openai-responses";
 
@@ -133,51 +136,22 @@ impl ModelCodec for OpenAiResponsesCodec {
 
         // Tools.
         if !request.tools.is_empty() {
-            body["tools"] = json!(
-                request
-                    .tools
-                    .iter()
-                    .map(encode_tool_definition)
-                    .collect::<Vec<_>>()
-            );
+            let mut tool_defs = Vec::with_capacity(request.tools.len());
+            for tool in &request.tools {
+                tool_defs.push(encode_tool_definition(tool, &mut warnings));
+            }
+            body["tools"] = json!(tool_defs);
         }
         if let Some(choice) = &request.tool_choice {
             body["tool_choice"] = encode_tool_choice(choice);
         }
 
         // Structured output. The Responses API takes the schema under
-        // `text.format` (not the legacy `response_format`). For
-        // `JsonSchema` we run `transform_for_strict` so the schema satisfies
-        // OpenAI's strict-mode validator (no missing `additionalProperties`
-        // gates, all properties listed in `required`).
+        // `text.format` (not the legacy `response_format`). The shared
+        // `prepare_schema` helper handles OpenAI strict-mode
+        // transformations and propagates lossy-encode warnings.
         if let Some(format) = &request.response_format {
-            match format {
-                ResponseFormat::Text => {
-                    body["text"] = json!({"format": {"type": "text"}});
-                }
-                ResponseFormat::JsonObject => {
-                    body["text"] = json!({"format": {"type": "json_object"}});
-                }
-                ResponseFormat::JsonSchema {
-                    name,
-                    schema,
-                    strict,
-                } => {
-                    let prepared = if *strict {
-                        transform_for_strict(schema.clone())
-                    } else {
-                        schema.clone()
-                    };
-                    body["text"] = json!({
-                        "format": {
-                            "type": "json_schema",
-                            "name": name,
-                            "schema": prepared,
-                            "strict": strict,
-                        }
-                    });
-                }
-            }
+            encode_response_format(format, &mut body, &mut warnings);
         }
 
         // Settings.
@@ -636,11 +610,19 @@ fn tool_result_text(content: &ToolResultContent) -> String {
     }
 }
 
-fn encode_tool_definition(tool: &ToolDefinition) -> Value {
+fn encode_tool_definition(tool: &ToolDefinition, warnings: &mut Vec<ModelWarning>) -> Value {
+    let prepared = prepare_tool_schema(
+        tool.parameters.clone(),
+        &SCHEMA_POLICY,
+        tool.strict,
+        &tool.name,
+    );
+    warnings.extend(prepared.warnings);
+
     let mut obj = json!({
         "type": "function",
         "name": tool.name,
-        "parameters": tool.parameters,
+        "parameters": prepared.value,
     });
     if let Some(desc) = &tool.description {
         obj["description"] = json!(desc);
@@ -684,6 +666,49 @@ fn warn_dropped_provider_options(
             option: "*".into(),
         });
     }
+}
+
+fn encode_response_format(
+    format: &ResponseFormat,
+    body: &mut Value,
+    warnings: &mut Vec<ModelWarning>,
+) {
+    match format {
+        ResponseFormat::Text => {
+            body["text"] = json!({"format": {"type": "text"}});
+        }
+        ResponseFormat::JsonObject => {
+            body["text"] = json!({"format": {"type": "json_object"}});
+        }
+        ResponseFormat::JsonSchema(spec) => {
+            body["text"] = json!({"format": encode_json_schema_format(spec, warnings)});
+        }
+    }
+}
+
+fn encode_json_schema_format(spec: &JsonSchemaSpec, warnings: &mut Vec<ModelWarning>) -> Value {
+    let prepared = if spec.strict {
+        prepare_schema(
+            spec.schema.clone(),
+            &SCHEMA_POLICY,
+            "response_format.schema",
+        )
+    } else {
+        PreparedSchema::passthrough(spec.schema.clone())
+    };
+    warnings.extend(prepared.warnings);
+
+    let mut format = serde_json::Map::new();
+    format.insert("type".into(), json!("json_schema"));
+    if let Some(name) = &spec.name {
+        format.insert("name".into(), json!(name));
+    }
+    if let Some(desc) = &spec.description {
+        format.insert("description".into(), json!(desc));
+    }
+    format.insert("schema".into(), prepared.value);
+    format.insert("strict".into(), json!(spec.strict));
+    Value::Object(format)
 }
 
 // =============================================================================
@@ -865,7 +890,9 @@ fn strip_sse_data_prefix(s: &str) -> &str {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ir::{ModelSettings, OpenAiOptions, ReasoningEffort, ReasoningSettings};
+    use crate::ir::{
+        JsonSchemaSpec, ModelSettings, OpenAiOptions, ReasoningEffort, ReasoningSettings,
+    };
 
     fn req(messages: Vec<Message>) -> ModelRequest {
         ModelRequest::new("gpt-4o-mini", messages)
@@ -897,16 +924,16 @@ mod tests {
     fn encode_json_schema_response_format_uses_text_format_envelope() {
         let c = OpenAiResponsesCodec::new();
         let mut r = req(vec![Message::user("emit json")]);
-        r.response_format = Some(ResponseFormat::JsonSchema {
-            name: "Person".into(),
-            schema: json!({
+        r.response_format = Some(ResponseFormat::JsonSchema(
+            JsonSchemaSpec::new(json!({
                 "type": "object",
                 "properties": {
                     "name": {"type": "string"}
                 }
-            }),
-            strict: true,
-        });
+            }))
+            .with_name("Person")
+            .with_strict(true),
+        ));
         let enc = c.encode_request(&r, InvocationMode::Unary).unwrap();
         assert_eq!(enc.body["text"]["format"]["type"], "json_schema");
         assert_eq!(enc.body["text"]["format"]["name"], "Person");
@@ -925,6 +952,45 @@ mod tests {
     }
 
     #[test]
+    fn encode_json_schema_response_format_includes_description() {
+        let c = OpenAiResponsesCodec::new();
+        let mut r = req(vec![Message::user("emit json")]);
+        r.response_format = Some(ResponseFormat::JsonSchema(
+            JsonSchemaSpec::new(json!({"type": "object"}))
+                .with_name("Person")
+                .with_description("A person record"),
+        ));
+        let enc = c.encode_request(&r, InvocationMode::Unary).unwrap();
+        assert_eq!(enc.body["text"]["format"]["description"], "A person record");
+    }
+
+    #[test]
+    fn encode_json_schema_response_format_propagates_strip_warnings() {
+        let c = OpenAiResponsesCodec::new();
+        let mut r = req(vec![Message::user("emit json")]);
+        r.response_format = Some(ResponseFormat::JsonSchema(
+            JsonSchemaSpec::new(json!({
+                "type": "object",
+                "properties": {
+                    "age": {"type": "integer", "minimum": 0, "maximum": 120}
+                }
+            }))
+            .with_name("Person"),
+        ));
+        let enc = c.encode_request(&r, InvocationMode::Unary).unwrap();
+        let stripped: Vec<&str> = enc
+            .warnings
+            .iter()
+            .filter_map(|w| match w {
+                ModelWarning::LossyEncode { field, .. } => Some(field.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert!(stripped.iter().any(|f| f.contains("minimum")));
+        assert!(stripped.iter().any(|f| f.contains("maximum")));
+    }
+
+    #[test]
     fn encode_json_object_response_format() {
         let c = OpenAiResponsesCodec::new();
         let mut r = req(vec![Message::user("emit json")]);
@@ -932,6 +998,9 @@ mod tests {
         let enc = c.encode_request(&r, InvocationMode::Unary).unwrap();
         assert_eq!(enc.body["text"]["format"]["type"], "json_object");
     }
+
+    // NOTE: import of `JsonSchemaSpec` is declared at the use statement
+    // at the top of the tests module so that tests can construct it.
 
     #[test]
     fn encode_system_to_instructions() {

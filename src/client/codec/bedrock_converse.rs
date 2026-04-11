@@ -26,15 +26,18 @@
 use serde_json::{Value, json};
 
 use super::{ApiVersionHint, EncodedRequest, EndpointShape, InvocationMode, ModelCodec};
+use crate::client::schema::{SchemaPolicy, prepare_schema, prepare_tool_schema};
 use crate::ir::{
     CacheGranularity, CacheSupport, ContentPart, FinishReason, MediaSource, Message, ModelRequest,
-    ModelResponse, ModelStreamChunk, ModelWarning, ProviderCapabilities, ReasoningSupport, Role,
-    StreamDecodeState, StructuredOutputSupport, Support, SystemPromptShape, ToolCallSupport,
-    ToolDefinition, ToolIdSemantics, ToolOrigin, ToolResultContent, Usage, VisionSupport,
+    ModelResponse, ModelStreamChunk, ModelWarning, ProviderCapabilities, ReasoningSupport,
+    ResponseFormat, Role, StreamDecodeState, StructuredOutputSupport, Support, SystemPromptShape,
+    ToolCallSupport, ToolDefinition, ToolIdSemantics, ToolOrigin, ToolResultContent, Usage,
+    VisionSupport,
 };
 use crate::{Error, Result};
 
 const CODEC_ID: &str = "bedrock-converse";
+const SCHEMA_POLICY: SchemaPolicy = SchemaPolicy::bedrock_converse();
 
 const SHAPE: EndpointShape = EndpointShape {
     codec_id: CODEC_ID,
@@ -59,9 +62,22 @@ const CAPABILITIES: ProviderCapabilities = ProviderCapabilities {
         id_semantics: ToolIdSemantics::Provided,
     },
     structured_output: StructuredOutputSupport {
+        // JsonObject has no portable mapping on the Bedrock Converse
+        // wire format — it always requires an explicit schema. The
+        // codec emits a CapabilityEmulated warning when callers set
+        // `ResponseFormat::JsonObject`.
         json_object: Support::Emulated,
-        json_schema: Support::Emulated,
-        strict: false,
+        // JsonSchema is native via the top-level `outputConfig.textFormat`
+        // parameter (GA across all commercial AWS regions as of 2026-04).
+        // The codec runs the schema through `SchemaPolicy::bedrock_converse()`
+        // — a lenient policy that only rejects cycles and external `$ref`,
+        // since Bedrock hosts many model families with different subsets
+        // and lets the server enforce model-specific constraints.
+        json_schema: Support::Native,
+        // Bedrock Converse structured outputs are always grammar-
+        // constrained; the underlying model validates the schema
+        // server-side. `JsonSchemaSpec::strict` is therefore a no-op.
+        strict: true,
     },
     vision: VisionSupport {
         images: Support::Native,
@@ -181,13 +197,11 @@ impl ModelCodec for BedrockConverseCodec {
 
         // Tools.
         if !request.tools.is_empty() {
-            body["toolConfig"] = json!({
-                "tools": request
-                    .tools
-                    .iter()
-                    .map(encode_tool_definition)
-                    .collect::<Vec<_>>(),
-            });
+            let mut tool_defs = Vec::with_capacity(request.tools.len());
+            for tool in &request.tools {
+                tool_defs.push(encode_tool_definition(tool, &mut warnings));
+            }
+            body["toolConfig"] = json!({ "tools": tool_defs });
             if let Some(choice) = &request.tool_choice
                 && let Some(tc_value) = encode_tool_choice(choice)
             {
@@ -195,16 +209,14 @@ impl ModelCodec for BedrockConverseCodec {
             }
         }
 
-        // Structured output. Bedrock Converse delegates structured output
-        // to the underlying model and does not expose a portable
-        // `response_format` field — Anthropic models on Bedrock follow the
-        // same tool-emulation pattern as the direct Anthropic API. Surface
-        // a CapabilityEmulated warning so callers know the IR field is
-        // honoured by emulation rather than a native parameter.
-        if request.response_format.is_some() {
-            warnings.push(ModelWarning::CapabilityEmulated {
-                capability: "response_format".to_string(),
-            });
+        // Structured output. Bedrock Converse GA exposes a top-level
+        // `outputConfig.textFormat` parameter with the schema embedded
+        // as a JSON-encoded string. Supported for Anthropic Claude,
+        // Qwen, DeepSeek, Mistral, Gemma, Kimi K2, gpt-oss, MiniMax,
+        // and NVIDIA Nemotron models; other Bedrock models return 400
+        // when `outputConfig` is set.
+        if let Some(format) = &request.response_format {
+            encode_response_format(format, &mut body, &mut warnings);
         }
 
         // additionalModelRequestFields collects model-specific knobs that
@@ -539,10 +551,28 @@ fn mime_to_doc_format(mime: &str) -> &'static str {
     }
 }
 
-fn encode_tool_definition(tool: &ToolDefinition) -> Value {
+fn encode_tool_definition(tool: &ToolDefinition, warnings: &mut Vec<ModelWarning>) -> Value {
+    // Bedrock Converse's `toolSpec` has no wire-level `strict` flag —
+    // tool strictness is model-dependent. Always use the lenient policy
+    // so the walker-level metadata strip catches schemars-generated
+    // `$schema` etc. regardless of which model runs the tool.
+    //
+    // Runtime capability honesty: if the caller set `tool.strict = true`
+    // despite `ToolCallSupport.strict_schema = false`, surface a lossy
+    // warning so silent drops are visible.
+    if tool.strict {
+        warnings.push(ModelWarning::lossy(
+            format!("tool.{}.strict", tool.name),
+            "bedrock-converse has no wire-level strict flag on tool \
+             definitions; the IR `strict = true` setting was dropped",
+        ));
+    }
+    let prepared = prepare_tool_schema(tool.parameters.clone(), &SCHEMA_POLICY, false, &tool.name);
+    warnings.extend(prepared.warnings);
+
     let mut spec = json!({
         "name": tool.name,
-        "inputSchema": {"json": tool.parameters},
+        "inputSchema": {"json": prepared.value},
     });
     if let Some(desc) = &tool.description {
         spec["description"] = json!(desc);
@@ -614,6 +644,63 @@ fn warn_dropped_provider_options(
             provider: "gemini".into(),
             option: "*".into(),
         });
+    }
+}
+
+/// Emit the Bedrock Converse `outputConfig.textFormat` envelope for the
+/// request's [`ResponseFormat`].
+///
+/// The wire shape is four levels deep:
+/// `outputConfig.textFormat.structure.jsonSchema.{schema,name,description}`,
+/// and — unlike every other supported provider — the schema is embedded
+/// as a **JSON-encoded string**, not a JSON object. The codec
+/// `serde_json::to_string`s the prepared schema value right before
+/// embedding.
+fn encode_response_format(
+    format: &ResponseFormat,
+    body: &mut Value,
+    warnings: &mut Vec<ModelWarning>,
+) {
+    match format {
+        ResponseFormat::Text => {
+            // Default. Nothing to emit.
+        }
+        ResponseFormat::JsonObject => {
+            // Bedrock Converse requires an explicit schema — no portable
+            // schema-less JSON mode.
+            warnings.push(ModelWarning::CapabilityEmulated {
+                capability: "response_format.json_object".to_string(),
+            });
+        }
+        ResponseFormat::JsonSchema(spec) => {
+            let prepared = prepare_schema(
+                spec.schema.clone(),
+                &SCHEMA_POLICY,
+                "response_format.schema",
+            );
+            warnings.extend(prepared.warnings);
+
+            let schema_str =
+                serde_json::to_string(&prepared.value).unwrap_or_else(|_| "{}".to_string());
+
+            let mut json_schema = serde_json::Map::new();
+            json_schema.insert("schema".into(), Value::String(schema_str));
+            if let Some(name) = &spec.name {
+                json_schema.insert("name".into(), json!(name));
+            }
+            if let Some(desc) = &spec.description {
+                json_schema.insert("description".into(), json!(desc));
+            }
+
+            body["outputConfig"] = json!({
+                "textFormat": {
+                    "type": "json_schema",
+                    "structure": {
+                        "jsonSchema": Value::Object(json_schema),
+                    }
+                }
+            });
+        }
     }
 }
 
@@ -786,7 +873,8 @@ fn decode_content_block_delta_event(value: &Value) -> Vec<ModelStreamChunk> {
 mod tests {
     use super::*;
     use crate::ir::{
-        AnthropicOptions, BedrockGuardrail, BedrockOptions, ModelSettings, ReasoningSettings,
+        AnthropicOptions, BedrockGuardrail, BedrockOptions, JsonSchemaSpec, ModelSettings,
+        ReasoningSettings,
     };
 
     fn req(messages: Vec<Message>) -> ModelRequest {
@@ -866,6 +954,45 @@ mod tests {
     }
 
     #[test]
+    fn encode_tool_definition_strict_flag_on_bedrock_emits_dropped_warning() {
+        // Bedrock Converse has no wire-level strict flag on toolSpec.
+        // Setting tool.strict = true must surface as a lossy warning.
+        let c = BedrockConverseCodec::new();
+        let mut r = req(vec![Message::user("hi")]);
+        let mut tool = ToolDefinition::new("calc", json!({"type": "object"}));
+        tool.strict = true;
+        r.tools = vec![tool];
+        let enc = c.encode_request(&r, InvocationMode::Unary).unwrap();
+        assert!(enc.warnings.iter().any(|w| matches!(
+            w, ModelWarning::LossyEncode { field, .. } if field == "tool.calc.strict"
+        )));
+        // No wire-level strict flag in the body.
+        let toolspec = &enc.body["toolConfig"]["tools"][0]["toolSpec"];
+        assert!(toolspec.get("strict").is_none());
+    }
+
+    #[test]
+    fn encode_tool_definition_strips_jsonschema_metadata_from_tool_parameters() {
+        // Walker-level $schema strip applies to tool schemas on Bedrock
+        // too — schemars-generated schemas must not leak `$schema` to
+        // the underlying model's validator.
+        let c = BedrockConverseCodec::new();
+        let mut r = req(vec![Message::user("hi")]);
+        r.tools = vec![ToolDefinition::new(
+            "calc",
+            json!({
+                "$schema": "https://json-schema.org/draft/2020-12/schema",
+                "type": "object",
+                "properties": {"a": {"type": "number"}}
+            }),
+        )];
+        let enc = c.encode_request(&r, InvocationMode::Unary).unwrap();
+        let input_schema = &enc.body["toolConfig"]["tools"][0]["toolSpec"]["inputSchema"]["json"];
+        assert!(input_schema.get("$schema").is_none());
+        assert_eq!(input_schema["type"], "object");
+    }
+
+    #[test]
     fn encode_reasoning_into_additional_thinking() {
         let c = BedrockConverseCodec::new();
         let mut r = req(vec![Message::user("hi")]);
@@ -896,6 +1023,7 @@ mod tests {
             }),
             latency: Some("optimized".into()),
             additional_model_request_fields: Some(json!({"foo": "bar"})),
+            inference_profile: None,
         });
         let enc = c.encode_request(&r, InvocationMode::Unary).unwrap();
         assert_eq!(enc.body["guardrailConfig"]["guardrailIdentifier"], "gid");
@@ -1076,23 +1204,143 @@ mod tests {
     }
 
     #[test]
-    fn response_format_emits_capability_emulated_warning() {
-        // Bedrock Converse delegates structured output to the underlying
-        // model. The codec surfaces the gap as a CapabilityEmulated warning
-        // so the caller knows the request was honoured by emulation rather
-        // than a native parameter.
+    fn encode_response_format_json_schema_emits_output_config() {
         let c = BedrockConverseCodec::new();
         let mut r = req(vec![Message::user("emit json")]);
-        r.response_format = Some(crate::ir::ResponseFormat::JsonObject);
+        r.response_format = Some(ResponseFormat::JsonSchema(JsonSchemaSpec::new(json!({
+            "type": "object",
+            "properties": {"name": {"type": "string"}}
+        }))));
         let enc = c.encode_request(&r, InvocationMode::Unary).unwrap();
-        assert!(
-            enc.warnings.iter().any(|w| matches!(
-                w,
-                ModelWarning::CapabilityEmulated { capability } if capability == "response_format"
-            )),
-            "expected CapabilityEmulated warning, got {:?}",
-            enc.warnings
+        assert_eq!(
+            enc.body["outputConfig"]["textFormat"]["type"],
+            "json_schema"
         );
+        // Schema is embedded as a JSON string, not a JSON object.
+        let schema_str =
+            enc.body["outputConfig"]["textFormat"]["structure"]["jsonSchema"]["schema"]
+                .as_str()
+                .expect("schema must be a JSON string");
+        // Parse it back — it should be a valid JSON object with
+        // additionalProperties: false added by the policy.
+        let reparsed: Value = serde_json::from_str(schema_str).unwrap();
+        assert_eq!(reparsed["additionalProperties"], false);
+    }
+
+    #[test]
+    fn encode_response_format_json_schema_emits_name_on_wire() {
+        let c = BedrockConverseCodec::new();
+        let mut r = req(vec![Message::user("emit json")]);
+        r.response_format = Some(ResponseFormat::JsonSchema(
+            JsonSchemaSpec::new(json!({"type": "object"})).with_name("Person"),
+        ));
+        let enc = c.encode_request(&r, InvocationMode::Unary).unwrap();
+        assert_eq!(
+            enc.body["outputConfig"]["textFormat"]["structure"]["jsonSchema"]["name"],
+            "Person"
+        );
+    }
+
+    #[test]
+    fn encode_response_format_json_schema_emits_description_on_wire() {
+        let c = BedrockConverseCodec::new();
+        let mut r = req(vec![Message::user("emit json")]);
+        r.response_format = Some(ResponseFormat::JsonSchema(
+            JsonSchemaSpec::new(json!({"type": "object"})).with_description("A person record"),
+        ));
+        let enc = c.encode_request(&r, InvocationMode::Unary).unwrap();
+        assert_eq!(
+            enc.body["outputConfig"]["textFormat"]["structure"]["jsonSchema"]["description"],
+            "A person record"
+        );
+    }
+
+    #[test]
+    fn encode_response_format_json_schema_closes_objects() {
+        let c = BedrockConverseCodec::new();
+        let mut r = req(vec![Message::user("emit json")]);
+        r.response_format = Some(ResponseFormat::JsonSchema(JsonSchemaSpec::new(json!({
+            "type": "object",
+            "properties": {"name": {"type": "string"}}
+        }))));
+        let enc = c.encode_request(&r, InvocationMode::Unary).unwrap();
+        let schema_str =
+            enc.body["outputConfig"]["textFormat"]["structure"]["jsonSchema"]["schema"]
+                .as_str()
+                .unwrap();
+        let reparsed: Value = serde_json::from_str(schema_str).unwrap();
+        assert_eq!(reparsed["additionalProperties"], false);
+    }
+
+    #[test]
+    fn encode_response_format_json_schema_rejects_recursive_schema() {
+        let c = BedrockConverseCodec::new();
+        let mut r = req(vec![Message::user("emit json")]);
+        r.response_format = Some(ResponseFormat::JsonSchema(JsonSchemaSpec::new(json!({
+            "$defs": {
+                "Node": {
+                    "type": "object",
+                    "properties": {"next": {"$ref": "#/$defs/Node"}}
+                }
+            },
+            "$ref": "#/$defs/Node"
+        }))));
+        let enc = c.encode_request(&r, InvocationMode::Unary).unwrap();
+        assert!(enc.warnings.iter().any(|w| matches!(
+            w, ModelWarning::LossyEncode { field, reason }
+            if field.contains("$ref") && reason.contains("recursive"))));
+    }
+
+    #[test]
+    fn encode_response_format_json_object_emits_capability_emulated() {
+        let c = BedrockConverseCodec::new();
+        let mut r = req(vec![Message::user("emit json")]);
+        r.response_format = Some(ResponseFormat::JsonObject);
+        let enc = c.encode_request(&r, InvocationMode::Unary).unwrap();
+        assert!(enc.warnings.iter().any(|w| matches!(
+            w,
+            ModelWarning::CapabilityEmulated { capability }
+            if capability == "response_format.json_object"
+        )));
+        assert!(enc.body.get("outputConfig").is_none());
+    }
+
+    #[test]
+    fn encode_response_format_text_is_noop() {
+        let c = BedrockConverseCodec::new();
+        let mut r = req(vec![Message::user("hi")]);
+        r.response_format = Some(ResponseFormat::Text);
+        let enc = c.encode_request(&r, InvocationMode::Unary).unwrap();
+        assert!(enc.body.get("outputConfig").is_none());
+    }
+
+    #[test]
+    fn encode_response_format_does_not_close_unrelated_tool_schemas() {
+        // Regression: the walker should only touch the response_format
+        // schema, not tool definitions. Tools go through a separate
+        // `toolConfig.tools` encoder.
+        let c = BedrockConverseCodec::new();
+        let mut r = req(vec![Message::user("hi")]);
+        r.tools = vec![ToolDefinition::new(
+            "calc",
+            json!({"type": "object", "properties": {"a": {"type": "number"}}}),
+        )];
+        r.response_format = Some(ResponseFormat::JsonSchema(JsonSchemaSpec::new(json!({
+            "type": "object",
+            "properties": {"result": {"type": "string"}}
+        }))));
+        let enc = c.encode_request(&r, InvocationMode::Unary).unwrap();
+        // response_format schema has additionalProperties: false applied.
+        let rf_schema_str =
+            enc.body["outputConfig"]["textFormat"]["structure"]["jsonSchema"]["schema"]
+                .as_str()
+                .unwrap();
+        let rf_schema: Value = serde_json::from_str(rf_schema_str).unwrap();
+        assert_eq!(rf_schema["additionalProperties"], false);
+        // The tool's input schema is NOT touched by the response_format
+        // walker — it lives in `toolConfig.tools[].toolSpec.inputSchema.json`.
+        let tool_schema = &enc.body["toolConfig"]["tools"][0]["toolSpec"]["inputSchema"]["json"];
+        assert!(tool_schema.get("additionalProperties").is_none());
     }
 
     #[test]

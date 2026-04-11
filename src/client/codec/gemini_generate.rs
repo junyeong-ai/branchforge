@@ -25,6 +25,9 @@
 use serde_json::{Value, json};
 
 use super::{ApiVersionHint, EncodedRequest, EndpointShape, InvocationMode, ModelCodec};
+use crate::client::schema::{
+    SchemaPolicy, prepare_schema, prepare_tool_schema, warn_dropped_metadata,
+};
 #[cfg(test)]
 use crate::ir::SystemPrompt;
 use crate::ir::{
@@ -35,6 +38,8 @@ use crate::ir::{
     ToolIdSemantics, ToolOrigin, ToolResultContent, Usage, VisionSupport,
 };
 use crate::{Error, Result};
+
+const SCHEMA_POLICY: SchemaPolicy = SchemaPolicy::gemini();
 
 const CODEC_ID: &str = "gemini-generate";
 
@@ -168,12 +173,12 @@ impl ModelCodec for GeminiGenerateCodec {
 
         // Tools.
         if !request.tools.is_empty() {
+            let mut tool_defs = Vec::with_capacity(request.tools.len());
+            for tool in &request.tools {
+                tool_defs.push(encode_tool_definition(tool, &mut warnings));
+            }
             body["tools"] = json!([{
-                "functionDeclarations": request
-                    .tools
-                    .iter()
-                    .map(encode_tool_definition)
-                    .collect::<Vec<_>>(),
+                "functionDeclarations": tool_defs,
             }]);
         }
         if let Some(choice) = &request.tool_choice {
@@ -203,22 +208,14 @@ impl ModelCodec for GeminiGenerateCodec {
         }
 
         // Structured output. Gemini exposes this through `responseMimeType`
-        // + (optionally) `responseSchema` on `generationConfig`. The schema
-        // is OpenAPI-flavoured rather than strict JSON Schema, but Gemini
-        // accepts the standard JSON-Schema subset we get from `schemars`.
+        // + (optionally) `responseSchema` on `generationConfig`. The shared
+        // `prepare_schema` helper rejects cycles and external `$ref`
+        // targets; other keywords pass through (Gemini accepts most
+        // standard JSON Schema features). `name` and `description` are
+        // not part of the Gemini wire format and are dropped with a
+        // lossy warning when set.
         if let Some(format) = &request.response_format {
-            match format {
-                ResponseFormat::Text => {
-                    gc.insert("responseMimeType".into(), json!("text/plain"));
-                }
-                ResponseFormat::JsonObject => {
-                    gc.insert("responseMimeType".into(), json!("application/json"));
-                }
-                ResponseFormat::JsonSchema { schema, .. } => {
-                    gc.insert("responseMimeType".into(), json!("application/json"));
-                    gc.insert("responseSchema".into(), schema.clone());
-                }
-            }
+            encode_response_format(format, &mut gc, &mut warnings);
         }
         if s.presence_penalty.is_some() {
             warnings.push(ModelWarning::unsupported("presence_penalty", CODEC_ID));
@@ -552,10 +549,28 @@ fn encode_content_part(part: &ContentPart) -> Result<Value> {
     })
 }
 
-fn encode_tool_definition(tool: &ToolDefinition) -> Value {
+fn encode_tool_definition(tool: &ToolDefinition, warnings: &mut Vec<ModelWarning>) -> Value {
+    // Gemini has no strict/non-strict distinction for tools — its
+    // OpenAPI 3.0 validator runs on every tool schema. Always use the
+    // lenient policy; the walker-level `$schema` strip is what fixes
+    // the universal schemars-output bug.
+    //
+    // Runtime capability honesty: if the caller set `tool.strict = true`
+    // despite `ToolCallSupport.strict_schema = false`, surface a lossy
+    // warning so silent drops are visible.
+    if tool.strict {
+        warnings.push(ModelWarning::lossy(
+            format!("tool.{}.strict", tool.name),
+            "gemini-generate has no wire-level strict flag on tool \
+             definitions; the IR `strict = true` setting was dropped",
+        ));
+    }
+    let prepared = prepare_tool_schema(tool.parameters.clone(), &SCHEMA_POLICY, false, &tool.name);
+    warnings.extend(prepared.warnings);
+
     let mut obj = json!({
         "name": tool.name,
-        "parameters": tool.parameters,
+        "parameters": prepared.value,
     });
     if let Some(desc) = &tool.description {
         obj["description"] = json!(desc);
@@ -595,6 +610,35 @@ fn warn_dropped_provider_options(
             provider: "bedrock".into(),
             option: "*".into(),
         });
+    }
+}
+
+fn encode_response_format(
+    format: &ResponseFormat,
+    gc: &mut serde_json::Map<String, Value>,
+    warnings: &mut Vec<ModelWarning>,
+) {
+    match format {
+        ResponseFormat::Text => {
+            gc.insert("responseMimeType".into(), json!("text/plain"));
+        }
+        ResponseFormat::JsonObject => {
+            gc.insert("responseMimeType".into(), json!("application/json"));
+        }
+        ResponseFormat::JsonSchema(spec) => {
+            gc.insert("responseMimeType".into(), json!("application/json"));
+            let prepared = prepare_schema(
+                spec.schema.clone(),
+                &SCHEMA_POLICY,
+                "response_format.schema",
+            );
+            warnings.extend(prepared.warnings);
+            gc.insert("responseSchema".into(), prepared.value);
+            // Gemini's `responseSchema` has no sibling `name` or
+            // `description` fields — drop any spec metadata uniformly
+            // via the shared helper.
+            warn_dropped_metadata(spec, &SCHEMA_POLICY, CODEC_ID, warnings);
+        }
     }
 }
 
@@ -767,7 +811,9 @@ fn collect_function_calls(snapshot: &Value) -> Vec<&Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ir::{GeminiOptions, ModelSettings, ReasoningSettings, SafetySetting};
+    use crate::ir::{
+        GeminiOptions, JsonSchemaSpec, ModelSettings, ReasoningSettings, SafetySetting,
+    };
 
     fn req(messages: Vec<Message>) -> ModelRequest {
         ModelRequest::new("gemini-2.5-flash", messages)
@@ -804,11 +850,13 @@ mod tests {
     fn encode_response_format_json_schema_into_generation_config() {
         let c = GeminiGenerateCodec::new();
         let mut r = req(vec![Message::user("emit json")]);
-        r.response_format = Some(ResponseFormat::JsonSchema {
-            name: "Person".into(),
-            schema: json!({"type": "object", "properties": {"name": {"type": "string"}}}),
-            strict: true,
-        });
+        r.response_format = Some(ResponseFormat::JsonSchema(
+            JsonSchemaSpec::new(
+                json!({"type": "object", "properties": {"name": {"type": "string"}}}),
+            )
+            .with_name("Person")
+            .with_strict(true),
+        ));
         let enc = c.encode_request(&r, InvocationMode::Unary).unwrap();
         assert_eq!(
             enc.body["generationConfig"]["responseMimeType"],
@@ -818,6 +866,73 @@ mod tests {
             enc.body["generationConfig"]["responseSchema"]["type"],
             "object"
         );
+    }
+
+    #[test]
+    fn encode_response_format_drops_name_with_lossy_warning() {
+        let c = GeminiGenerateCodec::new();
+        let mut r = req(vec![Message::user("emit json")]);
+        r.response_format = Some(ResponseFormat::JsonSchema(
+            JsonSchemaSpec::new(json!({"type": "object"})).with_name("Person"),
+        ));
+        let enc = c.encode_request(&r, InvocationMode::Unary).unwrap();
+        assert!(enc.warnings.iter().any(|w| matches!(
+            w,
+            ModelWarning::LossyEncode { field, .. } if field == "response_format.name"
+        )));
+    }
+
+    #[test]
+    fn encode_response_format_drops_description_with_lossy_warning() {
+        let c = GeminiGenerateCodec::new();
+        let mut r = req(vec![Message::user("emit json")]);
+        r.response_format = Some(ResponseFormat::JsonSchema(
+            JsonSchemaSpec::new(json!({"type": "object"})).with_description("A record"),
+        ));
+        let enc = c.encode_request(&r, InvocationMode::Unary).unwrap();
+        assert!(enc.warnings.iter().any(|w| matches!(
+            w,
+            ModelWarning::LossyEncode { field, .. } if field == "response_format.description"
+        )));
+    }
+
+    #[test]
+    fn encode_response_format_rejects_recursive_schema() {
+        let c = GeminiGenerateCodec::new();
+        let mut r = req(vec![Message::user("emit json")]);
+        r.response_format = Some(ResponseFormat::JsonSchema(JsonSchemaSpec::new(json!({
+            "$defs": {
+                "Node": {
+                    "type": "object",
+                    "properties": {"next": {"$ref": "#/$defs/Node"}}
+                }
+            },
+            "$ref": "#/$defs/Node"
+        }))));
+        let enc = c.encode_request(&r, InvocationMode::Unary).unwrap();
+        assert!(enc.warnings.iter().any(|w| matches!(
+            w,
+            ModelWarning::LossyEncode { field, reason }
+            if field.contains("$ref") && reason.contains("recursive")
+        )));
+    }
+
+    #[test]
+    fn encode_response_format_rejects_external_ref() {
+        let c = GeminiGenerateCodec::new();
+        let mut r = req(vec![Message::user("emit json")]);
+        r.response_format = Some(ResponseFormat::JsonSchema(JsonSchemaSpec::new(json!({
+            "type": "object",
+            "properties": {
+                "other": {"$ref": "http://example.com/other.json"}
+            }
+        }))));
+        let enc = c.encode_request(&r, InvocationMode::Unary).unwrap();
+        assert!(enc.warnings.iter().any(|w| matches!(
+            w,
+            ModelWarning::LossyEncode { field, reason }
+            if field.contains("$ref") && reason.contains("external")
+        )));
     }
 
     #[test]
@@ -872,6 +987,7 @@ mod tests {
         let mut r = req(vec![Message::user("hi")]);
         r.system = Some(SystemPrompt::Blocks(vec![SystemBlock {
             text: "x".into(),
+            role: crate::ir::SystemBlockRole::Static,
             cache_marker: Some(CacheMarker::ephemeral()),
         }]));
         let enc = c.encode_request(&r, InvocationMode::Unary).unwrap();
@@ -895,6 +1011,85 @@ mod tests {
             "calc"
         );
         assert!(enc.body["tools"][0]["functionDeclarations"][0]["parameters"].is_object());
+    }
+
+    #[test]
+    fn encode_tool_definition_strips_jsonschema_metadata_from_tool_parameters() {
+        // Regression: schemars::schema_for!(T) emits `$schema` at the top
+        // of generated tool schemas, and Gemini's OpenAPI 3.0 validator
+        // rejects it with a 400. The walker-level metadata strip must
+        // apply to tool schemas too, not just response_format schemas.
+        let c = GeminiGenerateCodec::new();
+        let mut r = req(vec![Message::user("hi")]);
+        r.tools = vec![ToolDefinition::new(
+            "calc",
+            json!({
+                "$schema": "https://json-schema.org/draft/2020-12/schema",
+                "$id": "https://example.com/calc.json",
+                "title": "CalcInput",
+                "type": "object",
+                "properties": {
+                    "a": {"type": "number"},
+                    "b": {"type": "number"}
+                },
+                "required": ["a", "b"]
+            }),
+        )];
+        let enc = c.encode_request(&r, InvocationMode::Unary).unwrap();
+        let params = &enc.body["tools"][0]["functionDeclarations"][0]["parameters"];
+        // Metadata stripped by walker.
+        assert!(params.get("$schema").is_none());
+        assert!(params.get("$id").is_none());
+        // Structural fields preserved.
+        assert_eq!(params["type"], "object");
+        assert_eq!(params["title"], "CalcInput");
+        assert!(params["properties"].is_object());
+        // Lossy warning emitted pointing at the tool schema path.
+        assert!(enc.warnings.iter().any(|w| matches!(
+            w, ModelWarning::LossyEncode { field, .. } if field.contains("$schema")
+        )));
+    }
+
+    #[test]
+    fn encode_tool_definition_strict_flag_on_gemini_emits_dropped_warning() {
+        // Gemini has no wire-level strict flag on tools. Setting
+        // tool.strict = true must surface as a lossy warning rather
+        // than silently dropping the user's intent.
+        let c = GeminiGenerateCodec::new();
+        let mut r = req(vec![Message::user("hi")]);
+        let mut tool = ToolDefinition::new("calc", json!({"type": "object"}));
+        tool.strict = true;
+        r.tools = vec![tool];
+        let enc = c.encode_request(&r, InvocationMode::Unary).unwrap();
+        assert!(enc.warnings.iter().any(|w| matches!(
+            w, ModelWarning::LossyEncode { field, .. } if field == "tool.calc.strict"
+        )));
+        // And no wire-level strict appears anywhere in the body.
+        let body = serde_json::to_string(&enc.body).unwrap();
+        assert!(!body.contains("\"strict\""));
+    }
+
+    #[test]
+    fn encode_tool_definition_preserves_numeric_constraints_via_lenient_policy() {
+        // Gemini's OpenAPI 3.0 validator accepts numeric constraints.
+        // The lenient policy must preserve them on tool parameters,
+        // unlike the strict Anthropic policy.
+        let c = GeminiGenerateCodec::new();
+        let mut r = req(vec![Message::user("hi")]);
+        r.tools = vec![ToolDefinition::new(
+            "age_filter",
+            json!({
+                "type": "object",
+                "properties": {
+                    "min_age": {"type": "integer", "minimum": 0, "maximum": 120}
+                }
+            }),
+        )];
+        let enc = c.encode_request(&r, InvocationMode::Unary).unwrap();
+        let min_age =
+            &enc.body["tools"][0]["functionDeclarations"][0]["parameters"]["properties"]["min_age"];
+        assert_eq!(min_age["minimum"], 0);
+        assert_eq!(min_age["maximum"], 120);
     }
 
     #[test]

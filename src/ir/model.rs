@@ -86,6 +86,67 @@ pub struct ModelRequest {
 }
 
 impl ModelRequest {
+    /// Returns the model id used for **routing** (endpoint
+    /// resolution / URL path), which may differ from
+    /// [`Self::model`] when a provider option overrides it.
+    ///
+    /// Today this honours:
+    /// - Bedrock `inference_profile` — when set, the Bedrock
+    ///   Converse URL path uses the profile ARN/ID instead of the
+    ///   declared model id, enabling cross-region failover and
+    ///   quota pooling.
+    ///
+    /// Future provider-level routing overrides (Vertex publisher,
+    /// OpenAI org alias, …) extend this single method without
+    /// modifying transport / codec signatures. Callers (the
+    /// provider client) use the routing id when calling
+    /// `transport.resolve_endpoint`, and continue to use
+    /// `self.model` when emitting the wire `model` field.
+    pub fn routing_model_id(&self) -> &str {
+        if let Some(opts) = &self.provider_options.bedrock
+            && let Some(profile) = &opts.inference_profile
+        {
+            return profile.as_str();
+        }
+        &self.model
+    }
+
+    /// `true` if the request declares any prompt-cache markers in
+    /// any provider-specific shape.
+    ///
+    /// Recognised shapes:
+    /// - Anthropic top-level `cache_control` with at least one
+    ///   breakpoint enabled,
+    /// - Gemini `cached_content` resource reference,
+    /// - Per-block `cache_marker` on any `SystemBlock`,
+    /// - Structural `SystemBlockRole::Boundary` marker.
+    ///
+    /// Used by the provider client post-decode to detect unexpected
+    /// cache breaks: if this returns `true` and the response reports
+    /// zero `cached_input_tokens`, the upstream cache key was
+    /// invalidated and observability should surface that.
+    pub fn has_cache_markers(&self) -> bool {
+        if let Some(opts) = &self.provider_options.anthropic
+            && let Some(cc) = &opts.cache_control
+            && cc.is_active()
+        {
+            return true;
+        }
+        if let Some(opts) = &self.provider_options.gemini
+            && opts.cached_content.is_some()
+        {
+            return true;
+        }
+        if let Some(SystemPrompt::Blocks(blocks)) = &self.system
+            && blocks
+                .iter()
+                .any(|b| b.cache_marker.is_some() || b.role.is_boundary())
+        {
+            return true;
+        }
+        false
+    }
+
     /// Construct a request with just a model and a list of messages.
     /// Everything else is default.
     pub fn new(model: impl Into<String>, messages: Vec<Message>) -> Self {
@@ -157,6 +218,79 @@ pub struct ModelResponse {
 }
 
 impl ModelResponse {
+    /// Parse the response's concatenated text content as `T`.
+    ///
+    /// Intended for use with [`ResponseFormat::JsonSchema`]: send a
+    /// request with a JSON schema spec and call `.json::<T>()` on the
+    /// response to deserialize it into a domain struct.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`crate::Error::Parse`] in four distinct cases so the
+    /// caller can disambiguate parse failures from model behavior:
+    ///
+    /// - **`FinishReason::ContentFilter`**: the model refused or was
+    ///   filtered. The response text is typically a refusal message, not
+    ///   schema-compliant JSON. Billed tokens were still consumed.
+    /// - **`FinishReason::Length`**: the response was truncated by
+    ///   `max_output_tokens`. The accumulated text is likely partial JSON.
+    /// - Empty text content (no assistant text was returned).
+    /// - `serde_json::from_str` failure on non-empty text.
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// use branchforge::client::LlmCall;
+    /// use branchforge::ir::{JsonSchemaSpec, Message, ModelRequest, ResponseFormat};
+    /// use schemars::JsonSchema;
+    /// use serde::Deserialize;
+    ///
+    /// # async fn demo(client: impl LlmCall) -> branchforge::Result<()> {
+    /// #[derive(JsonSchema, Deserialize, Debug)]
+    /// struct Person {
+    ///     name: String,
+    ///     email: String,
+    /// }
+    ///
+    /// let request = ModelRequest::new("claude-opus-4-6", vec![Message::user("...")])
+    ///     .with_response_format(ResponseFormat::JsonSchema(
+    ///         JsonSchemaSpec::from_type::<Person>()
+    ///     ));
+    /// let response = client.send(&request).await?;
+    /// let person: Person = response.json()?;
+    /// println!("{person:?}");
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn json<T: serde::de::DeserializeOwned>(&self) -> crate::Result<T> {
+        use crate::Error;
+        match self.finish_reason {
+            FinishReason::ContentFilter => Err(Error::Parse(
+                "ModelResponse::json: model refused or output was filtered; \
+                 response does not match schema"
+                    .to_string(),
+            )),
+            FinishReason::Length => Err(Error::Parse(
+                "ModelResponse::json: response truncated by max_tokens; \
+                 JSON is likely incomplete — retry with a larger max_output_tokens"
+                    .to_string(),
+            )),
+            _ => {
+                let text = self.text();
+                if text.is_empty() {
+                    return Err(Error::Parse(
+                        "ModelResponse::json: response has no text content".to_string(),
+                    ));
+                }
+                serde_json::from_str::<T>(&text).map_err(|e| {
+                    Error::Parse(format!(
+                        "ModelResponse::json: failed to parse response text as target type: {e}"
+                    ))
+                })
+            }
+        }
+    }
+
     /// Sum of all text content concatenated. Convenience for the common
     /// "just give me the model's text reply" case.
     pub fn text(&self) -> String {
@@ -269,13 +403,19 @@ pub enum SystemPrompt {
 }
 
 impl SystemPrompt {
-    /// Flatten to a single string, joining blocks with double newlines.
-    /// Used by codecs whose wire format expects a single system string.
+    /// Flatten to a single string, joining wire-visible blocks with
+    /// double newlines.
+    ///
+    /// [`SystemBlockRole::Boundary`] blocks are **never** included —
+    /// they exist only as a structural marker for cache-breakpoint
+    /// placement. Including them would leak the marker text into the
+    /// model's system prompt and corrupt every codec's cache key.
     pub fn flatten(&self) -> String {
         match self {
             SystemPrompt::Text(s) => s.clone(),
             SystemPrompt::Blocks(blocks) => blocks
                 .iter()
+                .filter(|b| !b.role.is_boundary())
                 .map(|b| b.text.as_str())
                 .collect::<Vec<_>>()
                 .join("\n\n"),
@@ -285,10 +425,27 @@ impl SystemPrompt {
     /// `true` if any block carries metadata that cannot round-trip through
     /// a flat string. Codecs that flatten check this to decide whether to
     /// emit a [`ModelWarning::LossyEncode`].
+    ///
+    /// [`SystemBlockRole::Boundary`] blocks are excluded — they are
+    /// not metadata, they are structural anchors that codecs handle
+    /// uniformly via [`SystemPrompt::flatten`].
     pub fn has_block_metadata(&self) -> bool {
         match self {
             SystemPrompt::Text(_) => false,
-            SystemPrompt::Blocks(blocks) => blocks.iter().any(|b| b.cache_marker.is_some()),
+            SystemPrompt::Blocks(blocks) => blocks
+                .iter()
+                .any(|b| !b.role.is_boundary() && b.cache_marker.is_some()),
+        }
+    }
+
+    /// Position (index) of the [`SystemBlockRole::Boundary`] block,
+    /// if present. Codecs that implement prompt caching use this to
+    /// place their cache breakpoint on the block immediately
+    /// preceding the boundary.
+    pub fn boundary_index(&self) -> Option<usize> {
+        match self {
+            SystemPrompt::Text(_) => None,
+            SystemPrompt::Blocks(blocks) => blocks.iter().position(|b| b.role.is_boundary()),
         }
     }
 }
@@ -305,10 +462,62 @@ impl From<&str> for SystemPrompt {
     }
 }
 
+/// Semantic role of a [`SystemBlock`] within the system prompt.
+///
+/// The role is structural — it tells codecs how to handle the
+/// block, independently of whether the block carries a per-block
+/// `cache_marker`. The three roles answer three different questions:
+///
+/// - `Static` — content that is stable across many calls and is
+///   eligible for prompt caching. Most blocks land here by default.
+/// - `Dynamic` — content that changes between calls (active rules,
+///   current date, last-tool output). Never cached. Always after
+///   the [`SystemBlockRole::Boundary`].
+/// - `Boundary` — a structural anchor with no wire content. The
+///   block before the boundary is the last cacheable block; codecs
+///   that implement prompt caching apply their cache breakpoint
+///   there. The boundary block itself is **never serialised** to
+///   the wire — every codec drops it via
+///   [`SystemPrompt::flatten`] or its blocks-encoding equivalent.
+///
+/// This replaces the magic-string `SYSTEM_PROMPT_DYNAMIC_BOUNDARY`
+/// approach: the role is a typed field that the IR contract
+/// enforces uniformly, so a codec cannot accidentally let the
+/// marker text leak into the system prompt.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SystemBlockRole {
+    /// Stable, cache-eligible content. The default.
+    #[default]
+    Static,
+    /// Per-call content. Never cached.
+    Dynamic,
+    /// Structural cache breakpoint marker. Never serialised to wire.
+    Boundary,
+}
+
+impl SystemBlockRole {
+    pub fn is_boundary(&self) -> bool {
+        matches!(self, Self::Boundary)
+    }
+    pub fn is_dynamic(&self) -> bool {
+        matches!(self, Self::Dynamic)
+    }
+    pub fn is_static(&self) -> bool {
+        matches!(self, Self::Static)
+    }
+}
+
 /// One block of a structured system prompt.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SystemBlock {
     pub text: String,
+    /// Structural role: `Static` (cacheable), `Dynamic` (per-call),
+    /// or `Boundary` (structural marker, never serialised).
+    /// Defaults to `Static` for `serde` round-trips of older
+    /// payloads that pre-date the field.
+    #[serde(default)]
+    pub role: SystemBlockRole,
     /// Per-block cache marker. Lossy on every codec that does not support
     /// per-block caching (currently only Anthropic Messages does).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -316,26 +525,51 @@ pub struct SystemBlock {
 }
 
 impl SystemBlock {
-    /// Create a block with caching enabled (provider-default TTL).
+    /// Create a static block with caching enabled (provider-default TTL).
     pub fn cached(text: impl Into<String>) -> Self {
         Self {
             text: text.into(),
+            role: SystemBlockRole::Static,
             cache_marker: Some(super::provider_options::CacheMarker::ephemeral()),
         }
     }
 
-    /// Create a block with caching and a specific TTL string (`"5m"`, `"1h"`).
+    /// Create a static block with caching and a specific TTL string
+    /// (`"5m"`, `"1h"`).
     pub fn cached_with_ttl(text: impl Into<String>, ttl: impl Into<String>) -> Self {
         Self {
             text: text.into(),
+            role: SystemBlockRole::Static,
             cache_marker: Some(super::provider_options::CacheMarker::with_ttl(ttl)),
         }
     }
 
-    /// Create a block without caching.
+    /// Create a static block without caching.
     pub fn uncached(text: impl Into<String>) -> Self {
         Self {
             text: text.into(),
+            role: SystemBlockRole::Static,
+            cache_marker: None,
+        }
+    }
+
+    /// Create a dynamic (per-call, never-cached) block.
+    pub fn dynamic(text: impl Into<String>) -> Self {
+        Self {
+            text: text.into(),
+            role: SystemBlockRole::Dynamic,
+            cache_marker: None,
+        }
+    }
+
+    /// Create the structural [`SystemBlockRole::Boundary`] marker.
+    /// The block carries no wire-visible text; codecs drop it
+    /// during encoding and apply their cache breakpoint to the
+    /// preceding block.
+    pub fn boundary() -> Self {
+        Self {
+            text: String::new(),
+            role: SystemBlockRole::Boundary,
             cache_marker: None,
         }
     }
@@ -395,12 +629,147 @@ pub enum ResponseFormat {
     /// JSON object output. The model may produce any valid JSON object.
     JsonObject,
     /// JSON output conforming to the supplied JSON Schema.
-    JsonSchema {
-        name: String,
-        schema: serde_json::Value,
-        #[serde(default)]
-        strict: bool,
-    },
+    JsonSchema(JsonSchemaSpec),
+}
+
+/// Specification for a JSON-Schema-constrained response format.
+///
+/// Carries the raw JSON schema plus two optional pieces of metadata
+/// (`name`, `description`) that some providers surface on the wire and
+/// others drop. The `strict` flag requests provider-side schema
+/// validation when available.
+///
+/// # Wire support matrix
+///
+/// | Provider              | `schema` | `name` | `description` | `strict` |
+/// | :-------------------- | :------: | :----: | :-----------: | :------: |
+/// | OpenAI Chat           | ✅       | ✅     | ✅            | ✅       |
+/// | OpenAI Responses      | ✅       | ✅     | ✅            | ✅       |
+/// | Anthropic Messages    | ✅       | ❌ †   | ❌ †          | implicit |
+/// | Gemini GenerateContent| ✅       | ❌ †   | ❌ †          | implicit |
+/// | Bedrock Converse      | ✅       | ✅     | ✅            | implicit |
+///
+/// † Codecs emit a [`crate::ir::ModelWarning::LossyEncode`] when `name` or
+/// `description` is set on a provider that has no wire field for it, so
+/// the caller knows the value was dropped.
+///
+/// # Anthropic property ordering
+///
+/// Anthropic's grammar-constrained decoder emits required properties
+/// first (in the order they appear in the schema), then optional
+/// properties (in the order they appear). Callers that care about output
+/// order should mark every property as required, or reorder after
+/// parsing.
+///
+/// # Token cost
+///
+/// Providers that support native structured output inject an extra
+/// system prompt explaining the expected shape, slightly increasing the
+/// input token count compared to an unconstrained call.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct JsonSchemaSpec {
+    /// Raw JSON Schema (pre-transformation). Codecs run their own
+    /// [`crate::client::schema::SchemaPolicy`] on this value at encode
+    /// time, so the spec carries the user's original intent rather than
+    /// a provider-specific subset.
+    pub schema: serde_json::Value,
+    /// Human-readable schema name. See the wire support matrix above.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    /// Human-readable schema description. See the wire support matrix above.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    /// Request provider-side strict validation. Anthropic is always
+    /// grammar-constrained regardless of this flag. OpenAI honours it as
+    /// a legacy toggle; `false` relaxes constraint enforcement.
+    ///
+    /// **Default on deserialization is `true`** to match the constructor
+    /// default (`JsonSchemaSpec::new` → `strict: true`). Without this
+    /// explicit default, a spec deserialized from `{"schema": {...}}`
+    /// (no `strict` field) would silently use `bool::default() == false`
+    /// and produce different validation behaviour from a constructed spec.
+    #[serde(default = "default_strict")]
+    pub strict: bool,
+}
+
+#[inline]
+fn default_strict() -> bool {
+    true
+}
+
+impl JsonSchemaSpec {
+    /// Construct a spec from a raw JSON Schema. `name` and `description`
+    /// default to `None`; `strict` defaults to `true` (the common case).
+    pub fn new(schema: serde_json::Value) -> Self {
+        Self {
+            schema,
+            name: None,
+            description: None,
+            strict: true,
+        }
+    }
+
+    /// Set the human-readable schema name.
+    pub fn with_name(mut self, name: impl Into<String>) -> Self {
+        self.name = Some(name.into());
+        self
+    }
+
+    /// Set the human-readable schema description.
+    pub fn with_description(mut self, description: impl Into<String>) -> Self {
+        self.description = Some(description.into());
+        self
+    }
+
+    /// Set the strict-validation flag. Defaults to `true`.
+    pub fn with_strict(mut self, strict: bool) -> Self {
+        self.strict = strict;
+        self
+    }
+
+    /// Derive a spec from a Rust type `T` that implements
+    /// [`schemars::JsonSchema`]. The type's short name (without the
+    /// module path) is used as `name`.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use branchforge::ir::JsonSchemaSpec;
+    /// use schemars::JsonSchema;
+    /// use serde::Deserialize;
+    ///
+    /// #[derive(JsonSchema, Deserialize)]
+    /// struct Person {
+    ///     name: String,
+    ///     email: String,
+    /// }
+    ///
+    /// let spec = JsonSchemaSpec::from_type::<Person>();
+    /// assert_eq!(spec.name.as_deref(), Some("Person"));
+    /// ```
+    ///
+    /// # Generic types
+    ///
+    /// For `Vec<T>`, `Box<T>`, and other generics, the name resolves to
+    /// the outer type's short name (e.g. `"Vec"`), because
+    /// `std::any::type_name` returns the fully-qualified form
+    /// `"alloc::vec::Vec<crate::Person>"` and this function splits the
+    /// generic arguments away before taking the last path segment. Using
+    /// the outer type name avoids producing malformed identifiers like
+    /// `"Person>"` that would otherwise bleed into the wire `name` field.
+    pub fn from_type<T: schemars::JsonSchema>() -> Self {
+        let schema = serde_json::to_value(schemars::schema_for!(T)).unwrap_or_default();
+        Self::new(schema).with_name(short_type_name::<T>())
+    }
+}
+
+/// Extract the short name of `T` from `std::any::type_name`, handling
+/// generic parameters by splitting on `<` before the `::` split. For
+/// `crate::Person` → `"Person"`; for `Vec<Person>` → `"Vec"`.
+fn short_type_name<T>() -> &'static str {
+    let full = std::any::type_name::<T>();
+    let non_generic = full.split('<').next().unwrap_or(full);
+    non_generic.rsplit("::").next().unwrap_or("Schema")
 }
 
 /// Stateful continuation handle for providers that retain conversation
@@ -442,10 +811,12 @@ mod tests {
         let sp = SystemPrompt::Blocks(vec![
             SystemBlock {
                 text: "first".into(),
+                role: SystemBlockRole::Static,
                 cache_marker: None,
             },
             SystemBlock {
                 text: "second".into(),
+                role: SystemBlockRole::Static,
                 cache_marker: None,
             },
         ]);
@@ -458,6 +829,7 @@ mod tests {
         use super::super::provider_options::CacheMarker;
         let sp = SystemPrompt::Blocks(vec![SystemBlock {
             text: "x".into(),
+            role: SystemBlockRole::Static,
             cache_marker: Some(CacheMarker::ephemeral()),
         }]);
         assert!(sp.has_block_metadata());
@@ -470,6 +842,22 @@ mod tests {
         assert!(r.tools.is_empty());
         assert!(r.system.is_none());
         assert!(r.provider_options.is_empty());
+    }
+
+    #[test]
+    fn routing_model_id_returns_inference_profile_when_set() {
+        use super::super::provider_options::BedrockOptions;
+        let mut req = ModelRequest::new("anthropic.claude-sonnet-4-5", vec![]);
+        assert_eq!(req.routing_model_id(), "anthropic.claude-sonnet-4-5");
+
+        req.provider_options.bedrock = Some(BedrockOptions {
+            inference_profile: Some("us.anthropic.claude-sonnet-4-5-v1:0".into()),
+            ..Default::default()
+        });
+        assert_eq!(
+            req.routing_model_id(),
+            "us.anthropic.claude-sonnet-4-5-v1:0"
+        );
     }
 
     #[test]
@@ -518,14 +906,141 @@ mod tests {
     }
 
     #[test]
+    fn model_response_json_parses_happy_path() {
+        use serde::Deserialize;
+
+        #[derive(Deserialize, PartialEq, Debug)]
+        struct Person {
+            name: String,
+            age: u32,
+        }
+
+        let response = ModelResponse::from_text(r#"{"name":"Alice","age":30}"#);
+        let person: Person = response.json().unwrap();
+        assert_eq!(
+            person,
+            Person {
+                name: "Alice".into(),
+                age: 30
+            }
+        );
+    }
+
+    #[test]
+    fn model_response_json_returns_distinctive_error_on_refusal() {
+        let mut response = ModelResponse::from_text("I cannot help with that.");
+        response.finish_reason = FinishReason::ContentFilter;
+        let err = response.json::<serde_json::Value>().unwrap_err();
+        let message = err.to_string();
+        assert!(message.contains("refused") || message.contains("filtered"));
+    }
+
+    #[test]
+    fn model_response_json_returns_distinctive_error_on_length_truncation() {
+        let mut response = ModelResponse::from_text(r#"{"name":"Al"#);
+        response.finish_reason = FinishReason::Length;
+        let err = response.json::<serde_json::Value>().unwrap_err();
+        let message = err.to_string();
+        assert!(message.contains("truncated") || message.contains("max_tokens"));
+    }
+
+    #[test]
+    fn model_response_json_returns_parse_error_on_invalid_json() {
+        let response = ModelResponse::from_text("not even close to json");
+        let err = response.json::<serde_json::Value>().unwrap_err();
+        assert!(err.to_string().contains("failed to parse"));
+    }
+
+    #[test]
+    fn model_response_json_returns_error_on_empty_text() {
+        let response = ModelResponse::from_text("");
+        let err = response.json::<serde_json::Value>().unwrap_err();
+        assert!(err.to_string().contains("no text content"));
+    }
+
+    #[test]
     fn response_format_json_schema_round_trips() {
-        let rf = ResponseFormat::JsonSchema {
-            name: "Person".into(),
-            schema: serde_json::json!({"type": "object"}),
-            strict: true,
-        };
+        let rf = ResponseFormat::JsonSchema(
+            JsonSchemaSpec::new(serde_json::json!({"type": "object"}))
+                .with_name("Person")
+                .with_description("A person record")
+                .with_strict(true),
+        );
         let j = serde_json::to_string(&rf).unwrap();
         let back: ResponseFormat = serde_json::from_str(&j).unwrap();
         assert_eq!(rf, back);
+    }
+
+    #[test]
+    fn json_schema_spec_new_defaults_to_strict_and_no_metadata() {
+        let spec = JsonSchemaSpec::new(serde_json::json!({"type": "object"}));
+        assert!(spec.name.is_none());
+        assert!(spec.description.is_none());
+        assert!(spec.strict);
+    }
+
+    #[test]
+    fn json_schema_spec_builder_chains() {
+        let spec = JsonSchemaSpec::new(serde_json::json!({"type": "string"}))
+            .with_name("Greeting")
+            .with_description("A greeting string")
+            .with_strict(false);
+        assert_eq!(spec.name.as_deref(), Some("Greeting"));
+        assert_eq!(spec.description.as_deref(), Some("A greeting string"));
+        assert!(!spec.strict);
+    }
+
+    #[test]
+    fn json_schema_spec_from_type_uses_short_type_name() {
+        use schemars::JsonSchema;
+
+        #[derive(JsonSchema)]
+        #[allow(dead_code)]
+        struct ContactInfo {
+            name: String,
+            email: String,
+        }
+
+        let spec = JsonSchemaSpec::from_type::<ContactInfo>();
+        assert_eq!(spec.name.as_deref(), Some("ContactInfo"));
+        assert!(spec.schema.is_object());
+        assert!(spec.strict);
+    }
+
+    #[test]
+    fn json_schema_spec_from_type_strips_generic_parameters_from_name() {
+        use schemars::JsonSchema;
+
+        #[derive(JsonSchema)]
+        #[allow(dead_code)]
+        struct Item {
+            value: String,
+        }
+
+        // `Vec<Item>` → name should be `"Vec"`, not `"Item>"` or similar.
+        // The pre-fix implementation used `rsplit("::")` which would produce
+        // the buggy `"Item>"` tail because `::` doesn't split on `<`.
+        let spec = JsonSchemaSpec::from_type::<Vec<Item>>();
+        let name = spec.name.as_deref().unwrap();
+        assert!(
+            !name.contains('>') && !name.contains('<'),
+            "name must not contain angle brackets, got: {name}"
+        );
+        assert_eq!(name, "Vec");
+    }
+
+    #[test]
+    fn json_schema_spec_deserialize_defaults_strict_to_true() {
+        // The constructor default is `strict: true`. The serde default
+        // must match — otherwise a spec deserialized from JSON that
+        // omits `strict` silently falls back to `false`.
+        let json = serde_json::json!({
+            "schema": {"type": "object"}
+        });
+        let spec: JsonSchemaSpec = serde_json::from_value(json).unwrap();
+        assert!(
+            spec.strict,
+            "deserialized JsonSchemaSpec must default `strict` to true to match the constructor"
+        );
     }
 }

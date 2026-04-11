@@ -61,8 +61,8 @@ pub use content::{
 };
 pub use finish::FinishReason;
 pub use model::{
-    Continuation, Message, ModelRequest, ModelResponse, ResponseFormat, Role, SystemBlock,
-    SystemPrompt, ToolChoice, ToolDefinition,
+    Continuation, JsonSchemaSpec, Message, ModelRequest, ModelResponse, ResponseFormat, Role,
+    SystemBlock, SystemBlockRole, SystemPrompt, ToolChoice, ToolDefinition,
 };
 pub use provider_options::{
     AnthropicOptions, BedrockGuardrail, BedrockOptions, CacheControl, CacheMarker, GeminiOptions,

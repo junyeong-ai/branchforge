@@ -1,9 +1,11 @@
-//! Provider client stack: codecs, transports, presets, and decorators.
+//! Provider client stack: codecs, transports, profiles, and decorators.
 //!
 //! The public API surface is intentionally minimal:
 //!
-//! - [`Preset`] / [`preset::from_env`] — opinionated `(codec, transport)`
-//!   compositions, the canonical entry point for applications.
+//! - [`ProfileRegistry`] / [`preset::from_env`] — open-set
+//!   registry of named `(codec, transport, credential)` recipes.
+//!   Ships canonical builtins **and** accepts user-registered
+//!   profiles at runtime.
 //! - [`ProviderClient`] — composition of one [`codec::ModelCodec`] and one
 //!   [`transport::ModelTransport`].
 //! - [`LlmCall`] + decorators ([`RetryingClient`], [`FallingBackClient`],
@@ -12,7 +14,7 @@
 //!
 //! There is no monolithic `Client` type. The agent runtime holds an
 //! `Arc<dyn LlmCall>` and the public `query`/`stream` helpers in `lib.rs`
-//! resolve a `Preset` from environment variables on demand.
+//! resolve a profile from environment variables on demand.
 
 pub mod codec;
 pub mod fallback;
@@ -28,10 +30,13 @@ use std::time::Duration;
 
 pub use fallback::{FallbackConfig, FallbackTrigger};
 pub use llm_call::{CircuitBrokenClient, FallingBackClient, LlmCall, RetryingClient};
-pub use preset::Preset;
+pub use preset::{CredentialHint, ProfileRegistry, ProviderProfile};
 pub use provider_client::ProviderClient;
 pub use resilience::{CircuitBreaker, CircuitConfig, CircuitState, Resilience, ResilienceConfig};
-pub use schema::{strict_schema, transform_for_strict};
+pub use schema::{
+    MinItemsPolicy, ObjectClosure, PreparedSchema, RequiredHandling, SchemaPolicy, prepare_schema,
+    prepare_tool_schema, schema_for, warn_dropped_metadata,
+};
 
 /// Default HTTP timeout shared by all transports unless overridden.
 pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(300);

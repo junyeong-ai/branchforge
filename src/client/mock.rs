@@ -135,7 +135,11 @@ impl LlmCall for MockLlmCall {
         }
     }
 
-    async fn send_stream(&self, _request: &crate::ir::ModelRequest) -> Result<ChunkStream> {
+    async fn send_stream(
+        &self,
+        _request: &crate::ir::ModelRequest,
+        _cancel_token: tokio_util::sync::CancellationToken,
+    ) -> Result<ChunkStream> {
         match self.pop() {
             MockResponse::Stream(chunks) => Ok(Box::pin(stream::iter(chunks))),
             MockResponse::Error(e) => Err(e),
@@ -187,7 +191,13 @@ mod tests {
         ];
 
         let mock = MockLlmCall::new().then_stream(chunks);
-        let stream = mock.send_stream(&simple_request()).await.unwrap();
+        let stream = mock
+            .send_stream(
+                &simple_request(),
+                tokio_util::sync::CancellationToken::new(),
+            )
+            .await
+            .unwrap();
         let collected: Vec<_> = stream.collect().await;
         assert_eq!(collected.len(), 3);
         assert_eq!(mock.call_count(), 1);

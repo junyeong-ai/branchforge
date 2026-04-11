@@ -1,32 +1,52 @@
 ---
 paths:
   - "src/client/**"
-  - "src/ir/**"
 ---
 
 # Client Module Rules
 
-## Provider stack architecture
+## Provider stack (3-axis)
 
-- **3-axis design**: `ModelCodec` (wire format encoder/decoder) × `ModelTransport` (endpoint + auth) × `EndpointShape` (URL pattern bridge). Never collapse these axes — the orthogonality is what makes new provider combinations fall out for free.
-- `ProviderClient` composes one `Arc<dyn ModelCodec>` + one `Arc<dyn ModelTransport>`. Composition is validated at construction time (`pinned_transport`, `supports_codec`). Invalid pairings return `Error::InvalidComposition`.
-- **5 codecs**: `AnthropicMessagesCodec`, `OpenAiChatCodec`, `OpenAiResponsesCodec`, `GeminiGenerateCodec`, `BedrockConverseCodec`. Codecs are pure (no HTTP, no auth, no state except `StreamDecodeState`).
-- **4 transports**: `DirectTransport` (API key / bearer / query param + optional `CredentialProvider` for OAuth refresh), `VertexTransport` (GCP ADC, publisher routing by codec id), `BedrockTransport` (SigV4 / bearer), `FoundryTransport` (Azure Entra / api-key).
+- **Never collapse** `ModelCodec` × `ModelTransport` × `EndpointShape`. The orthogonality is what makes `vertex-gemini`, `vertex-anthropic`, `bedrock-converse`, and `foundry-anthropic` fall out as free compositions.
+- `ProviderClient::new(codec, transport)` validates the pairing via `codec.pinned_transport()` and `transport.supports_codec()`. Invalid pairings return `Error::InvalidComposition` at construction — never at send time.
+- Codecs are **pure**: no HTTP, no auth, no state except `StreamDecodeState`. Transports are **stateful**: auth caches, token refresh, TLS client.
 - `EndpointShape` is a `const`-friendly descriptor each codec exposes. Transports consume it via `resolve_endpoint(shape, model, mode) -> Endpoint`. The codec never knows the URL; the transport never knows the body shape.
-- `ProviderCapabilities` defaults to `Unsupported` on all axes. Each codec returns `&'static ProviderCapabilities` (prefer `const`). Consumer code reads capabilities — never assumes feature parity. **Capability declarations must be honest**: if a codec advertises `json_schema: Native` it must actually emit `response_format` in `encode_request`.
-- `ModelWarning` entries surface lossy encodes, unsupported settings, and dropped provider options. Warnings flow into `ModelResponse::warnings` (unary) and `ModelStreamChunk::Warning` (streaming).
-- `Preset` enum maps named presets (`anthropic`, `openai`, `vertex-gemini`, `bedrock`, …) to `(codec, transport)` pairs with `build_from_env()` factories. `BRANCHFORGE_PROVIDER` env var selects the preset.
-- `authorize(req, body_bytes: &[u8])` signature carries the serialised body so SigV4 transports can sign it. Non-SigV4 transports ignore `body_bytes`.
-- `ModelTransport::classify_error` is the single OCP-friendly extension point for vendor-specific HTTP error patterns (Vertex quota project, Bedrock throttling, …). The central `provider_client::classify_response_error` only delegates — adding a new transport never requires editing the central function.
 
-## Consumer surface
+## Codecs and transports
 
-- `LlmCall` is the trait the agent runtime uses for all model invocations (`send` / `send_stream`). `ProviderClient` implements it, and decorator wrappers (`RetryingClient`, `FallingBackClient`, `CircuitBrokenClient`) compose around any `Arc<dyn LlmCall>`.
-- The agent runtime holds `Arc<dyn LlmCall>` directly. There is no monolithic `Client` type any more — that legacy adapter layer was removed.
+- **5 codecs**: `AnthropicMessagesCodec`, `OpenAiChatCodec`, `OpenAiResponsesCodec`, `GeminiGenerateCodec`, `BedrockConverseCodec`. All five ship native structured outputs via `SchemaPolicy` — see `.claude/rules/schema.md`.
+- **4 transports**: `DirectTransport` (API key / bearer / query param + optional `CredentialProvider` for OAuth refresh), `VertexTransport` (GCP ADC + publisher routing by `codec_id`), `BedrockTransport` (SigV4 / bearer), `FoundryTransport` (Azure Entra / api-key).
+- Each codec holds a `const SCHEMA_POLICY: SchemaPolicy = SchemaPolicy::X()` next to its other constants. The corresponding `encode_response_format` helper is codec-private.
+- `authorize(req, body_bytes: &[u8])` carries the serialised body so SigV4 transports can sign it. Non-SigV4 transports ignore `body_bytes`.
+
+## Capability honesty (enforced by tests)
+
+- `ProviderCapabilities` defaults to `Unsupported` on every axis. Consumer code reads capabilities — never assume feature parity.
+- If a codec declares `json_schema: Native` it **must** emit a wire-level schema reference in `encode_request`. `tests/codec_contract.rs::capability_honesty_response_format` walks all 5 codecs × (JsonSchema + JsonObject) and fails the build if a codec lies.
+- Emulated variants must emit a `ModelWarning::CapabilityEmulated` with a `response_format.*`-prefixed capability string. The matrix's assertion uses `starts_with` so new variants are forward-compatible.
+
+## Warnings and errors
+
+- `ModelWarning::LossyEncode { field, reason }` — the codec transformed or dropped a user field.
+- `ModelWarning::CapabilityEmulated { capability }` — the whole capability is emulated.
+- `ModelWarning::UnsupportedSetting { setting, codec }` — a setting was dropped entirely.
+- Encode-time warnings flow into `ModelResponse::warnings` via `ProviderClient::send` (`decoded.warnings.extend(encoded.warnings)`). Streaming routes them into `ModelStreamChunk::Warning`.
+- `ModelTransport::classify_error(status, body)` is the single OCP extension point for vendor-specific HTTP failures (Vertex quota project, Bedrock throttling, Foundry Entra). The central `provider_client::classify_response_error` only delegates.
+
+## LlmCall and decorators
+
+- `LlmCall` is the trait the agent runtime uses for all model invocations (`send` / `send_stream`). `ProviderClient` implements it.
+- Decorator wrappers compose around any `Arc<dyn LlmCall>`: `RetryingClient`, `FallingBackClient`, `CircuitBrokenClient`.
+- There is no monolithic `Client` type — the legacy adapter layer was removed in the Phase 1b refactor.
+
+## Preset-based bootstrapping
+
+- `Preset` enum maps names (`anthropic`, `openai`, `openai-chat`, `gemini`, `vertex-gemini`, `vertex-anthropic`, `bedrock`, `foundry-anthropic`) to `(codec, transport)` pairs with `build_from_env()` factories. Cloud presets are `cfg`-gated behind their feature flags.
+- `BRANCHFORGE_PROVIDER` env var selects the preset at runtime; `Preset::from_id(&name)` is the programmatic entry point.
 
 ## Environment variables
 
-- `BRANCHFORGE_PROVIDER` — selects a named preset (`anthropic`, `openai`, `openai-chat`, `gemini`, `vertex-gemini`, `vertex-anthropic`, `bedrock`, `foundry-anthropic`).
-- `BRANCHFORGE_MODEL` / `BRANCHFORGE_SMALL_MODEL` / `BRANCHFORGE_REASONING_MODEL` — model overrides.
-- `BRANCHFORGE_PRICING_<MODEL>_INPUT` / `..._OUTPUT` / `..._CACHE_READ` / `..._CACHE_WRITE` — generic per-model pricing overrides, applied on top of `with_anthropic_models()` / `with_openai_models()` / `with_gemini_models()` defaults.
-- Standard vendor vars are read verbatim: `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `GEMINI_API_KEY`, `GOOGLE_CLOUD_PROJECT`, `GOOGLE_CLOUD_LOCATION`, `AWS_REGION`, `AZURE_AI_RESOURCE`, etc.
+- `BRANCHFORGE_PROVIDER` — preset selector (see above).
+- `BRANCHFORGE_MODEL` / `BRANCHFORGE_SMALL_MODEL` / `BRANCHFORGE_REASONING_MODEL` — per-role model overrides.
+- `BRANCHFORGE_PRICING_<MODEL>_INPUT` / `..._OUTPUT` / `..._CACHE_READ` / `..._CACHE_WRITE` — per-model pricing overrides layered on top of `with_anthropic_models()` / `with_openai_models()` / `with_gemini_models()` defaults.
+- Vendor vars are read verbatim: `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `GEMINI_API_KEY`, `GOOGLE_CLOUD_PROJECT`, `GOOGLE_CLOUD_LOCATION`, `AWS_REGION`, `AZURE_AI_RESOURCE`.

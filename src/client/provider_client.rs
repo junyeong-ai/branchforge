@@ -112,10 +112,73 @@ impl ProviderClient {
     /// 6. Merge encode-time warnings into the final response.
     pub async fn send(&self, request: &ModelRequest) -> Result<ModelResponse> {
         let mode = InvocationMode::Unary;
+
+        // Create the observability span for this API call. The span
+        // lives for the full request lifetime; usage / cache / error
+        // attributes are recorded as we learn them. `tracing-opentelemetry`
+        // (optional, behind the `otel` feature for downstream consumers)
+        // turns these attributes into OTel span attributes for free, and
+        // a span-to-metric layer can derive histograms / counters from
+        // the same events — no separate metrics wiring required on the
+        // hot path.
+        //
+        // We use `Instrument::instrument` rather than a guard / `entered`
+        // so the inner future remains `Send` (an `EnteredSpan` guard
+        // held across `.await` would break the `Send` bound required
+        // by `LlmCall::send`). The instrument wrapper attaches the span
+        // to the future and re-enters it every time the executor polls,
+        // which is exactly what we want for a cross-`.await` lifetime.
+        use tracing::Instrument;
+        let api_span =
+            crate::observability::ApiCallSpan::with_system(&request.model, self.codec.id());
+        let tracing_span = api_span.span().clone();
+
+        let result = self
+            .send_inner(request, mode)
+            .instrument(tracing_span)
+            .await;
+        match &result {
+            Ok(response) => {
+                api_span.record_usage(response.usage.input_tokens, response.usage.output_tokens);
+                if let (Some(read), Some(creation)) = (
+                    response.usage.cached_input_tokens,
+                    response.usage.cache_creation_tokens,
+                ) {
+                    api_span.record_cache(read, creation);
+                } else if let Some(read) = response.usage.cached_input_tokens {
+                    api_span.record_cache(read, 0);
+                } else if let Some(creation) = response.usage.cache_creation_tokens {
+                    api_span.record_cache(0, creation);
+                }
+                if let Some(reasoning) = response.usage.reasoning_tokens {
+                    api_span.record_reasoning_tokens(reasoning);
+                }
+            }
+            Err(err) => {
+                api_span.record_error(err.category());
+            }
+        }
+        api_span.finish();
+        result
+    }
+
+    /// Inner request path, separated from [`send`] so the outer method
+    /// can own the [`ApiCallSpan`] lifecycle (create → record on return
+    /// → finish) without cluttering the send logic with observability
+    /// bookkeeping.
+    async fn send_inner(
+        &self,
+        request: &ModelRequest,
+        mode: InvocationMode,
+    ) -> Result<ModelResponse> {
         let encoded = self.codec.encode_request(request, mode)?;
         let endpoint = self
             .transport
-            .resolve_endpoint(self.codec.endpoint_shape(), &request.model, mode)
+            .resolve_endpoint(
+                self.codec.endpoint_shape(),
+                request.routing_model_id(),
+                mode,
+            )
             .await?;
 
         let body_bytes = serde_json::to_vec(&encoded.body)?;
@@ -140,6 +203,58 @@ impl ProviderClient {
         let raw: serde_json::Value = response.json().await?;
         let mut decoded = self.codec.decode_response(raw, mode)?;
         decoded.warnings.extend(encoded.warnings);
+
+        // Unexpected cache-break detection: the request declared one
+        // or more cache markers (either top-level
+        // `provider_options.anthropic.cache_control` or per-block
+        // `SystemBlock.cache_marker`), but the response reported zero
+        // `cached_input_tokens`. That mismatch is a strong signal
+        // of a cache invalidation upstream — TTL expiry, rolling
+        // deploy flush, or an unintentional request-shape change
+        // that broke the prefix match. We surface it as a
+        // `ModelWarning::LossyEncode` and emit a tracing event so
+        // downstream observability can aggregate the rate.
+        if request.has_cache_markers() && decoded.usage.cached_input_tokens.unwrap_or(0) == 0 {
+            tracing::warn!(
+                target: "branchforge::cache::unexpected_break",
+                model = %request.model,
+                codec = self.codec.id(),
+                "Cache markers set but response reported zero cache hits — unexpected break"
+            );
+            decoded.warnings.push(crate::ir::ModelWarning::lossy(
+                "cache.unexpected_break",
+                "Request declared cache markers but response had 0 cached_input_tokens",
+            ));
+        }
+
+        // Runtime JSON-Schema validation. Native structured-output
+        // providers claim to honor the declared schema, but streaming
+        // interruptions, degraded models, or plain provider bugs can
+        // still produce non-conforming bodies. We validate after decode
+        // so that application code that calls `response.json::<T>()` is
+        // not the first line of defence.
+        //
+        // `spec.strict == false` is the caller's explicit opt-out —
+        // they want the lenient path, so we downgrade any violation to
+        // a warning on the response.
+        if let Some(crate::ir::ResponseFormat::JsonSchema(spec)) = &request.response_format {
+            let text = decoded.text();
+            if !text.is_empty() {
+                match crate::client::schema::validate_structured_output(&text, spec) {
+                    Ok(()) => {}
+                    Err(e) if spec.strict => {
+                        return Err(validation_error_to_error(e));
+                    }
+                    Err(e) => {
+                        decoded.warnings.push(crate::ir::ModelWarning::lossy(
+                            "response_format.runtime_validation",
+                            format!("non-strict schema violation: {e}"),
+                        ));
+                    }
+                }
+            }
+        }
+
         Ok(decoded)
     }
 
@@ -154,12 +269,20 @@ impl ProviderClient {
     ///    [`StreamDecodeState`] and emit zero or more [`ModelStreamChunk`]s.
     /// 6. Encode-time warnings are surfaced as
     ///    [`ModelStreamChunk::Warning`] before the first decoded chunk.
-    pub async fn send_stream(&self, request: &ModelRequest) -> Result<ChunkStream> {
+    pub async fn send_stream(
+        &self,
+        request: &ModelRequest,
+        cancel_token: tokio_util::sync::CancellationToken,
+    ) -> Result<ChunkStream> {
         let mode = InvocationMode::Stream;
         let encoded = self.codec.encode_request(request, mode)?;
         let endpoint = self
             .transport
-            .resolve_endpoint(self.codec.endpoint_shape(), &request.model, mode)
+            .resolve_endpoint(
+                self.codec.endpoint_shape(),
+                request.routing_model_id(),
+                mode,
+            )
             .await?;
 
         let body_bytes = serde_json::to_vec(&encoded.body)?;
@@ -170,7 +293,16 @@ impl ProviderClient {
         req = self.transport.authorize(req, &body_bytes).await?;
         req = req.body(body_bytes);
 
-        let response = req.send().await?;
+        // Race the HTTP connect / headers phase against cancellation.
+        // If the token fires before headers arrive, we drop the in-flight
+        // request future, which releases the connection attempt.
+        let response = tokio::select! {
+            biased;
+            _ = cancel_token.cancelled() => {
+                return Err(Error::Stream("Streaming request cancelled before response headers".into()));
+            }
+            res = req.send() => res?,
+        };
         let status = response.status();
         if !status.is_success() {
             let body = response.text().await.unwrap_or_default();
@@ -185,9 +317,18 @@ impl ProviderClient {
         let codec = self.codec.clone();
         let warnings = encoded.warnings;
         let byte_stream = response.bytes_stream();
-        let chunk_stream = build_chunk_stream(codec, framing, byte_stream, warnings);
+        let chunk_stream = build_chunk_stream(codec, framing, byte_stream, warnings, cancel_token);
         Ok(chunk_stream)
     }
+}
+
+/// One step of the byte-stream → chunk-stream loop. Lifted to
+/// module level so the `try_stream!` macro doesn't try to hoist a
+/// generic local enum (which the macro cannot reliably do).
+enum ByteStreamStep<T> {
+    Chunk(T),
+    End,
+    Cancelled,
 }
 
 /// Wrap a `bytes_stream()` from `reqwest` with a framing-aware decoder
@@ -198,6 +339,7 @@ fn build_chunk_stream(
     framing: StreamFraming,
     byte_stream: impl Stream<Item = std::result::Result<bytes::Bytes, reqwest::Error>> + Send + 'static,
     warnings: Vec<crate::ir::ModelWarning>,
+    cancel_token: tokio_util::sync::CancellationToken,
 ) -> ChunkStream {
     use async_stream::try_stream;
 
@@ -216,7 +358,28 @@ fn build_chunk_stream(
         };
         futures::pin_mut!(byte_stream);
 
-        while let Some(chunk_result) = byte_stream.next().await {
+        loop {
+            // When `cancel_token` fires, we return an error out of the
+            // `try_stream!` closure. That drops the closure's locals —
+            // including `byte_stream` and therefore the reqwest `Response`
+            // body — which releases the hyper connection and closes the
+            // TCP socket instead of letting it drain in the background.
+            let step = tokio::select! {
+                biased;
+                _ = cancel_token.cancelled() => ByteStreamStep::Cancelled,
+                next = byte_stream.next() => match next {
+                    Some(c) => ByteStreamStep::Chunk(c),
+                    None => ByteStreamStep::End,
+                },
+            };
+            let chunk_result = match step {
+                ByteStreamStep::Chunk(c) => c,
+                ByteStreamStep::End => break,
+                ByteStreamStep::Cancelled => {
+                    Err(Error::Stream("Streaming body cancelled".into()))?;
+                    unreachable!()
+                }
+            };
             let chunk = chunk_result.map_err(Error::from)?;
 
             if let Some(decoder) = aws_decoder.as_mut() {
@@ -370,6 +533,21 @@ fn extract_ndjson_line(buffer: &mut Vec<u8>) -> Option<Vec<u8>> {
         line.pop();
     }
     Some(line)
+}
+
+/// Translate a [`crate::client::schema::StructuredOutputValidationError`]
+/// into the public [`Error::StructuredOutputInvalid`] variant so callers
+/// get a stable, typed failure surface with the violating JSON pointer
+/// preserved.
+fn validation_error_to_error(err: crate::client::schema::StructuredOutputValidationError) -> Error {
+    use crate::client::schema::StructuredOutputValidationError as V;
+    match err {
+        V::NotJson { reason } => Error::StructuredOutputInvalid {
+            pointer: String::new(),
+            reason: format!("body is not valid JSON: {reason}"),
+        },
+        V::Constraint { pointer, reason } => Error::StructuredOutputInvalid { pointer, reason },
+    }
 }
 
 fn validate_composition(codec: &dyn ModelCodec, transport: &dyn ModelTransport) -> Result<()> {
@@ -836,7 +1014,10 @@ mod tests {
         ));
         let client = ProviderClient::new(codec, transport).unwrap();
         let req = ModelRequest::new("claude-sonnet-4-5", vec![Message::user("ping")]);
-        let mut stream = client.send_stream(&req).await.unwrap();
+        let mut stream = client
+            .send_stream(&req, tokio_util::sync::CancellationToken::new())
+            .await
+            .unwrap();
 
         let mut text = String::new();
         let mut saw_message_start = false;
@@ -881,7 +1062,10 @@ mod tests {
         ));
         let client = ProviderClient::new(codec, transport).unwrap();
         let req = ModelRequest::new("gpt-4o-mini", vec![Message::user("hi")]);
-        let mut stream = client.send_stream(&req).await.unwrap();
+        let mut stream = client
+            .send_stream(&req, tokio_util::sync::CancellationToken::new())
+            .await
+            .unwrap();
 
         let mut text = String::new();
         let mut saw_finish = false;
@@ -922,7 +1106,10 @@ mod tests {
         let client = ProviderClient::new(codec, transport).unwrap();
         let mut req = ModelRequest::new("claude-sonnet-4-5", vec![Message::user("hi")]);
         req.settings.seed = Some(42); // unsupported on anthropic-messages
-        let mut stream = client.send_stream(&req).await.unwrap();
+        let mut stream = client
+            .send_stream(&req, tokio_util::sync::CancellationToken::new())
+            .await
+            .unwrap();
 
         let first = futures::StreamExt::next(&mut stream)
             .await
@@ -936,6 +1123,306 @@ mod tests {
                 assert_eq!(setting, "seed");
             }
             other => panic!("expected leading Warning chunk, got {other:?}"),
+        }
+    }
+
+    /// `ModelRequest::has_cache_markers()` returns true when any
+    /// provider-specific cache marker is set: Anthropic
+    /// `cache_control`, Gemini `cached_content`, per-block
+    /// `cache_marker`, or structural `Boundary` role.
+    #[test]
+    fn has_cache_markers_anthropic_top_level() {
+        use crate::ir::provider_options::{AnthropicOptions, CacheControl};
+
+        let mut req = ModelRequest::new("m", vec![Message::user("hi")]);
+        assert!(!req.has_cache_markers());
+
+        req.provider_options.anthropic = Some(AnthropicOptions {
+            cache_control: Some(CacheControl {
+                system: true,
+                ..Default::default()
+            }),
+            ..Default::default()
+        });
+        assert!(req.has_cache_markers());
+    }
+
+    #[test]
+    fn has_cache_markers_per_block() {
+        use crate::ir::model::{SystemBlock, SystemPrompt};
+        use crate::ir::provider_options::CacheMarker;
+
+        let mut req = ModelRequest::new("m", vec![Message::user("hi")]);
+        req.system = Some(SystemPrompt::Blocks(vec![SystemBlock {
+            text: "sys".into(),
+            role: crate::ir::SystemBlockRole::Static,
+            cache_marker: Some(CacheMarker::ephemeral()),
+        }]));
+        assert!(req.has_cache_markers());
+    }
+
+    #[test]
+    fn has_cache_markers_plain_text_system_is_not_a_marker() {
+        use crate::ir::SystemPrompt;
+        let mut req = ModelRequest::new("m", vec![Message::user("hi")]);
+        req.system = Some(SystemPrompt::Text("plain".into()));
+        assert!(!req.has_cache_markers());
+    }
+
+    #[test]
+    fn has_cache_markers_gemini_cached_content() {
+        use crate::ir::provider_options::GeminiOptions;
+        let mut req = ModelRequest::new("m", vec![Message::user("hi")]);
+        req.provider_options.gemini = Some(GeminiOptions {
+            cached_content: Some("cachedContents/abc".into()),
+            ..Default::default()
+        });
+        assert!(req.has_cache_markers());
+    }
+
+    #[test]
+    fn has_cache_markers_structural_boundary() {
+        use crate::ir::{SystemBlock, SystemPrompt};
+        let mut req = ModelRequest::new("m", vec![Message::user("hi")]);
+        req.system = Some(SystemPrompt::Blocks(vec![
+            SystemBlock::uncached("static"),
+            SystemBlock::boundary(),
+            SystemBlock::dynamic("dynamic"),
+        ]));
+        assert!(req.has_cache_markers());
+    }
+
+    /// End-to-end: request declares a cache marker, provider returns
+    /// zero cached_input_tokens, `ProviderClient::send` must attach
+    /// a `cache.unexpected_break` warning to the response.
+    #[tokio::test]
+    async fn unexpected_cache_break_surfaces_warning() {
+        use crate::ir::provider_options::{AnthropicOptions, CacheControl};
+        use crate::ir::{ModelWarning, ProviderOptions};
+        use serde_json::json;
+
+        // Anthropic response with zero cache hits.
+        let body = json!({
+            "id": "msg_1",
+            "type": "message",
+            "role": "assistant",
+            "model": "claude-sonnet-4-5",
+            "content": [{"type": "text", "text": "ok"}],
+            "stop_reason": "end_turn",
+            "usage": {
+                "input_tokens": 100,
+                "output_tokens": 10,
+                "cache_read_input_tokens": 0,
+                "cache_creation_input_tokens": 0
+            }
+        });
+        let mock = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("POST"))
+            .respond_with(
+                wiremock::ResponseTemplate::new(200)
+                    .insert_header("content-type", "application/json")
+                    .set_body_json(body),
+            )
+            .mount(&mock)
+            .await;
+
+        let codec = Arc::new(AnthropicMessagesCodec::new());
+        let transport = Arc::new(DirectTransport::new(
+            mock.uri(),
+            DirectAuth::XApiKey(SecretString::from("k")),
+        ));
+        let client = ProviderClient::new(codec, transport).unwrap();
+
+        let mut req = ModelRequest::new("claude-sonnet-4-5", vec![Message::user("hi")]);
+        req.provider_options = ProviderOptions {
+            anthropic: Some(AnthropicOptions {
+                cache_control: Some(CacheControl {
+                    system: true,
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        let resp = client.send(&req).await.unwrap();
+        let saw_warning = resp.warnings.iter().any(|w| {
+            matches!(
+                w,
+                ModelWarning::LossyEncode { field, .. } if field == "cache.unexpected_break"
+            )
+        });
+        assert!(
+            saw_warning,
+            "expected cache.unexpected_break warning, got {:?}",
+            resp.warnings
+        );
+    }
+
+    /// Post-decode runtime validation: when a strict
+    /// `ResponseFormat::JsonSchema` is set and the provider emits a
+    /// non-conforming body, `ProviderClient::send` must fail with
+    /// [`Error::StructuredOutputInvalid`] before the response ever
+    /// reaches application code.
+    #[tokio::test]
+    async fn strict_json_schema_violation_errors_post_decode() {
+        use crate::ir::{JsonSchemaSpec, ResponseFormat};
+        use serde_json::json;
+
+        // Anthropic-shaped response whose text content is valid JSON
+        // but does NOT match the declared schema (age is a string).
+        let body = json!({
+            "id": "msg_1",
+            "type": "message",
+            "role": "assistant",
+            "model": "claude-sonnet-4-5",
+            "content": [{"type": "text", "text": r#"{"name":"Ada","age":"thirty"}"#}],
+            "stop_reason": "end_turn",
+            "usage": {"input_tokens": 3, "output_tokens": 10}
+        });
+        let mock = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("POST"))
+            .respond_with(
+                wiremock::ResponseTemplate::new(200)
+                    .insert_header("content-type", "application/json")
+                    .set_body_json(body),
+            )
+            .mount(&mock)
+            .await;
+
+        let codec = Arc::new(AnthropicMessagesCodec::new());
+        let transport = Arc::new(DirectTransport::new(
+            mock.uri(),
+            DirectAuth::XApiKey(SecretString::from("k")),
+        ));
+        let client = ProviderClient::new(codec, transport).unwrap();
+        let req = ModelRequest::new("claude-sonnet-4-5", vec![Message::user("hi")])
+            .with_response_format(ResponseFormat::JsonSchema(JsonSchemaSpec {
+                schema: json!({
+                    "type": "object",
+                    "properties": {
+                        "name": {"type": "string"},
+                        "age": {"type": "integer"}
+                    },
+                    "required": ["name", "age"]
+                }),
+                name: None,
+                description: None,
+                strict: true,
+            }));
+
+        let err = client.send(&req).await.unwrap_err();
+        match err {
+            Error::StructuredOutputInvalid { pointer, reason } => {
+                assert_eq!(pointer, "/age");
+                assert!(reason.contains("expected type"), "got {reason}");
+            }
+            other => panic!("expected StructuredOutputInvalid, got {other:?}"),
+        }
+    }
+
+    /// Non-strict mode attaches a warning instead of failing.
+    #[tokio::test]
+    async fn nonstrict_json_schema_violation_warns_not_errors() {
+        use crate::ir::{JsonSchemaSpec, ModelWarning, ResponseFormat};
+        use serde_json::json;
+
+        let body = json!({
+            "id": "msg_1",
+            "type": "message",
+            "role": "assistant",
+            "model": "claude-sonnet-4-5",
+            "content": [{"type": "text", "text": r#"{"name":"Ada","age":"thirty"}"#}],
+            "stop_reason": "end_turn",
+            "usage": {"input_tokens": 3, "output_tokens": 10}
+        });
+        let mock = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("POST"))
+            .respond_with(
+                wiremock::ResponseTemplate::new(200)
+                    .insert_header("content-type", "application/json")
+                    .set_body_json(body),
+            )
+            .mount(&mock)
+            .await;
+
+        let codec = Arc::new(AnthropicMessagesCodec::new());
+        let transport = Arc::new(DirectTransport::new(
+            mock.uri(),
+            DirectAuth::XApiKey(SecretString::from("k")),
+        ));
+        let client = ProviderClient::new(codec, transport).unwrap();
+        let req = ModelRequest::new("claude-sonnet-4-5", vec![Message::user("hi")])
+            .with_response_format(ResponseFormat::JsonSchema(JsonSchemaSpec {
+                schema: json!({
+                    "type": "object",
+                    "properties": {"age": {"type": "integer"}},
+                }),
+                name: None,
+                description: None,
+                strict: false,
+            }));
+
+        let resp = client
+            .send(&req)
+            .await
+            .expect("should not error in non-strict mode");
+        let has_warning = resp.warnings.iter().any(|w| matches!(
+            w,
+            ModelWarning::LossyEncode { field, .. } if field == "response_format.runtime_validation"
+        ));
+        assert!(
+            has_warning,
+            "expected runtime_validation warning, got {:?}",
+            resp.warnings
+        );
+    }
+
+    /// `build_chunk_stream` must abort the byte-stream loop when
+    /// `cancel_token` fires. A byte stream that hangs forever should
+    /// still yield a terminal `Error::Stream` within a short bound after
+    /// cancel is triggered — not wait for the stream to drain.
+    #[tokio::test]
+    async fn build_chunk_stream_cancels_mid_read() {
+        use futures::stream::{self, StreamExt};
+        use std::time::Duration;
+
+        // A byte stream that never yields another chunk.
+        let hanging = stream::unfold((), |()| async move {
+            // Park forever — the outer select! is what must abort us.
+            futures::future::pending::<()>().await;
+            Some((Ok::<bytes::Bytes, reqwest::Error>(bytes::Bytes::new()), ()))
+        });
+
+        let codec: Arc<dyn ModelCodec> = Arc::new(AnthropicMessagesCodec::new());
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let mut stream = build_chunk_stream(
+            codec,
+            StreamFraming::Sse,
+            hanging,
+            Vec::new(),
+            cancel.clone(),
+        );
+
+        // Fire cancel after a tiny delay so the stream has entered the
+        // select loop.
+        let cancel_cloned = cancel.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            cancel_cloned.cancel();
+        });
+
+        let next = tokio::time::timeout(Duration::from_secs(2), stream.next())
+            .await
+            .expect("stream should yield a terminal item within 2s of cancel");
+        match next {
+            Some(Err(Error::Stream(msg))) => {
+                assert!(
+                    msg.contains("cancelled"),
+                    "expected cancellation message, got {msg:?}"
+                );
+            }
+            other => panic!("expected Stream cancellation error, got {other:?}"),
         }
     }
 }

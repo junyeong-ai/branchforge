@@ -23,6 +23,7 @@
 
 pub mod anthropic_messages;
 pub mod bedrock_converse;
+pub mod gemini_cache;
 pub mod gemini_generate;
 pub mod openai_chat;
 pub mod openai_responses;

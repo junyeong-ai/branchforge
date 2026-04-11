@@ -16,17 +16,21 @@ use super::{
     ApiVersionHint, EncodedRequest, EndpointShape, HeaderSource, HeaderSpec, InvocationMode,
     ModelCodec,
 };
+use crate::client::schema::{
+    SchemaPolicy, prepare_schema, prepare_tool_schema, warn_dropped_metadata,
+};
 use crate::ir::{
     CacheGranularity, CacheSupport, ContentPart, FinishReason, MediaSource, Message, ModelRequest,
     ModelResponse, ModelStreamChunk, ModelWarning, ProviderCapabilities, ReasoningContent,
-    ReasoningKind, ReasoningSignature, ReasoningSupport, Role, StreamDecodeState, Support,
-    SystemPrompt, SystemPromptShape, ToolCallSupport, ToolDefinition, ToolIdSemantics, ToolOrigin,
-    ToolResultContent, Usage, VisionSupport,
+    ReasoningKind, ReasoningSignature, ReasoningSupport, ResponseFormat, Role, StreamDecodeState,
+    Support, SystemPrompt, SystemPromptShape, ToolCallSupport, ToolDefinition, ToolIdSemantics,
+    ToolOrigin, ToolResultContent, Usage, VisionSupport,
 };
 use crate::{Error, Result};
 
 const CODEC_ID: &str = "anthropic-messages";
 const ANTHROPIC_VERSION: &str = "2023-06-01";
+const SCHEMA_POLICY: SchemaPolicy = SchemaPolicy::anthropic();
 
 const SHAPE: EndpointShape = EndpointShape {
     codec_id: "anthropic-messages",
@@ -47,13 +51,29 @@ const CAPABILITIES: ProviderCapabilities = ProviderCapabilities {
     tool_calls: ToolCallSupport {
         mode: Support::Native,
         parallel: Support::Native,
-        strict_schema: false,
+        // Anthropic GA structured outputs ship strict tool use via the
+        // same grammar compiler: `strict: true` on a tool definition
+        // guarantees schema-constrained inputs. The codec emits the
+        // wire flag and runs the tool's input_schema through the
+        // shared `prepare_tool_schema` pipeline.
+        strict_schema: true,
         id_semantics: ToolIdSemantics::Provided,
     },
     structured_output: crate::ir::StructuredOutputSupport {
+        // JsonObject has no portable mapping on Anthropic structured
+        // outputs — the API requires an explicit schema. The codec
+        // surfaces a `response_format.json_object` CapabilityEmulated
+        // warning when callers set `ResponseFormat::JsonObject`.
         json_object: Support::Emulated,
-        json_schema: Support::Emulated,
-        strict: false,
+        // JsonSchema is native via `output_config.format` (GA on the
+        // Claude API and Amazon Bedrock as of 2026-04). The codec runs
+        // the schema through `SchemaPolicy::anthropic()` to strip
+        // unsupported keywords before wire submission.
+        json_schema: Support::Native,
+        // Anthropic structured outputs are always grammar-constrained —
+        // the provider validates the schema strictly server-side. The
+        // `JsonSchemaSpec::strict` flag is therefore a no-op here.
+        strict: true,
     },
     vision: VisionSupport {
         images: Support::Native,
@@ -124,30 +144,26 @@ impl ModelCodec for AnthropicMessagesCodec {
 
         // Tools → top-level array, with input_schema rename.
         if !request.tools.is_empty() {
-            body["tools"] = json!(
-                request
-                    .tools
-                    .iter()
-                    .map(encode_tool_definition)
-                    .collect::<Vec<_>>()
-            );
+            let mut tool_defs = Vec::with_capacity(request.tools.len());
+            for tool in &request.tools {
+                tool_defs.push(encode_tool_definition(tool, &mut warnings));
+            }
+            body["tools"] = json!(tool_defs);
         }
 
         if let Some(choice) = &request.tool_choice {
             body["tool_choice"] = encode_tool_choice(choice);
         }
 
-        // Structured output. The Anthropic Messages API does not have a
-        // first-class `response_format` field; the idiomatic pattern is
-        // to register a single tool whose `input_schema` is the desired
-        // shape and to set `tool_choice` to that tool. Doing that
-        // automatically here would surprise users who already configured
-        // tools, so we surface a warning instead and let the caller make
-        // the choice explicitly.
-        if request.response_format.is_some() {
-            warnings.push(ModelWarning::CapabilityEmulated {
-                capability: "response_format".to_string(),
-            });
+        // Structured output. Anthropic GA ships a native
+        // `output_config.format` parameter on the Messages API. The
+        // precondition `ensure_not_prefilling` preempts the
+        // structured-output × message-prefilling incompatibility so
+        // callers see a local error instead of a wire-level 400;
+        // `encode_response_format` then emits the native envelope.
+        if let Some(format) = &request.response_format {
+            ensure_not_prefilling(&request.messages)?;
+            encode_response_format(format, &mut body, &mut warnings);
         }
 
         // Portable settings.
@@ -481,32 +497,64 @@ fn encode_tool_result_content(content: &ToolResultContent) -> Result<Value> {
 fn encode_system_prompt(sp: &SystemPrompt) -> Value {
     match sp {
         SystemPrompt::Text(s) => json!(s),
-        SystemPrompt::Blocks(blocks) => json!(
-            blocks
+        SystemPrompt::Blocks(blocks) => {
+            // The block immediately preceding the structural
+            // [`SystemBlockRole::Boundary`] marker is the last
+            // cacheable static block; promote it to carry an
+            // ephemeral cache_control so the static prefix is
+            // cached even when the dynamic suffix changes between
+            // calls. The boundary block itself is dropped — codecs
+            // never serialise it to the wire.
+            let boundary_index = sp.boundary_index();
+
+            let serialized: Vec<Value> = blocks
                 .iter()
-                .map(|b| {
+                .enumerate()
+                .filter_map(|(i, b)| {
+                    if b.role.is_boundary() {
+                        return None;
+                    }
                     let mut obj = json!({"type": "text", "text": b.text});
+                    let promote_cache =
+                        boundary_index.is_some_and(|bi| i + 1 == bi) && b.cache_marker.is_none();
                     if let Some(marker) = &b.cache_marker {
                         let mut cc = json!({"type": "ephemeral"});
                         if let Some(ttl) = &marker.ttl {
                             cc["ttl"] = json!(ttl);
                         }
                         obj["cache_control"] = cc;
+                    } else if promote_cache {
+                        obj["cache_control"] = json!({"type": "ephemeral"});
                     }
-                    obj
+                    Some(obj)
                 })
-                .collect::<Vec<_>>()
-        ),
+                .collect();
+            json!(serialized)
+        }
     }
 }
 
-fn encode_tool_definition(tool: &ToolDefinition) -> Value {
+fn encode_tool_definition(tool: &ToolDefinition, warnings: &mut Vec<ModelWarning>) -> Value {
+    let prepared = prepare_tool_schema(
+        tool.parameters.clone(),
+        &SCHEMA_POLICY,
+        tool.strict,
+        &tool.name,
+    );
+    warnings.extend(prepared.warnings);
+
     let mut obj = json!({
         "name": tool.name,
-        "input_schema": tool.parameters,
+        "input_schema": prepared.value,
     });
     if let Some(desc) = &tool.description {
         obj["description"] = json!(desc);
+    }
+    // Anthropic's GA strict tool use reuses the same `output_config`
+    // grammar compiler — emit `strict: true` on the wire when the IR
+    // asks for it.
+    if tool.strict {
+        obj["strict"] = json!(true);
     }
     obj
 }
@@ -897,6 +945,72 @@ fn warn_dropped_provider_options(
     // vertex options apply at the transport layer, not codec — no warning.
 }
 
+/// Precondition: reject the Anthropic-specific incompatibility between
+/// **message prefilling** (a trailing assistant message) and
+/// `response_format`. Anthropic returns a 400 for this combination; the
+/// codec converts it to a local `Error::InvalidRequest` so the caller
+/// never wastes a wire round-trip.
+fn ensure_not_prefilling(messages: &[Message]) -> Result<()> {
+    if let Some(last) = messages.last()
+        && last.role == Role::Assistant
+    {
+        return Err(Error::InvalidRequest(
+            "anthropic-messages: message prefilling (trailing assistant message) is \
+             incompatible with response_format; Anthropic returns a 400 for this \
+             combination. Remove the trailing assistant message or drop \
+             response_format."
+                .to_string(),
+        ));
+    }
+    Ok(())
+}
+
+/// Emit `output_config.format` for the given [`ResponseFormat`].
+///
+/// Callers are responsible for running [`ensure_not_prefilling`] first —
+/// this helper assumes the precondition holds and focuses purely on
+/// wire-format translation (SRP).
+fn encode_response_format(
+    format: &ResponseFormat,
+    body: &mut Value,
+    warnings: &mut Vec<ModelWarning>,
+) {
+    match format {
+        ResponseFormat::Text => {
+            // Text is the default — emitting a format block would be
+            // redundant. Nothing to do.
+        }
+        ResponseFormat::JsonObject => {
+            // Anthropic's structured outputs require a schema; JsonObject
+            // has no portable mapping on this provider. Surface the
+            // emulation gap as a CapabilityEmulated warning.
+            warnings.push(ModelWarning::CapabilityEmulated {
+                capability: "response_format.json_object".to_string(),
+            });
+        }
+        ResponseFormat::JsonSchema(spec) => {
+            let prepared = prepare_schema(
+                spec.schema.clone(),
+                &SCHEMA_POLICY,
+                "response_format.schema",
+            );
+            warnings.extend(prepared.warnings);
+            body["output_config"] = json!({
+                "format": {
+                    "type": "json_schema",
+                    "schema": prepared.value,
+                }
+            });
+            // `SCHEMA_POLICY.wire_supports_{name,description}` are both
+            // `false` for Anthropic, so `warn_dropped_metadata` emits
+            // lossy warnings for any metadata the caller set. Note that
+            // `spec.strict` is intentionally silent — Anthropic is
+            // always grammar-constrained, so the flag has no effect.
+            warn_dropped_metadata(spec, &SCHEMA_POLICY, CODEC_ID, warnings);
+        }
+    }
+}
+
 // =============================================================================
 // Decoding helpers
 // =============================================================================
@@ -1173,8 +1287,8 @@ fn decode_error_event(v: &Value) -> Vec<ModelStreamChunk> {
 mod tests {
     use super::*;
     use crate::ir::{
-        AnthropicOptions, CacheControl, Continuation, ModelSettings, ProviderOptions,
-        ReasoningSettings,
+        AnthropicOptions, CacheControl, Continuation, JsonSchemaSpec, ModelSettings,
+        ProviderOptions, ReasoningSettings,
     };
 
     fn req(messages: Vec<Message>) -> ModelRequest {
@@ -1237,6 +1351,123 @@ mod tests {
         assert_eq!(enc.body["tools"][0]["name"], "calc");
         assert!(enc.body["tools"][0]["input_schema"].is_object());
         assert!(enc.body["tools"][0].get("parameters").is_none());
+    }
+
+    #[test]
+    fn encode_tool_definition_strict_emits_wire_flag_and_applies_strict_policy() {
+        // Anthropic strict tool use: `strict: true` on the wire and
+        // the tool's input_schema runs through the full anthropic()
+        // policy (numeric constraints stripped, etc.).
+        let c = AnthropicMessagesCodec::new();
+        let mut r = req(vec![Message::user("hi")]);
+        let mut tool = ToolDefinition::new(
+            "calc",
+            json!({
+                "type": "object",
+                "properties": {
+                    "a": {"type": "integer", "minimum": 0}
+                }
+            }),
+        );
+        tool.strict = true;
+        r.tools = vec![tool];
+        let enc = c.encode_request(&r, InvocationMode::Unary).unwrap();
+        assert_eq!(enc.body["tools"][0]["strict"], true);
+        // `minimum` is stripped because strict mode applied the
+        // anthropic() policy.
+        assert!(
+            enc.body["tools"][0]["input_schema"]["properties"]["a"]
+                .get("minimum")
+                .is_none()
+        );
+        assert!(enc.warnings.iter().any(|w| matches!(
+            w, ModelWarning::LossyEncode { field, .. } if field.contains("minimum")
+        )));
+    }
+
+    #[test]
+    fn encode_tool_definition_non_strict_preserves_numeric_constraints() {
+        // Non-strict tool uses lenient policy — constraints preserved.
+        let c = AnthropicMessagesCodec::new();
+        let mut r = req(vec![Message::user("hi")]);
+        r.tools = vec![ToolDefinition::new(
+            "calc",
+            json!({
+                "type": "object",
+                "properties": {
+                    "a": {"type": "integer", "minimum": 0, "maximum": 100}
+                }
+            }),
+        )];
+        let enc = c.encode_request(&r, InvocationMode::Unary).unwrap();
+        let a = &enc.body["tools"][0]["input_schema"]["properties"]["a"];
+        assert_eq!(a["minimum"], 0);
+        assert_eq!(a["maximum"], 100);
+        // No `strict` flag on the wire.
+        assert!(enc.body["tools"][0].get("strict").is_none());
+    }
+
+    #[test]
+    fn encode_tool_definition_warnings_use_tool_name_source_path() {
+        // Regression: walker warnings for tool schemas must be
+        // attributed to `tool.<name>.input_schema`, not the default
+        // `response_format.schema` prefix. This lets callers
+        // disambiguate between response_format and per-tool lossy
+        // warnings when both appear in the same request.
+        let c = AnthropicMessagesCodec::new();
+        let mut r = req(vec![Message::user("hi")]);
+        let mut tool = ToolDefinition::new(
+            "measure_temperature",
+            json!({
+                "type": "object",
+                "properties": {
+                    "precision": {"type": "number", "minimum": 0.01}
+                }
+            }),
+        );
+        tool.strict = true;
+        r.tools = vec![tool];
+        let enc = c.encode_request(&r, InvocationMode::Unary).unwrap();
+        // At least one warning must reference the tool-specific path.
+        assert!(
+            enc.warnings.iter().any(|w| matches!(
+                w, ModelWarning::LossyEncode { field, .. }
+                if field.starts_with("tool.measure_temperature.input_schema/")
+            )),
+            "expected a warning prefixed with `tool.measure_temperature.input_schema/`, got: {:?}",
+            enc.warnings
+        );
+        // And no tool warning should accidentally use the response_format prefix.
+        assert!(
+            !enc.warnings.iter().any(|w| matches!(
+                w, ModelWarning::LossyEncode { field, .. }
+                if field.starts_with("response_format.schema/") && field.contains("precision")
+            )),
+            "tool warning was misattributed to response_format.schema: {:?}",
+            enc.warnings
+        );
+    }
+
+    #[test]
+    fn encode_tool_definition_strips_jsonschema_metadata_from_tool_parameters() {
+        // Walker-level metadata strip applies to tool schemas too,
+        // regardless of strict flag.
+        let c = AnthropicMessagesCodec::new();
+        let mut r = req(vec![Message::user("hi")]);
+        r.tools = vec![ToolDefinition::new(
+            "calc",
+            json!({
+                "$schema": "https://json-schema.org/draft/2020-12/schema",
+                "type": "object",
+                "properties": {"a": {"type": "number"}}
+            }),
+        )];
+        let enc = c.encode_request(&r, InvocationMode::Unary).unwrap();
+        assert!(
+            enc.body["tools"][0]["input_schema"]
+                .get("$schema")
+                .is_none()
+        );
     }
 
     #[test]
@@ -1320,12 +1551,40 @@ mod tests {
         ));
     }
 
+    /// Inserting a `SYSTEM_PROMPT_DYNAMIC_BOUNDARY` sentinel block
+    /// must (a) drop the sentinel itself from the wire body and
+    /// (b) auto-promote the block immediately preceding it to carry
+    /// an ephemeral `cache_control` marker, so the static prefix is
+    /// cached even when the dynamic suffix changes between calls.
+    #[test]
+    fn encode_dynamic_boundary_role_promotes_prefix_to_cached() {
+        let c = AnthropicMessagesCodec::new();
+        let mut r = req(vec![Message::user("hi")]);
+        r.system = Some(SystemPrompt::Blocks(vec![
+            crate::ir::SystemBlock::uncached("static prefix"),
+            crate::ir::SystemBlock::boundary(),
+            crate::ir::SystemBlock::dynamic("dynamic rules"),
+        ]));
+        let enc = c.encode_request(&r, InvocationMode::Unary).unwrap();
+        let arr = enc.body["system"].as_array().expect("array");
+        // Boundary dropped: 3 → 2 blocks.
+        assert_eq!(arr.len(), 2);
+        assert_eq!(arr[0]["text"], "static prefix");
+        // Prefix block carries the cache marker promoted by the
+        // boundary role.
+        assert_eq!(arr[0]["cache_control"]["type"], "ephemeral");
+        // Dynamic suffix block does NOT carry a cache marker.
+        assert_eq!(arr[1]["text"], "dynamic rules");
+        assert!(arr[1].get("cache_control").is_none());
+    }
+
     #[test]
     fn encode_anthropic_cache_control_marks_system_block() {
         let c = AnthropicMessagesCodec::new();
         let mut r = req(vec![Message::user("hi")]);
         r.system = Some(SystemPrompt::Blocks(vec![crate::ir::SystemBlock {
             text: "sys".into(),
+            role: crate::ir::SystemBlockRole::Static,
             cache_marker: None,
         }]));
         r.provider_options.anthropic = Some(AnthropicOptions {
@@ -1359,10 +1618,12 @@ mod tests {
         r.system = Some(SystemPrompt::Blocks(vec![
             crate::ir::SystemBlock {
                 text: "stable header".into(),
+                role: crate::ir::SystemBlockRole::Static,
                 cache_marker: Some(CacheMarker::with_ttl("5m")),
             },
             crate::ir::SystemBlock {
                 text: "stable footer".into(),
+                role: crate::ir::SystemBlockRole::Static,
                 cache_marker: Some(CacheMarker::with_ttl("1h")),
             },
         ]));
@@ -1406,22 +1667,27 @@ mod tests {
         r.system = Some(SystemPrompt::Blocks(vec![
             crate::ir::SystemBlock {
                 text: "s0".into(),
+                role: crate::ir::SystemBlockRole::Static,
                 cache_marker: Some(CacheMarker::with_ttl("1h")),
             },
             crate::ir::SystemBlock {
                 text: "s1".into(),
+                role: crate::ir::SystemBlockRole::Static,
                 cache_marker: Some(CacheMarker::with_ttl("1h")),
             },
             crate::ir::SystemBlock {
                 text: "s2".into(),
+                role: crate::ir::SystemBlockRole::Static,
                 cache_marker: Some(CacheMarker::with_ttl("1h")),
             },
             crate::ir::SystemBlock {
                 text: "s3".into(),
+                role: crate::ir::SystemBlockRole::Static,
                 cache_marker: Some(CacheMarker::with_ttl("1h")),
             },
             crate::ir::SystemBlock {
                 text: "s4".into(),
+                role: crate::ir::SystemBlockRole::Static,
                 cache_marker: Some(CacheMarker::with_ttl("1h")),
             },
         ]));
@@ -1449,26 +1715,140 @@ mod tests {
     }
 
     #[test]
-    fn response_format_emits_capability_emulated_warning() {
-        // Anthropic Messages has no first-class response_format. The codec
-        // surfaces the gap as a CapabilityEmulated warning so the caller
-        // knows to either accept tool-emulation or pick another provider.
+    fn encode_response_format_json_schema_emits_output_config() {
         let c = AnthropicMessagesCodec::new();
         let mut r = req(vec![Message::user("emit json")]);
-        r.response_format = Some(crate::ir::ResponseFormat::JsonSchema {
-            name: "Person".into(),
-            schema: json!({"type": "object"}),
-            strict: true,
-        });
+        r.response_format = Some(ResponseFormat::JsonSchema(JsonSchemaSpec::new(json!({
+            "type": "object",
+            "properties": {"name": {"type": "string"}}
+        }))));
         let enc = c.encode_request(&r, InvocationMode::Unary).unwrap();
-        assert!(
-            enc.warnings.iter().any(|w| matches!(
-                w,
-                crate::ir::ModelWarning::CapabilityEmulated { capability } if capability == "response_format"
-            )),
-            "expected CapabilityEmulated warning for response_format, got {:?}",
-            enc.warnings
+        assert_eq!(enc.body["output_config"]["format"]["type"], "json_schema");
+        // additionalProperties: false was added by the Anthropic policy.
+        assert_eq!(
+            enc.body["output_config"]["format"]["schema"]["additionalProperties"],
+            false
         );
+    }
+
+    #[test]
+    fn encode_response_format_json_schema_drops_name_with_lossy_warning() {
+        let c = AnthropicMessagesCodec::new();
+        let mut r = req(vec![Message::user("emit json")]);
+        r.response_format = Some(ResponseFormat::JsonSchema(
+            JsonSchemaSpec::new(json!({"type": "object"})).with_name("Person"),
+        ));
+        let enc = c.encode_request(&r, InvocationMode::Unary).unwrap();
+        assert!(enc.warnings.iter().any(|w| matches!(
+            w,
+            ModelWarning::LossyEncode { field, .. } if field == "response_format.name"
+        )));
+    }
+
+    #[test]
+    fn encode_response_format_json_schema_drops_description_with_lossy_warning() {
+        let c = AnthropicMessagesCodec::new();
+        let mut r = req(vec![Message::user("emit json")]);
+        r.response_format = Some(ResponseFormat::JsonSchema(
+            JsonSchemaSpec::new(json!({"type": "object"})).with_description("A record"),
+        ));
+        let enc = c.encode_request(&r, InvocationMode::Unary).unwrap();
+        assert!(enc.warnings.iter().any(|w| matches!(
+            w,
+            ModelWarning::LossyEncode { field, .. } if field == "response_format.description"
+        )));
+    }
+
+    #[test]
+    fn encode_response_format_json_schema_strips_unsupported_keywords() {
+        let c = AnthropicMessagesCodec::new();
+        let mut r = req(vec![Message::user("emit json")]);
+        r.response_format = Some(ResponseFormat::JsonSchema(JsonSchemaSpec::new(json!({
+            "type": "object",
+            "properties": {
+                "age": {"type": "integer", "minimum": 0, "maximum": 120}
+            }
+        }))));
+        let enc = c.encode_request(&r, InvocationMode::Unary).unwrap();
+        let age = &enc.body["output_config"]["format"]["schema"]["properties"]["age"];
+        assert!(age.get("minimum").is_none());
+        assert!(age.get("maximum").is_none());
+        assert!(enc.warnings.iter().any(|w| matches!(
+            w, ModelWarning::LossyEncode { field, .. } if field.contains("minimum"))));
+        assert!(enc.warnings.iter().any(|w| matches!(
+            w, ModelWarning::LossyEncode { field, .. } if field.contains("maximum"))));
+    }
+
+    #[test]
+    fn encode_response_format_json_object_emits_capability_emulated() {
+        let c = AnthropicMessagesCodec::new();
+        let mut r = req(vec![Message::user("emit json")]);
+        r.response_format = Some(ResponseFormat::JsonObject);
+        let enc = c.encode_request(&r, InvocationMode::Unary).unwrap();
+        assert!(enc.warnings.iter().any(|w| matches!(
+            w,
+            ModelWarning::CapabilityEmulated { capability }
+            if capability == "response_format.json_object"
+        )));
+        // No output_config should be emitted.
+        assert!(enc.body.get("output_config").is_none());
+    }
+
+    #[test]
+    fn encode_response_format_text_is_noop() {
+        let c = AnthropicMessagesCodec::new();
+        let mut r = req(vec![Message::user("say hi")]);
+        r.response_format = Some(ResponseFormat::Text);
+        let enc = c.encode_request(&r, InvocationMode::Unary).unwrap();
+        assert!(enc.body.get("output_config").is_none());
+    }
+
+    #[test]
+    fn encode_response_format_strict_false_is_silent_on_anthropic() {
+        let c = AnthropicMessagesCodec::new();
+        let mut r = req(vec![Message::user("emit json")]);
+        r.response_format = Some(ResponseFormat::JsonSchema(
+            JsonSchemaSpec::new(json!({"type": "object"})).with_strict(false),
+        ));
+        let enc = c.encode_request(&r, InvocationMode::Unary).unwrap();
+        // No warning for strict=false — Anthropic is always grammar-constrained.
+        assert!(!enc.warnings.iter().any(|w| matches!(
+            w, ModelWarning::LossyEncode { field, .. } if field.contains("strict")
+        )));
+    }
+
+    #[test]
+    fn encode_response_format_with_trailing_assistant_message_is_rejected() {
+        let c = AnthropicMessagesCodec::new();
+        let mut r = req(vec![Message::user("hi"), Message::assistant("prefilled")]);
+        r.response_format = Some(ResponseFormat::JsonSchema(JsonSchemaSpec::new(json!({
+            "type": "object"
+        }))));
+        let err = c.encode_request(&r, InvocationMode::Unary).unwrap_err();
+        let message = err.to_string();
+        assert!(
+            message.contains("prefilling") || message.contains("assistant"),
+            "expected prefilling error, got: {message}"
+        );
+    }
+
+    #[test]
+    fn encode_response_format_json_schema_rejects_recursive_schema() {
+        let c = AnthropicMessagesCodec::new();
+        let mut r = req(vec![Message::user("emit json")]);
+        r.response_format = Some(ResponseFormat::JsonSchema(JsonSchemaSpec::new(json!({
+            "$defs": {
+                "Node": {
+                    "type": "object",
+                    "properties": {"next": {"$ref": "#/$defs/Node"}}
+                }
+            },
+            "$ref": "#/$defs/Node"
+        }))));
+        let enc = c.encode_request(&r, InvocationMode::Unary).unwrap();
+        assert!(enc.warnings.iter().any(|w| matches!(
+            w, ModelWarning::LossyEncode { field, reason }
+            if field.contains("$ref") && reason.contains("recursive"))));
     }
 
     #[test]

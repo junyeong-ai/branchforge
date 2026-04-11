@@ -209,6 +209,16 @@ pub struct BedrockOptions {
     /// Performance configuration latency hint (`standard`, `optimized`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub latency: Option<String>,
+    /// Bedrock inference profile ARN or short id (e.g.
+    /// `arn:aws:bedrock:us-east-1:123:inference-profile/...` or
+    /// `us.anthropic.claude-sonnet-4-5-v1:0`). When set, the Bedrock
+    /// transport routes the request via the named inference profile
+    /// instead of a single regional model id, enabling cross-region
+    /// failover and quota pooling. Codecs that don't recognise this
+    /// field emit a `LossyEncode` warning rather than silently
+    /// dropping it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inference_profile: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -307,5 +317,27 @@ mod tests {
         let j = serde_json::to_string(&m).unwrap();
         let back: CacheMarker = serde_json::from_str(&j).unwrap();
         assert_eq!(m, back);
+    }
+
+    #[test]
+    fn bedrock_inference_profile_round_trip() {
+        let opts = BedrockOptions {
+            inference_profile: Some(
+                "arn:aws:bedrock:us-east-1:123:inference-profile/foo".to_string(),
+            ),
+            ..Default::default()
+        };
+        let j = serde_json::to_string(&opts).unwrap();
+        assert!(j.contains("inference_profile"));
+        assert!(j.contains("inference-profile/foo"));
+        let back: BedrockOptions = serde_json::from_str(&j).unwrap();
+        assert_eq!(opts, back);
+    }
+
+    #[test]
+    fn bedrock_inference_profile_omitted_when_unset() {
+        let opts = BedrockOptions::default();
+        let j = serde_json::to_string(&opts).unwrap();
+        assert!(!j.contains("inference_profile"));
     }
 }

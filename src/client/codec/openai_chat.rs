@@ -12,15 +12,17 @@
 use serde_json::{Value, json};
 
 use super::{ApiVersionHint, EncodedRequest, EndpointShape, InvocationMode, ModelCodec};
-use crate::client::schema::transform_for_strict;
+use crate::client::schema::{PreparedSchema, SchemaPolicy, prepare_schema, prepare_tool_schema};
 use crate::ir::{
-    CacheGranularity, CacheSupport, ContentPart, FinishReason, MediaSource, Message, ModelRequest,
-    ModelResponse, ModelStreamChunk, ModelWarning, ProviderCapabilities, ReasoningSupport,
-    ResponseFormat, Role, StreamDecodeState, StructuredOutputSupport, Support, SystemPromptShape,
-    ToolCallSupport, ToolDefinition, ToolIdSemantics, ToolOrigin, ToolResultContent, Usage,
-    VisionSupport,
+    CacheGranularity, CacheSupport, ContentPart, FinishReason, JsonSchemaSpec, MediaSource,
+    Message, ModelRequest, ModelResponse, ModelStreamChunk, ModelWarning, ProviderCapabilities,
+    ReasoningSupport, ResponseFormat, Role, StreamDecodeState, StructuredOutputSupport, Support,
+    SystemPromptShape, ToolCallSupport, ToolDefinition, ToolIdSemantics, ToolOrigin,
+    ToolResultContent, Usage, VisionSupport,
 };
 use crate::{Error, Result};
+
+const SCHEMA_POLICY: SchemaPolicy = SchemaPolicy::openai_strict();
 
 const CODEC_ID: &str = "openai-chat";
 
@@ -133,49 +135,23 @@ impl ModelCodec for OpenAiChatCodec {
         });
 
         if !request.tools.is_empty() {
-            body["tools"] = json!(
-                request
-                    .tools
-                    .iter()
-                    .map(encode_tool_definition)
-                    .collect::<Vec<_>>()
-            );
+            let mut tool_defs = Vec::with_capacity(request.tools.len());
+            for tool in &request.tools {
+                tool_defs.push(encode_tool_definition(tool, &mut warnings));
+            }
+            body["tools"] = json!(tool_defs);
         }
         if let Some(choice) = &request.tool_choice {
             body["tool_choice"] = encode_tool_choice(choice);
         }
 
         // Structured output. Chat Completions uses the legacy
-        // `response_format` envelope. JSON-schema mode requires the schema
-        // to be transformed for OpenAI's strict-mode validator.
+        // `response_format` envelope. JSON-schema mode runs the schema
+        // through the shared OpenAI strict-mode preparation so
+        // unsupported keywords are stripped with lossy-encode warnings
+        // instead of the silent drop the old codec performed.
         if let Some(format) = &request.response_format {
-            match format {
-                ResponseFormat::Text => {
-                    body["response_format"] = json!({"type": "text"});
-                }
-                ResponseFormat::JsonObject => {
-                    body["response_format"] = json!({"type": "json_object"});
-                }
-                ResponseFormat::JsonSchema {
-                    name,
-                    schema,
-                    strict,
-                } => {
-                    let prepared = if *strict {
-                        transform_for_strict(schema.clone())
-                    } else {
-                        schema.clone()
-                    };
-                    body["response_format"] = json!({
-                        "type": "json_schema",
-                        "json_schema": {
-                            "name": name,
-                            "schema": prepared,
-                            "strict": strict,
-                        }
-                    });
-                }
-            }
+            encode_response_format(format, &mut body, &mut warnings);
         }
 
         let s = &request.settings;
@@ -579,10 +555,18 @@ fn tool_result_text(content: &ToolResultContent) -> String {
     }
 }
 
-fn encode_tool_definition(tool: &ToolDefinition) -> Value {
+fn encode_tool_definition(tool: &ToolDefinition, warnings: &mut Vec<ModelWarning>) -> Value {
+    let prepared = prepare_tool_schema(
+        tool.parameters.clone(),
+        &SCHEMA_POLICY,
+        tool.strict,
+        &tool.name,
+    );
+    warnings.extend(prepared.warnings);
+
     let mut function = json!({
         "name": tool.name,
-        "parameters": tool.parameters,
+        "parameters": prepared.value,
     });
     if let Some(desc) = &tool.description {
         function["description"] = json!(desc);
@@ -626,6 +610,48 @@ fn warn_dropped_provider_options(
             option: "*".into(),
         });
     }
+}
+
+fn encode_response_format(
+    format: &ResponseFormat,
+    body: &mut Value,
+    warnings: &mut Vec<ModelWarning>,
+) {
+    match format {
+        ResponseFormat::Text => {
+            body["response_format"] = json!({"type": "text"});
+        }
+        ResponseFormat::JsonObject => {
+            body["response_format"] = json!({"type": "json_object"});
+        }
+        ResponseFormat::JsonSchema(spec) => {
+            body["response_format"] = encode_json_schema_envelope(spec, warnings);
+        }
+    }
+}
+
+fn encode_json_schema_envelope(spec: &JsonSchemaSpec, warnings: &mut Vec<ModelWarning>) -> Value {
+    let prepared = if spec.strict {
+        prepare_schema(
+            spec.schema.clone(),
+            &SCHEMA_POLICY,
+            "response_format.schema",
+        )
+    } else {
+        PreparedSchema::passthrough(spec.schema.clone())
+    };
+    warnings.extend(prepared.warnings);
+
+    let mut json_schema = serde_json::Map::new();
+    if let Some(name) = &spec.name {
+        json_schema.insert("name".into(), json!(name));
+    }
+    if let Some(desc) = &spec.description {
+        json_schema.insert("description".into(), json!(desc));
+    }
+    json_schema.insert("schema".into(), prepared.value);
+    json_schema.insert("strict".into(), json!(spec.strict));
+    json!({"type": "json_schema", "json_schema": Value::Object(json_schema)})
 }
 
 // =============================================================================
@@ -683,7 +709,9 @@ fn strip_sse_data_prefix(s: &str) -> &str {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ir::{ModelSettings, OpenAiOptions, ReasoningEffort, ReasoningSettings};
+    use crate::ir::{
+        JsonSchemaSpec, ModelSettings, OpenAiOptions, ReasoningEffort, ReasoningSettings,
+    };
 
     fn req(messages: Vec<Message>) -> ModelRequest {
         ModelRequest::new("gpt-4o-mini", messages)
@@ -719,16 +747,16 @@ mod tests {
     fn encode_response_format_json_schema_uses_legacy_envelope() {
         let c = OpenAiChatCodec::new();
         let mut r = req(vec![Message::user("emit json")]);
-        r.response_format = Some(ResponseFormat::JsonSchema {
-            name: "Person".into(),
-            schema: json!({
+        r.response_format = Some(ResponseFormat::JsonSchema(
+            JsonSchemaSpec::new(json!({
                 "type": "object",
                 "properties": {
                     "name": {"type": "string"}
                 }
-            }),
-            strict: true,
-        });
+            }))
+            .with_name("Person")
+            .with_strict(true),
+        ));
         let enc = c.encode_request(&r, InvocationMode::Unary).unwrap();
         assert_eq!(enc.body["response_format"]["type"], "json_schema");
         assert_eq!(enc.body["response_format"]["json_schema"]["name"], "Person");
@@ -737,6 +765,51 @@ mod tests {
             enc.body["response_format"]["json_schema"]["schema"]["additionalProperties"],
             false
         );
+    }
+
+    #[test]
+    fn encode_response_format_json_schema_emits_description_on_wire() {
+        let c = OpenAiChatCodec::new();
+        let mut r = req(vec![Message::user("emit json")]);
+        r.response_format = Some(ResponseFormat::JsonSchema(
+            JsonSchemaSpec::new(json!({"type": "object"}))
+                .with_name("Person")
+                .with_description("A person record extracted from text"),
+        ));
+        let enc = c.encode_request(&r, InvocationMode::Unary).unwrap();
+        assert_eq!(
+            enc.body["response_format"]["json_schema"]["description"],
+            "A person record extracted from text"
+        );
+    }
+
+    #[test]
+    fn encode_response_format_json_schema_propagates_strip_warnings() {
+        let c = OpenAiChatCodec::new();
+        let mut r = req(vec![Message::user("emit json")]);
+        r.response_format = Some(ResponseFormat::JsonSchema(
+            JsonSchemaSpec::new(json!({
+                "type": "object",
+                "properties": {
+                    "age": {"type": "integer", "minimum": 0, "maximum": 120}
+                }
+            }))
+            .with_name("Person"),
+        ));
+        let enc = c.encode_request(&r, InvocationMode::Unary).unwrap();
+        // `minimum` and `maximum` are not allowed in OpenAI strict mode
+        // and were previously silently stripped. Now they emit
+        // LossyEncode warnings.
+        let stripped: Vec<&str> = enc
+            .warnings
+            .iter()
+            .filter_map(|w| match w {
+                ModelWarning::LossyEncode { field, .. } => Some(field.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert!(stripped.iter().any(|f| f.contains("minimum")));
+        assert!(stripped.iter().any(|f| f.contains("maximum")));
     }
 
     #[test]
@@ -898,6 +971,60 @@ mod tests {
         let func = &enc.body["tools"][0]["function"];
         assert_eq!(func["name"], "calc");
         assert_eq!(func["strict"], true);
+    }
+
+    #[test]
+    fn encode_tool_definition_strict_applies_strict_policy_to_parameters() {
+        // OpenAI strict tool use requires the strict JSON Schema subset
+        // on tool parameters — same as response_format.json_schema.
+        // schemars-generated schemas (with minimum: 0 etc.) must be
+        // prepared by the shared pipeline.
+        let c = OpenAiChatCodec::new();
+        let mut r = req(vec![Message::user("hi")]);
+        let mut tool = ToolDefinition::new(
+            "calc",
+            json!({
+                "type": "object",
+                "properties": {
+                    "a": {"type": "integer", "minimum": 0}
+                }
+            }),
+        );
+        tool.strict = true;
+        r.tools = vec![tool];
+        let enc = c.encode_request(&r, InvocationMode::Unary).unwrap();
+        let params = &enc.body["tools"][0]["function"]["parameters"];
+        // `minimum` is stripped because strict mode applied openai_strict policy.
+        assert!(params["properties"]["a"].get("minimum").is_none());
+        // additionalProperties: false was added.
+        assert_eq!(params["additionalProperties"], false);
+        // `a` was added to required (all-props auto-fill).
+        assert!(
+            params["required"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|v| v == "a")
+        );
+    }
+
+    #[test]
+    fn encode_tool_definition_non_strict_preserves_user_constraints() {
+        // Non-strict tools use lenient policy — user constraints survive.
+        let c = OpenAiChatCodec::new();
+        let mut r = req(vec![Message::user("hi")]);
+        r.tools = vec![ToolDefinition::new(
+            "calc",
+            json!({
+                "type": "object",
+                "properties": {
+                    "a": {"type": "integer", "minimum": 0}
+                }
+            }),
+        )];
+        let enc = c.encode_request(&r, InvocationMode::Unary).unwrap();
+        let params = &enc.body["tools"][0]["function"]["parameters"];
+        assert_eq!(params["properties"]["a"]["minimum"], 0);
     }
 
     #[test]
