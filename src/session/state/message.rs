@@ -38,11 +38,15 @@ pub struct ExecutionMetadata {
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct MessageMetadata {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub request_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub structured_output: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_results: Option<Vec<ToolResultMeta>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub thinking: Option<ThinkingMetadata>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub execution: Option<ExecutionMetadata>,
