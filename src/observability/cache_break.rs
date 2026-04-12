@@ -69,7 +69,7 @@ fn hash_bytes(bytes: &[u8]) -> u64 {
 /// Categories are chosen so they map 1:1 to "what did the caller
 /// change?" — if an operator sees `ModelChanged` on a dashboard,
 /// they know to look at the per-turn model override path; if
-/// they see `ToolSchemaChanged { tool }`, they know one specific
+/// they see `ToolSchemaChanged { tools: tool }`, they know one specific
 /// tool's definition is flapping between turns.
 #[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -86,8 +86,9 @@ pub enum CacheBreakCause {
     /// One or more tool schemas changed. Most often this is
     /// because a dynamic tool catalogue (MCP progressive
     /// disclosure, on-demand skill loading) added or removed a
-    /// tool between turns.
-    ToolSchemaChanged { tool: String },
+    /// tool between turns. All changed tools are listed so
+    /// operators can diagnose the root cause without guessing.
+    ToolSchemaChanged { tools: Vec<String> },
     /// Reasoning effort setting changed (e.g. `low` → `high`).
     /// Anthropic and OpenAI both key their cache on this field.
     ReasoningEffortChanged,
@@ -123,7 +124,7 @@ impl crate::decision::DecisionReason for CacheBreakCause {
                 format!("model changed: {previous} → {current}")
             }
             Self::SystemPromptChanged => "system prompt hash changed".into(),
-            Self::ToolSchemaChanged { tool } => format!("tool schema changed: {tool}"),
+            Self::ToolSchemaChanged { tools } => format!("tool schema changed: {}", tools.join(", ")),
             Self::ReasoningEffortChanged => "reasoning effort changed".into(),
             Self::TtlOrUpstream => "TTL expired or upstream cache flushed".into(),
         }
@@ -243,21 +244,21 @@ pub fn classify(
     if prev.system_prompt_hash != current.system_prompt_hash {
         return Some(CacheBreakCause::SystemPromptChanged);
     }
-    // Tool schema drift: find the first tool whose hash differs
-    // or is newly present/absent. Deterministic thanks to
-    // BTreeMap iteration order.
+    // Tool schema drift: collect ALL changed/added/removed tools.
+    let mut changed_tools = Vec::new();
     for (name, hash) in &current.tool_hashes {
         match prev.tool_hashes.get(name) {
             Some(prev_hash) if prev_hash == hash => {}
-            _ => {
-                return Some(CacheBreakCause::ToolSchemaChanged { tool: name.clone() });
-            }
+            _ => changed_tools.push(name.clone()),
         }
     }
     for name in prev.tool_hashes.keys() {
         if !current.tool_hashes.contains_key(name) {
-            return Some(CacheBreakCause::ToolSchemaChanged { tool: name.clone() });
+            changed_tools.push(name.clone());
         }
+    }
+    if !changed_tools.is_empty() {
+        return Some(CacheBreakCause::ToolSchemaChanged { tools: changed_tools });
     }
 
     // Everything structural is the same; the prior turn had a
@@ -399,7 +400,7 @@ mod tests {
 
         let resp = resp_with_cache(0);
         match classify(Some(&prev), &curr, &resp, true).unwrap() {
-            CacheBreakCause::ToolSchemaChanged { tool } => assert_eq!(tool, "search"),
+            CacheBreakCause::ToolSchemaChanged { tools } => assert!(tools.contains(&"search".to_string()), "expected {tools:?} to contain search"),
             other => panic!("expected ToolSchemaChanged, got {other:?}"),
         }
     }
@@ -418,7 +419,7 @@ mod tests {
 
         let resp = resp_with_cache(0);
         match classify(Some(&prev), &curr, &resp, true).unwrap() {
-            CacheBreakCause::ToolSchemaChanged { tool } => assert_eq!(tool, "brand_new"),
+            CacheBreakCause::ToolSchemaChanged { tools } => assert!(tools.contains(&"brand_new".to_string()), "expected {tools:?} to contain brand_new"),
             other => panic!("expected ToolSchemaChanged (new tool), got {other:?}"),
         }
     }
@@ -437,7 +438,7 @@ mod tests {
 
         let resp = resp_with_cache(0);
         match classify(Some(&prev), &curr, &resp, true).unwrap() {
-            CacheBreakCause::ToolSchemaChanged { tool } => assert_eq!(tool, "old_tool"),
+            CacheBreakCause::ToolSchemaChanged { tools } => assert!(tools.contains(&"old_tool".to_string()), "expected {tools:?} to contain old_tool"),
             other => panic!("expected ToolSchemaChanged (removed tool), got {other:?}"),
         }
     }
