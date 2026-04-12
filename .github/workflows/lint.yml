@@ -30,3 +30,22 @@ jobs:
           components: clippy
       - uses: Swatinem/rust-cache@v2
       - run: cargo clippy --all-targets --all-features -- -D warnings
+
+  naming-lint:
+    # Phase 0-7 gate: enforce the rules declared in .claude/rules/naming.md
+    # without waiting for a human reviewer to spot violations. Each audit is
+    # a single Python file under scripts/ and fails closed.
+    name: Naming & FSM Audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: "#[non_exhaustive] hygiene (open/closed list)"
+        run: python3 scripts/audit_non_exhaustive.py
+
+      - name: FSM mutation bypass (transition_to only)
+        run: python3 scripts/audit_fsm_bypass.py
