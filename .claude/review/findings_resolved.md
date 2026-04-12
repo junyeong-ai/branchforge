@@ -40,6 +40,10 @@ Findings already rejected with evidence or merged via PR. Design reviews must ch
   - Only real violation: `ProviderErrorKind` at `src/lib.rs:388` (1 item, fixed in Phase 0-2)
 - **Lesson**: Before proposing "missing attribute X on enum Y", grep the enum definition directly. Don't trust cross-session memory of enum attribute state.
 
+## F-rej-014 · "CostLedger SSoT needed to replace 3-way cost accumulation"
+- **Origin**: Round-3/4 analysis (Phase 5 CostLedger task)
+- **Refutation**: The 4 accumulators (total_usage, session.total_usage, metrics, budget_tracker) serve **intentionally different scopes** (per-turn / per-session / per-turn-metrics / per-agent). All receive the **same** `ir_usage` object in the same call chain (`accumulate_response_usage` at `src/agent/common.rs:234`). There is no parallel computation from different sources, so drift is structurally impossible. A CostLedger would be an abstraction over 4 different-scoped views, not a simplification.
+
 ## F-rej-013 · "HookEvent manifest subscription + O(1) dispatch cache needed"
 - **Origin**: Round-3 analysis (task 4-5)
 - **Refutation**: `Hook::events(&self) -> &[HookEvent]` is the manifest. `HookRegistry::rebuild_cache()` at `src/hooks/manager.rs:40-52` builds a `HashMap<HookEvent, Vec<usize>>` dispatch cache on every register/unregister. `hooks_for_event(event)` at line 86 does O(1) lookup. `HookEvent` is `#[non_exhaustive]`.

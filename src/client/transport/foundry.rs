@@ -194,31 +194,65 @@ impl ModelTransport for FoundryTransport {
     ) -> (crate::error::ProviderErrorKind, Option<&'static str>) {
         use crate::error::ProviderErrorKind;
 
-        // Entra ID token failures surface as 401 with specific error codes.
-        if body.contains("invalid_grant") || body.contains("AADSTS70043") {
-            return (
-                ProviderErrorKind::Auth,
-                Some("Azure Entra token expired — run `az login` to refresh credentials"),
-            );
+        // Parse the JSON body to extract error codes via structured fields
+        // rather than substring matching (invariant #6).
+        if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(body) {
+            // Entra / Azure flat errors: {"error": "<code>", ...}
+            if let Some(err_str) = parsed.get("error").and_then(|v| v.as_str()) {
+                match err_str {
+                    "invalid_grant" => {
+                        return (
+                            ProviderErrorKind::Auth,
+                            Some("Azure Entra token expired — run `az login` to refresh credentials"),
+                        );
+                    }
+                    "DeploymentNotFound" | "ModelNotFound" => {
+                        return (
+                            ProviderErrorKind::BadRequest,
+                            Some("Azure AI Foundry model not deployed — check AZURE_AI_RESOURCE and model name"),
+                        );
+                    }
+                    _ => {}
+                }
+            }
+            if let Some(desc) = parsed.get("error_description").and_then(|v| v.as_str()) {
+                if desc.contains("AADSTS70043") {
+                    return (
+                        ProviderErrorKind::Auth,
+                        Some("Azure Entra token expired — run `az login` to refresh credentials"),
+                    );
+                }
+                if desc.contains("AADSTS65001") || desc.contains("AADSTS50076") {
+                    return (
+                        ProviderErrorKind::Auth,
+                        Some("Azure Entra requires interactive consent — run `az login`"),
+                    );
+                }
+            }
+            // Azure API errors: {"error": {"code": "RateLimitReached", ...}}
+            if let Some(code) = parsed
+                .get("error")
+                .and_then(|v| v.get("code"))
+                .and_then(|v| v.as_str())
+            {
+                return match code {
+                    "RateLimitReached" => (
+                        ProviderErrorKind::RateLimit,
+                        Some("Azure AI Foundry rate limit — back off and retry"),
+                    ),
+                    "DeploymentNotFound" | "ModelNotFound" => (
+                        ProviderErrorKind::BadRequest,
+                        Some("Azure AI Foundry model not deployed — check AZURE_AI_RESOURCE and model name"),
+                    ),
+                    _ => super::default_classify_status(status),
+                };
+            }
         }
-        if body.contains("AADSTS65001") || body.contains("AADSTS50076") {
-            return (
-                ProviderErrorKind::Auth,
-                Some("Azure Entra requires interactive consent — run `az login`"),
-            );
-        }
-        if status == 429 || body.contains("RateLimitReached") {
+        // 429 by status code alone (no JSON body or unrecognized body).
+        if status == 429 {
             return (
                 ProviderErrorKind::RateLimit,
                 Some("Azure AI Foundry rate limit — back off and retry"),
-            );
-        }
-        if body.contains("DeploymentNotFound") || body.contains("ModelNotFound") {
-            return (
-                ProviderErrorKind::BadRequest,
-                Some(
-                    "Azure AI Foundry model not deployed — check AZURE_AI_RESOURCE and model name",
-                ),
             );
         }
         super::default_classify_status(status)
