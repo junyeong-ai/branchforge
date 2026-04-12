@@ -10,7 +10,7 @@ use async_trait::async_trait;
 
 use super::CompactResult;
 use super::service::{CompactConfig, Compactor};
-use super::strategy::{CompactionContext, CompactionPlan, CompactionStrategy};
+use super::strategy::{CompactionSnapshot, CompactionPlan, CompactionStrategy};
 use crate::session::SessionResult;
 use crate::session::state::Session;
 
@@ -54,7 +54,7 @@ impl CompactionStrategy for FullCompaction {
         true
     }
 
-    fn needs_compact(&self, ctx: &CompactionContext) -> bool {
+    fn needs_compact(&self, ctx: &CompactionSnapshot) -> bool {
         if !self.config.enabled {
             return false;
         }
@@ -122,7 +122,7 @@ mod tests {
     fn full_compaction_needs_compact_threshold() {
         let fc = FullCompaction::new(CompactConfig::default().threshold(0.8));
 
-        let below = CompactionContext {
+        let below = CompactionSnapshot {
             current_tokens: 70_000,
             max_tokens: 100_000,
             message_count: 10,
@@ -132,7 +132,7 @@ mod tests {
         };
         assert!(!fc.needs_compact(&below));
 
-        let above = CompactionContext {
+        let above = CompactionSnapshot {
             current_tokens: 85_000,
             max_tokens: 100_000,
             message_count: 10,
@@ -146,7 +146,7 @@ mod tests {
     #[test]
     fn full_compaction_disabled() {
         let fc = FullCompaction::new(CompactConfig::disabled());
-        let ctx = CompactionContext {
+        let ctx = CompactionSnapshot {
             current_tokens: 95_000,
             max_tokens: 100_000,
             message_count: 10,

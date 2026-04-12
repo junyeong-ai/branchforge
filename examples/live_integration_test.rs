@@ -22,7 +22,7 @@ use branchforge::orchestration::{
 };
 use branchforge::output_style::default_style;
 use branchforge::session::compact::{
-    CompactConfig, CompactionChain, CompactionContext, CompactionStrategy, FullCompaction,
+    CompactConfig, CompactionChain, CompactionSnapshot, CompactionStrategy, FullCompaction,
     MicroCompaction, TimeBasedCompaction,
 };
 use branchforge::session::persistence::SessionFilter;
@@ -108,7 +108,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         check("TimeBasedCompaction not durable", !time.is_durable());
 
         // Threshold checks
-        let ctx_low = CompactionContext {
+        let ctx_low = CompactionSnapshot {
             current_tokens: 50_000,
             max_tokens: 100_000,
             message_count: 10,
@@ -116,7 +116,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             last_compact_at: None,
             consecutive_failures: 0,
         };
-        let ctx_high = CompactionContext {
+        let ctx_high = CompactionSnapshot {
             current_tokens: 85_000,
             max_tokens: 100_000,
             message_count: 10,
@@ -137,7 +137,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             full.needs_compact(&ctx_high),
         );
 
-        let ctx_idle = CompactionContext {
+        let ctx_idle = CompactionSnapshot {
             current_tokens: 50_000,
             max_tokens: 100_000,
             message_count: 10,

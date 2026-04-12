@@ -13,7 +13,7 @@ use async_trait::async_trait;
 
 use super::CompactResult;
 use super::strategy::{
-    CompactionContext, CompactionPlan, CompactionStrategy, ContentOverrideEntry,
+    CompactionSnapshot, CompactionPlan, CompactionStrategy, ContentOverrideEntry,
 };
 use crate::ir::{ContentPart, ToolResultContent};
 use crate::session::SessionResult;
@@ -143,7 +143,7 @@ impl CompactionStrategy for MicroCompaction {
         false
     }
 
-    fn needs_compact(&self, ctx: &CompactionContext) -> bool {
+    fn needs_compact(&self, ctx: &CompactionSnapshot) -> bool {
         ctx.usage_ratio() >= self.threshold
     }
 
@@ -321,7 +321,7 @@ mod tests {
     fn micro_compaction_needs_compact_threshold() {
         let mc = MicroCompaction::default();
 
-        let below = CompactionContext {
+        let below = CompactionSnapshot {
             current_tokens: 50_000,
             max_tokens: 100_000,
             message_count: 10,
@@ -331,7 +331,7 @@ mod tests {
         };
         assert!(!mc.needs_compact(&below));
 
-        let above = CompactionContext {
+        let above = CompactionSnapshot {
             current_tokens: 65_000,
             max_tokens: 100_000,
             message_count: 10,

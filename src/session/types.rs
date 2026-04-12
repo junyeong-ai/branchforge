@@ -14,7 +14,7 @@ use crate::ir::TokenCount;
 
 /// Environment context for coding-mode sessions.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
-pub struct EnvironmentContext {
+pub struct EnvironmentSnapshot {
     pub cwd: Option<PathBuf>,
     pub git_branch: Option<String>,
     pub git_commit: Option<String>,
@@ -22,7 +22,7 @@ pub struct EnvironmentContext {
     pub sdk_version: Option<String>,
 }
 
-impl EnvironmentContext {
+impl EnvironmentSnapshot {
     pub fn capture(working_dir: Option<&Path>) -> Self {
         let (git_branch, git_commit) = working_dir.map(Self::git_info).unwrap_or_default();
 
@@ -657,7 +657,7 @@ mod tests {
 
     #[test]
     fn test_environment_context() {
-        let ctx = EnvironmentContext::capture(None);
+        let ctx = EnvironmentSnapshot::capture(None);
         assert!(ctx.cwd.is_none());
         assert!(ctx.platform.is_some());
         assert!(ctx.sdk_version.is_some());

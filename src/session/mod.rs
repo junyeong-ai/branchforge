@@ -27,7 +27,7 @@ pub use archive::{
     SessionArchiver,
 };
 pub use compact::{
-    CompactConfig, CompactionChain, CompactionChainBuilder, CompactionContext, CompactionPlan,
+    CompactConfig, CompactionChain, CompactionChainBuilder, CompactionSnapshot, CompactionPlan,
     CompactionStrategy, Compactor, ContentOverrideEntry, DEFAULT_COMPACT_THRESHOLD, FullCompaction,
     MicroCompaction, TimeBasedCompaction,
 };
@@ -66,7 +66,7 @@ pub use state::{
 };
 pub use session_handle::{ExecutionGuard, ExecutionState, SessionSnapshot, SessionHandle};
 pub use types::{
-    CompactRecord, CompactTrigger, EnvironmentContext, Plan, PlanState, PlanTransitionError,
+    CompactRecord, CompactTrigger, EnvironmentSnapshot, Plan, PlanState, PlanTransitionError,
     QueueItem, QueueItemState, QueueItemTransitionError, QueueOperation, SessionAccessScope,
     SessionStats, SessionTree, TodoItem, TodoStatus, ToolExecution,
 };

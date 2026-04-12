@@ -13,7 +13,7 @@ use async_trait::async_trait;
 
 use super::CompactResult;
 use super::micro::MicroCompaction;
-use super::strategy::{CompactionContext, CompactionPlan, CompactionStrategy};
+use super::strategy::{CompactionSnapshot, CompactionPlan, CompactionStrategy};
 use crate::session::SessionResult;
 use crate::session::state::Session;
 
@@ -64,7 +64,7 @@ impl CompactionStrategy for TimeBasedCompaction {
         false
     }
 
-    fn needs_compact(&self, ctx: &CompactionContext) -> bool {
+    fn needs_compact(&self, ctx: &CompactionSnapshot) -> bool {
         ctx.idle_duration
             .is_some_and(|idle| idle >= self.idle_threshold)
     }
@@ -99,7 +99,7 @@ mod tests {
     fn time_based_needs_compact_idle() {
         let tb = TimeBasedCompaction::new(Duration::from_secs(300));
 
-        let not_idle = CompactionContext {
+        let not_idle = CompactionSnapshot {
             current_tokens: 50_000,
             max_tokens: 100_000,
             message_count: 10,
@@ -109,7 +109,7 @@ mod tests {
         };
         assert!(!tb.needs_compact(&not_idle));
 
-        let idle = CompactionContext {
+        let idle = CompactionSnapshot {
             current_tokens: 50_000,
             max_tokens: 100_000,
             message_count: 10,
@@ -123,7 +123,7 @@ mod tests {
     #[test]
     fn time_based_no_idle_info() {
         let tb = TimeBasedCompaction::default();
-        let ctx = CompactionContext {
+        let ctx = CompactionSnapshot {
             current_tokens: 90_000,
             max_tokens: 100_000,
             message_count: 10,

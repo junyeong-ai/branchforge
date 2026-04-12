@@ -37,7 +37,7 @@ pub mod time_based;
 pub use result::{CompactResult, CompactSkipReason};
 
 // Core strategy types
-pub use strategy::{CompactionContext, CompactionPlan, CompactionStrategy, ContentOverrideEntry};
+pub use strategy::{CompactionSnapshot, CompactionPlan, CompactionStrategy, ContentOverrideEntry};
 
 // Chain
 pub use chain::{CompactionChain, CompactionChainBuilder};

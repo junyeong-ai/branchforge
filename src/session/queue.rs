@@ -11,7 +11,7 @@ use tokio::sync::RwLock;
 use uuid::Uuid;
 
 use super::state::SessionId;
-use super::types::EnvironmentContext;
+use super::types::EnvironmentSnapshot;
 
 const MAX_QUEUE_SIZE: usize = 100;
 const MAX_MERGE_CHARS: usize = 100_000;
@@ -37,7 +37,7 @@ pub struct QueuedInput {
     pub id: Uuid,
     pub session_id: SessionId,
     pub content: String,
-    pub environment: Option<EnvironmentContext>,
+    pub environment: Option<EnvironmentSnapshot>,
     pub created_at: DateTime<Utc>,
 }
 
@@ -52,7 +52,7 @@ impl QueuedInput {
         }
     }
 
-    pub fn environment(mut self, env: EnvironmentContext) -> Self {
+    pub fn environment(mut self, env: EnvironmentSnapshot) -> Self {
         self.environment = Some(env);
         self
     }
@@ -62,7 +62,7 @@ impl QueuedInput {
 pub struct MergedInput {
     pub ids: Vec<Uuid>,
     pub content: String,
-    pub environment: Option<EnvironmentContext>,
+    pub environment: Option<EnvironmentSnapshot>,
 }
 
 #[derive(Debug)]
@@ -303,11 +303,11 @@ mod tests {
         let mut queue = InputQueue::new();
         let session_id = SessionId::new();
 
-        let env1 = EnvironmentContext {
+        let env1 = EnvironmentSnapshot {
             git_branch: Some("main".to_string()),
             ..Default::default()
         };
-        let env2 = EnvironmentContext {
+        let env2 = EnvironmentSnapshot {
             git_branch: Some("feature".to_string()),
             ..Default::default()
         };

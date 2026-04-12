@@ -10,7 +10,7 @@ use super::ids::MessageId;
 use crate::ir::FinishReason;
 use crate::ir::Usage as IrUsage;
 use crate::ir::{ContentPart, Message, Role};
-use crate::session::types::EnvironmentContext;
+use crate::session::types::EnvironmentSnapshot;
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct ExecutionMetadata {
@@ -80,7 +80,7 @@ pub struct SessionMessage {
     #[serde(default)]
     pub metadata: MessageMetadata,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub environment: Option<EnvironmentContext>,
+    pub environment: Option<EnvironmentSnapshot>,
 }
 
 impl SessionMessage {
@@ -134,7 +134,7 @@ impl SessionMessage {
         self
     }
 
-    pub fn environment(mut self, env: EnvironmentContext) -> Self {
+    pub fn environment(mut self, env: EnvironmentSnapshot) -> Self {
         self.environment = Some(env);
         self
     }

@@ -13,7 +13,7 @@ use std::sync::Arc;
 use tracing::{debug, info, warn};
 
 use super::CompactResult;
-use super::strategy::{CompactionContext, CompactionPlan, CompactionStrategy};
+use super::strategy::{CompactionSnapshot, CompactionPlan, CompactionStrategy};
 use crate::common::circuit::{CircuitBreaker, CircuitConfig};
 use crate::session::memory::{MemoryEntry, MemoryStore};
 use crate::session::state::Session;
@@ -38,7 +38,7 @@ impl CompactionChain {
     /// doesn't bring tokens below threshold.
     pub async fn try_compact(
         &self,
-        ctx: &CompactionContext,
+        ctx: &CompactionSnapshot,
         session: &mut Session,
         llm: Option<&dyn crate::client::LlmCall>,
     ) -> crate::Result<CompactResult> {

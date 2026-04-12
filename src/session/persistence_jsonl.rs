@@ -2256,7 +2256,7 @@ impl Persistence for JsonlPersistence {
 mod tests {
     use super::*;
     use crate::ir::ContentPart;
-    use crate::session::EnvironmentContext;
+    use crate::session::EnvironmentSnapshot;
     use crate::session::{SessionMessage, TodoItem};
     use tempfile::TempDir;
 
@@ -2655,7 +2655,7 @@ mod tests {
         session
             .add_message(
                 SessionMessage::user(vec![ContentPart::text("Hello")])
-                    .environment(EnvironmentContext::capture(Some(project_dir.path()))),
+                    .environment(EnvironmentSnapshot::capture(Some(project_dir.path()))),
             )
             .unwrap();
 

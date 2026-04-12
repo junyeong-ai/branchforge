@@ -20,7 +20,7 @@ use crate::session::state::Session;
 
 /// Context available when deciding whether compaction is needed.
 #[derive(Debug, Clone)]
-pub struct CompactionContext {
+pub struct CompactionSnapshot {
     /// Current estimated input tokens.
     pub current_tokens: u64,
     /// Maximum context window tokens.
@@ -35,7 +35,7 @@ pub struct CompactionContext {
     pub consecutive_failures: u32,
 }
 
-impl CompactionContext {
+impl CompactionSnapshot {
     /// Token usage ratio (0.0 - 1.0).
     pub fn usage_ratio(&self) -> f64 {
         if self.max_tokens == 0 {
@@ -108,7 +108,7 @@ pub trait CompactionStrategy: Send + Sync {
     fn is_durable(&self) -> bool;
 
     /// Check whether compaction is needed given the current context.
-    fn needs_compact(&self, ctx: &CompactionContext) -> bool;
+    fn needs_compact(&self, ctx: &CompactionSnapshot) -> bool;
 
     /// Plan what to compact without executing.
     ///
@@ -133,7 +133,7 @@ mod tests {
 
     #[test]
     fn compaction_context_usage_ratio() {
-        let ctx = CompactionContext {
+        let ctx = CompactionSnapshot {
             current_tokens: 80_000,
             max_tokens: 100_000,
             message_count: 50,
@@ -146,7 +146,7 @@ mod tests {
 
     #[test]
     fn compaction_context_zero_max_tokens() {
-        let ctx = CompactionContext {
+        let ctx = CompactionSnapshot {
             current_tokens: 100,
             max_tokens: 0,
             message_count: 1,

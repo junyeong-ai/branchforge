@@ -367,7 +367,7 @@ impl SessionHandle {
     /// Compact using a custom compaction chain.
     pub async fn compact_with_chain(
         &self,
-        ctx: &crate::session::compact::CompactionContext,
+        ctx: &crate::session::compact::CompactionSnapshot,
         llm: &dyn crate::client::LlmCall,
         chain: &crate::session::compact::CompactionChain,
     ) -> crate::Result<crate::session::compact::CompactResult> {

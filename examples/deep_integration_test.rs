@@ -11,7 +11,7 @@
 //! Run: cargo run --example deep_integration_test --features "cli-auth,coding-tools,scheduling"
 
 use branchforge::ir::ContentPart;
-use branchforge::session::compact::{CompactionContext, CompactionStrategy, MicroCompaction};
+use branchforge::session::compact::{CompactionSnapshot, CompactionStrategy, MicroCompaction};
 use branchforge::session::{Session, SessionConfig};
 use branchforge::{Agent, Auth, OutputStyle};
 
@@ -224,7 +224,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         session.add_message(assistant_msg).unwrap();
 
         let micro = MicroCompaction::default();
-        let ctx = CompactionContext {
+        let ctx = CompactionSnapshot {
             current_tokens: 70_000,
             max_tokens: 100_000,
             message_count: session.current_branch_messages().len(),
