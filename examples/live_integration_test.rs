@@ -483,26 +483,48 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .access(ToolSurface::all())
             .build();
 
-        // Read-only tools
+        // Read-only tools — probe with representative inputs since
+        // the capability is now input-aware (Tool::is_read_only takes
+        // &Value after Phase C-2).
+        let read_input = serde_json::json!({"file_path": "/tmp/probe"});
+        let glob_input = serde_json::json!({"pattern": "**/*.rs"});
+        let grep_input = serde_json::json!({"pattern": "fn", "path": "."});
+
         if let Some(tool) = registry.get("Read") {
-            check("Read is read-only", tool.is_read_only());
+            check("Read is read-only", tool.is_read_only(&read_input));
         }
         if let Some(tool) = registry.get("Glob") {
-            check("Glob is read-only", tool.is_read_only());
+            check("Glob is read-only", tool.is_read_only(&glob_input));
         }
         if let Some(tool) = registry.get("Grep") {
-            check("Grep is read-only", tool.is_read_only());
+            check("Grep is read-only", tool.is_read_only(&grep_input));
         }
 
-        // Mutating tools
+        // Mutating tools — Bash probes with `rm -rf /` so the
+        // dynamic classifier reports non-read-only; Edit / Write
+        // are destructive regardless of input.
+        let bash_destructive = serde_json::json!({"command": "rm -rf /"});
+        let edit_input = serde_json::json!({
+            "file_path": "/tmp/probe",
+            "old_string": "a",
+            "new_string": "b",
+        });
+        let write_input = serde_json::json!({
+            "file_path": "/tmp/probe",
+            "content": "",
+        });
+
         if let Some(tool) = registry.get("Bash") {
-            check("Bash is NOT read-only", !tool.is_read_only());
+            check(
+                "Bash('rm -rf /') is NOT read-only",
+                !tool.is_read_only(&bash_destructive),
+            );
         }
         if let Some(tool) = registry.get("Edit") {
-            check("Edit is NOT read-only", !tool.is_read_only());
+            check("Edit is NOT read-only", !tool.is_read_only(&edit_input));
         }
         if let Some(tool) = registry.get("Write") {
-            check("Write is NOT read-only", !tool.is_read_only());
+            check("Write is NOT read-only", !tool.is_read_only(&write_input));
         }
     }
 

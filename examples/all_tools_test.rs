@@ -4,13 +4,13 @@
 //! - File: Read, Write, Edit, Glob, Grep
 //! - Process: Bash, KillShell
 //! - Session: TodoWrite, Plan
-//! - Subagent: Task, TaskOutput (via TaskRegistry)
+//! - Subagent: Task, TaskOutput (via TaskTracker)
 //! - Skills: SkillRegistry, SkillRuntime
 //!
 //! Run: cargo run --example all_tools_test
 
 use branchforge::ToolOutput;
-use branchforge::agent::{AgentMetrics, AgentState, TaskOutputTool, TaskRegistry};
+use branchforge::agent::{AgentMetrics, AgentState, TaskOutputTool, TaskTracker};
 use branchforge::common::{ContentSource, IndexRegistry};
 use branchforge::ir::{FinishReason, Usage};
 use branchforge::security::SecurityContext;
@@ -399,10 +399,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("------------------------------------------------------------------------");
 
     let persistence = Arc::new(MemoryPersistence::new());
-    let task_registry = TaskRegistry::new(persistence.clone());
+    let task_tracker = TaskTracker::new(persistence.clone());
 
     let task_id = uuid::Uuid::new_v4().to_string();
-    let _cancel_rx = task_registry
+    let _cancel_rx = task_tracker
         .register_or_resume(
             task_id.clone(),
             "explore".to_string(),
@@ -410,18 +410,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         )
         .await
         .unwrap();
-    runner.check("TaskRegistry (register)", {
-        let status = task_registry.status(&task_id).await;
-        if status == Some(SessionState::Active) {
+    runner.check("TaskTracker (register)", {
+        let status = task_tracker.status(&task_id).await;
+        if status == Some(SessionState::Running) {
             Ok(())
         } else {
-            Err(format!("Expected Active, got {:?}", status))
+            Err(format!("Expected Running, got {:?}", status))
         }
     });
 
     let complete_id = uuid::Uuid::new_v4().to_string();
     drop(
-        task_registry
+        task_tracker
             .register_or_resume(
                 complete_id.clone(),
                 "general".to_string(),
@@ -443,9 +443,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         structured_output: None,
         uuid: uuid::Uuid::new_v4().to_string(),
     };
-    task_registry.complete(&complete_id, result).await?;
-    runner.check("TaskRegistry (complete)", {
-        let status = task_registry.status(&complete_id).await;
+    task_tracker.complete(&complete_id, result).await?;
+    runner.check("TaskTracker (complete)", {
+        let status = task_tracker.status(&complete_id).await;
         if status == Some(SessionState::Completed) {
             Ok(())
         } else {
@@ -455,16 +455,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let fail_id = uuid::Uuid::new_v4().to_string();
     drop(
-        task_registry
+        task_tracker
             .register_or_resume(fail_id.clone(), "plan".to_string(), "Fail test".to_string())
             .await
             .unwrap(),
     );
-    task_registry
+    task_tracker
         .fail(&fail_id, "Simulated error".to_string())
         .await?;
-    runner.check("TaskRegistry (fail)", {
-        let status = task_registry.status(&fail_id).await;
+    runner.check("TaskTracker (fail)", {
+        let status = task_tracker.status(&fail_id).await;
         if status == Some(SessionState::Failed) {
             Ok(())
         } else {
@@ -474,7 +474,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let cancel_id = uuid::Uuid::new_v4().to_string();
     drop(
-        task_registry
+        task_tracker
             .register_or_resume(
                 cancel_id.clone(),
                 "explore".to_string(),
@@ -483,10 +483,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .await
             .unwrap(),
     );
-    let cancelled = task_registry.cancel(&cancel_id).await?;
-    runner.check("TaskRegistry (cancel)", {
+    let cancelled = task_tracker.cancel(&cancel_id).await?;
+    runner.check("TaskTracker (cancel)", {
         if cancelled {
-            let status = task_registry.status(&cancel_id).await;
+            let status = task_tracker.status(&cancel_id).await;
             if status == Some(SessionState::Cancelled) {
                 Ok(())
             } else {
@@ -498,7 +498,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     });
 
     runner.check("TaskOutputTool (schema)", {
-        let output_tool = TaskOutputTool::new(task_registry.clone());
+        let output_tool = TaskOutputTool::new(task_tracker.clone());
         let schema = output_tool.input_schema().to_string();
         if schema.contains("task_id") && schema.contains("block") && schema.contains("timeout") {
             Ok(())

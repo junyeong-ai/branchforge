@@ -43,10 +43,10 @@ impl Tool for SlowTool {
         if let Some(token) = context.cancel_token() {
             tokio::select! {
                 _ = tokio::time::sleep(Duration::from_millis(ms)) => {
-                    ToolResult { output: ToolOutput::Success(format!("slept {ms}ms")), inner_usage: None, inner_model: None }
+                    ToolResult { output: ToolOutput::Success(format!("slept {ms}ms")), inner_usage: None, inner_model: None, overflow: None }
                 }
                 _ = token.cancelled() => {
-                    ToolResult { output: ToolOutput::Success("cancelled".to_string()), inner_usage: None, inner_model: None }
+                    ToolResult { output: ToolOutput::Success("cancelled".to_string()), inner_usage: None, inner_model: None, overflow: None }
                 }
             }
         } else {
@@ -55,6 +55,7 @@ impl Tool for SlowTool {
                 output: ToolOutput::Success(format!("slept {ms}ms")),
                 inner_usage: None,
                 inner_model: None,
+                overflow: None,
             }
         }
     }

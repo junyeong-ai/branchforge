@@ -188,7 +188,11 @@ async fn test_allow_tool_rules(working_dir: &PathBuf) -> Result<(), String> {
 
 fn test_default_mode_denies() -> Result<(), String> {
     let policy = ToolPolicy::default();
-    let result = policy.check("Read", &serde_json::json!({"file_path": "/etc/passwd"}));
+    // Phase D A-1: subjects are caller-supplied (the tool provides
+    // them via `Tool::permission_subjects`). An empty slice means
+    // no scoped rule matches, which is exactly what this test
+    // wants — policy should deny purely on tool-name rules.
+    let result = policy.check("Read", &["/etc/passwd".to_string()]);
 
     if result.is_allowed() {
         return Err("Should deny without allow rule".into());
@@ -201,18 +205,15 @@ fn test_default_mode_denies() -> Result<(), String> {
 
 fn test_tool_policy_api() -> Result<(), String> {
     let permissive = ToolPolicy::permissive();
-    if !permissive
-        .check("Bash", &serde_json::json!({}))
-        .is_allowed()
-    {
+    if !permissive.check("Bash", &[]).is_allowed() {
         return Err("Permissive should allow all".into());
     }
 
     let selective = ToolPolicy::builder().allow("Read").allow("Glob").build();
-    if !selective.check("Read", &serde_json::json!({})).is_allowed() {
+    if !selective.check("Read", &[]).is_allowed() {
         return Err("Should allow Read".into());
     }
-    if selective.check("Bash", &serde_json::json!({})).is_allowed() {
+    if selective.check("Bash", &[]).is_allowed() {
         return Err("Should deny Bash".into());
     }
 

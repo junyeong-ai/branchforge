@@ -89,26 +89,7 @@ mod security_tests {
 // =============================================================================
 
 mod authorization_tests {
-    use branchforge::authorization::{
-        ExecutionMode, ToolPolicyBuilder, is_file_tool, is_read_only_tool, is_shell_tool,
-    };
-
-    #[test]
-    fn test_tool_classification() {
-        assert!(is_read_only_tool("Read"));
-        assert!(is_read_only_tool("Glob"));
-        assert!(is_read_only_tool("Grep"));
-        assert!(!is_read_only_tool("Write"));
-
-        assert!(is_file_tool("Read"));
-        assert!(is_file_tool("Write"));
-        assert!(is_file_tool("Edit"));
-        assert!(!is_file_tool("Bash"));
-
-        assert!(is_shell_tool("Bash"));
-        assert!(is_shell_tool("KillShell"));
-        assert!(!is_shell_tool("Read"));
-    }
+    use branchforge::authorization::{ExecutionMode, ToolPolicyBuilder};
 
     #[test]
     fn test_execution_modes() {
@@ -126,10 +107,13 @@ mod authorization_tests {
             .deny("Bash")
             .build();
 
-        let read_result = policy.check("Read", &serde_json::Value::Null);
+        // Subjects are supplied by the caller in the new API
+        // (Phase D Workstream A-1). Empty slice is sufficient when
+        // the rule pattern doesn't include a subject.
+        let read_result = policy.check("Read", &[]);
         assert!(read_result.is_allowed());
 
-        let bash_result = policy.check("Bash", &serde_json::Value::Null);
+        let bash_result = policy.check("Bash", &[]);
         assert!(bash_result.is_denied());
     }
 }

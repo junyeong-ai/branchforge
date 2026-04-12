@@ -12,6 +12,8 @@ use std::time::Duration;
 use branchforge::ir::ContentPart;
 #[cfg(any(feature = "postgres", feature = "redis-backend"))]
 use branchforge::session::Persistence;
+#[cfg(feature = "redis-backend")]
+use branchforge::session::QueueItem;
 #[cfg(any(feature = "jsonl", feature = "postgres", feature = "redis-backend"))]
 use branchforge::session::SessionArchiver;
 #[cfg(feature = "jsonl")]
@@ -19,13 +21,9 @@ use branchforge::session::{ArchivePolicy, ExportPolicy, JsonlConfig, JsonlPersis
 #[cfg(feature = "postgres")]
 use branchforge::session::{PostgresConfig, PostgresPersistence};
 #[cfg(feature = "redis-backend")]
-use branchforge::session::{QueueItem, QueueOperation, QueueStatus};
-#[cfg(feature = "redis-backend")]
 use branchforge::session::{RedisConfig, RedisPersistence};
 #[cfg(any(feature = "jsonl", feature = "postgres", feature = "redis-backend"))]
 use branchforge::session::{Session, SessionConfig, SessionMessage};
-#[cfg(feature = "redis-backend")]
-use chrono::Utc;
 #[cfg(feature = "jsonl")]
 use tempfile::TempDir;
 #[cfg(any(feature = "postgres", feature = "redis-backend"))]
@@ -212,7 +210,7 @@ async fn test_postgres_backend_plan_clear_and_state_update() {
     session.cancel_plan();
     persistence.save(&session).await.unwrap();
     persistence
-        .set_state(&session_id, branchforge::session::SessionState::Completed)
+        .finalize(&session_id, branchforge::session::SessionState::Completed)
         .await
         .unwrap();
 
@@ -294,16 +292,7 @@ async fn test_redis_restore_preserves_queue_ttl_symmetry() {
     .expect("redis should initialize");
 
     let session = Session::new(SessionConfig::default());
-    let queue_item = QueueItem {
-        id: Uuid::new_v4(),
-        session_id: session.id,
-        operation: QueueOperation::Enqueue,
-        content: "pending".to_string(),
-        priority: 5,
-        status: QueueStatus::Pending,
-        created_at: Utc::now(),
-        processed_at: None,
-    };
+    let queue_item = QueueItem::enqueue(session.id, "pending").priority(5);
 
     persistence
         .restore_bundle(&session, std::slice::from_ref(&queue_item))

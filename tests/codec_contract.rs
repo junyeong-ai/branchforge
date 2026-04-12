@@ -1267,6 +1267,11 @@ mod capability_honesty {
                     codec.id()
                 );
             }
+            // Phase H-2: `ToolIdSemantics` is `#[non_exhaustive]`; a
+            // future variant must be explicitly audited before the
+            // test matrix accepts it. Panic so a silently-added
+            // variant does not slip through.
+            other => panic!("unhandled ToolIdSemantics variant in audit matrix: {other:?}"),
         }
     }
 
@@ -1395,6 +1400,10 @@ mod capability_honesty_response_format {
                 );
             }
             Support::Unsupported => {}
+            // Phase H-2: `Support` is `#[non_exhaustive]`; panic on
+            // any variant the contract matrix has not been updated
+            // to audit.
+            other => panic!("unhandled Support variant in capability honesty matrix: {other:?}"),
         }
     }
 
@@ -1678,6 +1687,9 @@ mod capability_honesty_reasoning {
                 // Unsupported: the field is silently dropped, which is
                 // honest by definition. No assertion needed.
             }
+            // Phase H-2: `Support` is `#[non_exhaustive]`; any new
+            // variant must explicitly update this audit matrix.
+            other => panic!("unhandled Support variant in reasoning honesty matrix: {other:?}"),
         }
     }
 
