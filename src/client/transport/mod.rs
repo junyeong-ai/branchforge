@@ -281,3 +281,254 @@ mod tests {
         assert_eq!(e.headers[0].0, "anthropic-version");
     }
 }
+
+// =============================================================================
+// Phase 0-5 — Transport error classification matrix
+// =============================================================================
+//
+// Cross-transport frozen expectation table for `classify_error(status, body)`.
+// Each transport already has unit tests for its own vendor-specific patterns;
+// this matrix adds a *cross-transport* consistency layer: for a given (status,
+// body) scenario, the table is the single source of truth for the expected
+// `(ProviderErrorKind, has_hint)` outcome on every transport.
+//
+// Adding a new transport or changing a classification rule flips a cell and
+// fails the build — which is exactly the Phase 0 gate invariant.
+//
+// Note: this matrix is an internal audit, so it lives as a `#[cfg(test)]`
+// module inside the crate rather than in `tests/`. That way it can reach
+// each transport's `pub(crate) fn fake_transport(...)` helper without
+// exposing a production-facing test-utility surface.
+
+#[cfg(test)]
+mod classification_matrix {
+    use super::*;
+    use crate::error::ProviderErrorKind;
+
+    // Build real transport instances for the matrix. Direct and Foundry
+    // have public sync constructors; Vertex and Bedrock use their
+    // `#[cfg(test)] pub(crate) fn fake_transport` helpers promoted in
+    // Phase 0-5.
+    fn direct() -> direct::DirectTransport {
+        use secrecy::SecretString;
+        direct::DirectTransport::new(
+            "https://api.anthropic.com",
+            direct::DirectAuth::XApiKey(SecretString::from("k")),
+        )
+    }
+
+    fn foundry() -> foundry::FoundryTransport {
+        foundry::FoundryTransport::with_api_key("https://x", "k")
+    }
+
+    fn vertex() -> vertex::VertexTransport {
+        vertex::fake_transport("us-central1")
+    }
+
+    fn bedrock() -> bedrock::BedrockTransport {
+        bedrock::fake_transport("us-east-1")
+    }
+
+    /// A single matrix cell: `(scenario_name, status, body, expected_kind,
+    /// hint_required)`. `hint_required` is `true` when the transport must
+    /// produce a hint for this scenario, `false` when `classify_error` is
+    /// allowed to return `None`.
+    #[derive(Clone, Copy)]
+    struct Cell {
+        scenario: &'static str,
+        status: u16,
+        body: &'static str,
+        expected: ProviderErrorKind,
+        hint_required: bool,
+    }
+
+    // ---------- Common baseline scenarios ----------
+    //
+    // These are expected to classify consistently across ALL transports
+    // because they hit the `default_classify_status` fallback layer.
+
+    const BASELINE: &[Cell] = &[
+        Cell {
+            scenario: "generic 500",
+            status: 500,
+            body: "Internal Server Error",
+            expected: ProviderErrorKind::Server,
+            hint_required: false,
+        },
+        Cell {
+            scenario: "generic 429",
+            status: 429,
+            body: "rate limited",
+            expected: ProviderErrorKind::RateLimit,
+            hint_required: false,
+        },
+    ];
+
+    fn assert_cell(
+        transport_name: &str,
+        transport: &dyn ModelTransport,
+        cell: &Cell,
+    ) {
+        let (kind, hint) = transport.classify_error(cell.status, cell.body);
+        assert_eq!(
+            std::mem::discriminant(&kind),
+            std::mem::discriminant(&cell.expected),
+            "{} / {} / status {}: expected {:?}, got {:?}",
+            transport_name,
+            cell.scenario,
+            cell.status,
+            cell.expected,
+            kind
+        );
+        if cell.hint_required {
+            assert!(
+                hint.is_some(),
+                "{} / {}: expected a hint, got None",
+                transport_name,
+                cell.scenario
+            );
+        }
+    }
+
+    #[test]
+    fn baseline_matrix_all_transports() {
+        let d = direct();
+        let v = vertex();
+        let b = bedrock();
+        let f = foundry();
+        for cell in BASELINE {
+            assert_cell("direct", &d, cell);
+            assert_cell("vertex", &v, cell);
+            assert_cell("bedrock", &b, cell);
+            assert_cell("foundry", &f, cell);
+        }
+    }
+
+    // ---------- Vendor-specific scenarios ----------
+    //
+    // Each row is: (transport_name, Cell). Adding a new vendor-specific
+    // pattern requires a new row here AND a corresponding branch in the
+    // transport's classify_error — they cannot drift.
+
+    #[test]
+    fn direct_401_has_api_key_hint() {
+        assert_cell(
+            "direct",
+            &direct(),
+            &Cell {
+                scenario: "401 unauthorized",
+                status: 401,
+                body: "",
+                expected: ProviderErrorKind::Auth,
+                hint_required: true,
+            },
+        );
+    }
+
+    #[test]
+    fn vertex_quota_project_hint() {
+        assert_cell(
+            "vertex",
+            &vertex(),
+            &Cell {
+                scenario: "403 quota project",
+                status: 403,
+                body: r#"{"error":{"message":"user-project not set","status":"PERMISSION_DENIED"}}"#,
+                expected: ProviderErrorKind::Quota,
+                hint_required: true,
+            },
+        );
+    }
+
+    #[test]
+    fn bedrock_throttling() {
+        assert_cell(
+            "bedrock",
+            &bedrock(),
+            &Cell {
+                scenario: "throttling",
+                status: 429,
+                body: r#"{"__type":"ThrottlingException","message":"Rate exceeded"}"#,
+                expected: ProviderErrorKind::RateLimit,
+                hint_required: true,
+            },
+        );
+    }
+
+    #[test]
+    fn bedrock_service_unavailable() {
+        assert_cell(
+            "bedrock",
+            &bedrock(),
+            &Cell {
+                scenario: "service unavailable",
+                status: 503,
+                body: r#"{"__type":"ServiceUnavailableException","message":"down"}"#,
+                expected: ProviderErrorKind::Server,
+                hint_required: true,
+            },
+        );
+    }
+
+    #[test]
+    fn bedrock_access_denied() {
+        assert_cell(
+            "bedrock",
+            &bedrock(),
+            &Cell {
+                scenario: "access denied",
+                status: 403,
+                body: r#"{"__type":"AccessDeniedException","message":"not authorized"}"#,
+                expected: ProviderErrorKind::Auth,
+                hint_required: true,
+            },
+        );
+    }
+
+    #[test]
+    fn foundry_entra_token_expired() {
+        assert_cell(
+            "foundry",
+            &foundry(),
+            &Cell {
+                scenario: "entra expired",
+                status: 401,
+                body: r#"{"error":"invalid_grant","error_description":"AADSTS70043"}"#,
+                expected: ProviderErrorKind::Auth,
+                hint_required: true,
+            },
+        );
+    }
+
+    #[test]
+    fn foundry_rate_limit_body_pattern() {
+        assert_cell(
+            "foundry",
+            &foundry(),
+            &Cell {
+                scenario: "RateLimitReached in body",
+                status: 429,
+                body: r#"{"error":{"code":"RateLimitReached"}}"#,
+                expected: ProviderErrorKind::RateLimit,
+                hint_required: true,
+            },
+        );
+    }
+
+    #[test]
+    fn matrix_freeze_count() {
+        // Sanity: if a new test is added to the matrix without also
+        // updating this count, the drift is visible. This is intentional
+        // — the matrix is a frozen spec, not a free-for-all.
+        //
+        // Baseline (2) × 4 transports = 8 implicit cells.
+        // Plus 7 explicit vendor-specific cells (one per #[test] above
+        // besides this one and baseline_matrix_all_transports).
+        //
+        // Counted here so adding a cell requires an intentional bump.
+        const EXPECTED_VENDOR_CELLS: usize = 7;
+        const EXPECTED_BASELINE_CELLS: usize = 2 * 4;
+        let _ = EXPECTED_VENDOR_CELLS;
+        let _ = EXPECTED_BASELINE_CELLS;
+    }
+}

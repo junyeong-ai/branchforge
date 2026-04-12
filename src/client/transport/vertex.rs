@@ -318,6 +318,37 @@ impl ModelTransport for VertexTransport {
     }
 }
 
+/// File-level test helper: construct a `VertexTransport` with a stub
+/// token provider so offline tests can exercise `resolve_endpoint` and
+/// `classify_error` without touching GCP metadata. Compiled only under
+/// `cfg(test)` and visible to the whole crate's test tree.
+#[cfg(test)]
+pub(crate) fn fake_transport(location: &str) -> VertexTransport {
+    struct FakeProvider;
+    #[async_trait]
+    impl TokenProvider for FakeProvider {
+        async fn token(
+            &self,
+            _scopes: &[&str],
+        ) -> std::result::Result<Arc<gcp_auth::Token>, gcp_auth::Error> {
+            unreachable!("fake provider should not be invoked in offline tests")
+        }
+        async fn project_id(&self) -> std::result::Result<Arc<str>, gcp_auth::Error> {
+            Ok(Arc::from("fake-project"))
+        }
+    }
+
+    let use_global = location == "global";
+    VertexTransport {
+        project_id: "oy-gemini-enterprise-prd".into(),
+        location: location.to_string(),
+        quota_project: Some("oy-gemini-enterprise-prd".into()),
+        use_global_host: use_global,
+        token_provider: Arc::new(FakeProvider),
+        cached_token: RwLock::new(None),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -331,35 +362,9 @@ mod tests {
         assert_eq!(publisher_for_codec("bedrock-converse"), None);
     }
 
-    /// We can't actually construct a VertexTransport in tests without ADC,
-    /// but we can verify the URL builder by constructing one with a fake
-    /// token provider via the helper below.
-    fn fake_transport(location: &str) -> VertexTransport {
-        struct FakeProvider;
-        #[async_trait]
-        impl TokenProvider for FakeProvider {
-            async fn token(
-                &self,
-                _scopes: &[&str],
-            ) -> std::result::Result<Arc<gcp_auth::Token>, gcp_auth::Error> {
-                // We never call this in URL-only tests.
-                unreachable!("fake provider should not be invoked in URL tests")
-            }
-            async fn project_id(&self) -> std::result::Result<Arc<str>, gcp_auth::Error> {
-                Ok(Arc::from("fake-project"))
-            }
-        }
-
-        let use_global = location == "global";
-        VertexTransport {
-            project_id: "oy-gemini-enterprise-prd".into(),
-            location: location.to_string(),
-            quota_project: Some("oy-gemini-enterprise-prd".into()),
-            use_global_host: use_global,
-            token_provider: Arc::new(FakeProvider),
-            cached_token: RwLock::new(None),
-        }
-    }
+    // Re-exported from the file-level test helper so existing tests keep
+    // their local `fake_transport(...)` spelling.
+    use super::fake_transport;
 
     #[tokio::test]
     async fn vertex_gemini_url_us_central1_streaming() {

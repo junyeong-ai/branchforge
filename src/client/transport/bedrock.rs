@@ -272,18 +272,23 @@ impl ModelTransport for BedrockTransport {
     }
 }
 
+/// File-level test helper: construct a `BedrockTransport` with a bearer
+/// stub so offline tests can exercise `classify_error` without hitting
+/// AWS. Compiled only under `cfg(test)` and visible to the whole crate's
+/// test tree.
+#[cfg(test)]
+pub(crate) fn fake_transport(region: &str) -> BedrockTransport {
+    BedrockTransport {
+        region: region.to_string(),
+        use_global_endpoint: false,
+        auth: RwLock::new(BedrockAuth::Bearer(SecretString::from("test-token"))),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::client::codec::{BedrockConverseCodec, ModelCodec};
-
-    fn fake_transport(region: &str) -> BedrockTransport {
-        BedrockTransport {
-            region: region.to_string(),
-            use_global_endpoint: false,
-            auth: RwLock::new(BedrockAuth::Bearer(SecretString::from("test-token"))),
-        }
-    }
 
     #[tokio::test]
     async fn unary_url_uses_converse() {
