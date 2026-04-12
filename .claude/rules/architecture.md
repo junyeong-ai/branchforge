@@ -23,4 +23,4 @@ paths:
 
 9. **Typed domain newtypes** — `TokenCount`, `NodeId`, `BranchId`, `Cost`. Raw `u64`/`String` for domain quantities is forbidden.
 
-10. **Closed-list FSM transitions** — `SessionState`, `PlanState`, `QueueItemState`, `McpClientState`, `AgentState` mutate **only** via `transition_to(_) -> Result<_, TransitionError>`. Direct field assignment outside the helper is forbidden. Construction and persistence rehydration are carved out with `// fsm-init:` or `// fsm-rebuild:` markers. Enforced by `scripts/audit_fsm_bypass.py`.
+10. **Closed-list FSM transitions** — `SessionState`, `PlanState`, `QueueItemState`, `McpClientState`, `AgentState` mutate **only** via `transition_to(_) -> Result<_, TransitionError>`. Direct field assignment outside the helper is forbidden. Construction and persistence rehydration are carved out with `// fsm-init:` or `// fsm-rebuild:` markers. Enforced by `cargo test --lib audit_fsm_bypass`.

@@ -858,6 +858,8 @@ async fn query_with_provider(
 }
 
 #[cfg(test)]
+mod audit;
+#[cfg(test)]
 mod tests {
     use super::*;
 

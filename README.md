@@ -224,6 +224,5 @@ cargo clippy --all-features -- -D warnings       # lint
 cargo fmt --all -- --check                       # format
 RUSTDOCFLAGS="-D warnings" cargo doc --all-features --no-deps  # docs
 cargo build --lib --no-default-features          # pure-core gate
-python3 scripts/audit_fsm_bypass.py              # FSM transition audit
-python3 scripts/audit_non_exhaustive.py          # enum evolution audit
+cargo test --lib audit_ --all-features           # FSM + enum evolution audit
 ```

@@ -23,11 +23,10 @@ cargo clippy --all-features -- -D warnings
 cargo fmt --all -- --check
 RUSTDOCFLAGS="-D warnings" cargo doc --all-features --no-deps
 cargo build --lib --no-default-features          # pure-core gate
-python3 scripts/audit_fsm_bypass.py              # FSM transition audit
-python3 scripts/audit_non_exhaustive.py          # enum evolution audit
+cargo test --lib audit_ --all-features           # FSM + enum evolution audit
 ```
 
-All eight gates must be green before shipping.
+All seven gates must be green before shipping.
 
 ## Feature Flags
 

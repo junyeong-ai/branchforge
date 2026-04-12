@@ -28,7 +28,7 @@ canonical registry of which enums belong to which list.
      `TransitionError` on illegal preconditions. Callers use the
      method, not direct assignment.
 
-  Enforced by `scripts/audit_fsm_bypass.py`.
+  Enforced by `cargo test --lib audit_fsm_bypass`.
 - **Mathematical binary** — two-variant symmetry that cannot grow:
   `SchemaVersionMismatchDirection` (`TooOld` / `TooNew`).
 - **SSoT design commitment** — variants are fixed by a project
