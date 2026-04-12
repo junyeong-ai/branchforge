@@ -58,38 +58,18 @@ impl ModelRegistry {
         self.models.get(id)
     }
 
+    /// Resolve a model by exact id or registered alias.
+    ///
+    /// Returns `None` when no match is found. There is no substring
+    /// fallback — identity matching is exact per architecture invariant #7.
     pub fn resolve(&self, alias_or_id: &str) -> Option<&ModelSpec> {
-        // Direct ID lookup
         if let Some(spec) = self.models.get(alias_or_id) {
             return Some(spec);
         }
-
-        // Alias lookup
         if let Some(canonical) = self.aliases.get(alias_or_id) {
             return self.models.get(canonical);
         }
-
-        // Fallback: substring matching for model family
-        let lower = alias_or_id.to_lowercase();
-        let fallback = if lower.contains("opus") {
-            self.latest(ModelFamily::Opus)
-        } else if lower.contains("sonnet") {
-            self.latest(ModelFamily::Sonnet)
-        } else if lower.contains("haiku") {
-            self.latest(ModelFamily::Haiku)
-        } else {
-            None
-        };
-
-        if let Some(spec) = &fallback {
-            tracing::debug!(
-                input = alias_or_id,
-                resolved = %spec.id,
-                "model resolved via substring fallback"
-            );
-        }
-
-        fallback
+        None
     }
 
     pub fn default_for_role(&self, role: ModelRole) -> Option<&ModelSpec> {

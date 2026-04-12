@@ -251,7 +251,7 @@ mod tests {
     #[test]
     fn test_orchestrator_creation() {
         let static_context = StaticContext::new().system_prompt("Hello");
-        let orchestrator = PromptOrchestrator::new(static_context, "claude-sonnet-4-5");
+        let orchestrator = PromptOrchestrator::new(static_context, "sonnet");
 
         assert_eq!(orchestrator.max_tokens(), 200_000);
     }
@@ -259,7 +259,7 @@ mod tests {
     #[test]
     fn test_token_tracking() {
         let static_context = StaticContext::new();
-        let mut orchestrator = PromptOrchestrator::new(static_context, "claude-sonnet-4-5");
+        let mut orchestrator = PromptOrchestrator::new(static_context, "sonnet");
 
         orchestrator.update_usage(&crate::ir::Usage {
             input_tokens: 100_000,
@@ -291,7 +291,7 @@ mod tests {
             .register(RuleIndex::new("global").source(ContentSource::in_memory("Be helpful")));
 
         let static_context = StaticContext::new();
-        let orchestrator = PromptOrchestrator::new(static_context, "claude-sonnet-4-5")
+        let orchestrator = PromptOrchestrator::new(static_context, "sonnet")
             .rule_registry(rule_registry);
 
         let rules = orchestrator
@@ -315,7 +315,7 @@ mod tests {
         );
 
         let static_context = StaticContext::new();
-        let orchestrator = PromptOrchestrator::new(static_context, "claude-sonnet-4-5")
+        let orchestrator = PromptOrchestrator::new(static_context, "sonnet")
             .rule_registry(rule_registry);
 
         let rules = orchestrator
@@ -345,7 +345,7 @@ mod tests {
                 .source(ContentSource::in_memory("Test content")),
         );
 
-        let orchestrator = PromptOrchestrator::new(static_context, "claude-sonnet-4-5")
+        let orchestrator = PromptOrchestrator::new(static_context, "sonnet")
             .with_skill_registry(skill_registry);
 
         assert!(orchestrator.skill_registry().contains("test"));
@@ -358,7 +358,7 @@ mod tests {
         skill_registry.register(SkillIndex::new("commit", "Create git commits"));
         skill_registry.register(SkillIndex::new("review", "Review code"));
 
-        let orchestrator = PromptOrchestrator::new(static_context, "claude-sonnet-4-5")
+        let orchestrator = PromptOrchestrator::new(static_context, "sonnet")
             .with_skill_registry(skill_registry);
 
         let summary = orchestrator.build_skill_summary();
@@ -374,7 +374,7 @@ mod tests {
         skill.disable_model_invocation = true;
         skill_registry.register(skill);
 
-        let orchestrator = PromptOrchestrator::new(static_context, "claude-sonnet-4-5")
+        let orchestrator = PromptOrchestrator::new(static_context, "sonnet")
             .with_skill_registry(skill_registry);
 
         let skill = orchestrator.find_skill_by_command("/internal");
@@ -393,7 +393,7 @@ mod tests {
         );
 
         let static_context = StaticContext::new();
-        let orchestrator = PromptOrchestrator::new(static_context, "claude-sonnet-4-5")
+        let orchestrator = PromptOrchestrator::new(static_context, "sonnet")
             .rule_registry(rule_registry);
 
         let summary = orchestrator.build_rules_summary().await;
@@ -404,7 +404,7 @@ mod tests {
     #[tokio::test]
     async fn test_register_rule_at_runtime() {
         let static_context = StaticContext::new();
-        let orchestrator = PromptOrchestrator::new(static_context, "claude-sonnet-4-5");
+        let orchestrator = PromptOrchestrator::new(static_context, "sonnet");
 
         // Initially empty
         let rules = orchestrator.list_rules().await;
@@ -441,7 +441,7 @@ mod tests {
         );
 
         let static_context = StaticContext::new();
-        let orchestrator = PromptOrchestrator::new(static_context, "claude-sonnet-4-5")
+        let orchestrator = PromptOrchestrator::new(static_context, "sonnet")
             .rule_registry(rule_registry);
 
         assert_eq!(orchestrator.list_rules().await.len(), 2);
@@ -464,7 +464,7 @@ mod tests {
     #[tokio::test]
     async fn test_register_rule_priority_override() {
         let static_context = StaticContext::new();
-        let orchestrator = PromptOrchestrator::new(static_context, "claude-sonnet-4-5");
+        let orchestrator = PromptOrchestrator::new(static_context, "sonnet");
 
         // Register a low-priority rule
         let rule = RuleIndex::new("policy")
@@ -494,7 +494,7 @@ mod tests {
     #[tokio::test]
     async fn test_runtime_rule_affects_matching() {
         let static_context = StaticContext::new();
-        let orchestrator = PromptOrchestrator::new(static_context, "claude-sonnet-4-5");
+        let orchestrator = PromptOrchestrator::new(static_context, "sonnet");
 
         // No rules initially
         assert!(
