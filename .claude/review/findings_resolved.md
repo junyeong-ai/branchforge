@@ -31,6 +31,15 @@ Findings already rejected with evidence or merged via PR. Design reviews must ch
 - **Refutation**: `src/agent/config.rs:17-80+` shows sub-configs (`AgentModelConfig`, `ExecutionConfig`, `SecurityConfig`, ...) are already decomposed. The defect is the builder's 76-method surface, not config structure.
 - **Correct fix**: collapse builder to one setter per sub-config. See P3-1.
 
+## F-rej-008 · "GraphError/McpError/OverflowPolicy missing #[non_exhaustive]"
+- **Origin**: Round-2/3 planning
+- **Refutation**: Phase 0-2 empirical audit (2026-04-12, commit <pending>) found:
+  - `GraphError` at `src/graph/error.rs` — already `#[non_exhaustive]` ✓
+  - `McpError` at `src/mcp/mod.rs:533` — already `#[non_exhaustive]` ✓
+  - `OverflowPolicy` at `src/events/bus.rs:178` — already `#[non_exhaustive]` ✓
+  - Only real violation: `ProviderErrorKind` at `src/lib.rs:388` (1 item, fixed in Phase 0-2)
+- **Lesson**: Before proposing "missing attribute X on enum Y", grep the enum definition directly. Don't trust cross-session memory of enum attribute state.
+
 ## F-rej-007 · "Extract a single LoopPolicy god trait (iteration + tool selection + recovery)"
 - **Refutation**: Recovery already exists as `RecoveryRecipes`. Tool approval already exists via `HookRegistry::PreToolUse`. A god trait would create a dual system with existing extension points (invariant #5).
 - **Correct fix**: two small traits — `IterationGate`, `ToolSelectionStrategy`. Keep `RecoveryRecipes`. See P4-1/P4-2.

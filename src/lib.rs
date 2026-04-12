@@ -385,6 +385,7 @@ pub enum Error {
 pub mod error {
     /// Classified kind of a [`super::Error::Provider`] failure.
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    #[non_exhaustive]
     pub enum ProviderErrorKind {
         /// Authentication or authorization failure (401/403, expired token).
         Auth,
