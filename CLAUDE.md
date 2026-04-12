@@ -1,18 +1,14 @@
 # CLAUDE.md
 
-Rust-native agent runtime. Graph-first sessions, provider-neutral IR, native structured outputs across all codecs.
+## Principles
 
-## Development Principles
-
-Every change must satisfy ALL of the following. These are non-negotiable.
-
-1. **Evidence-based decisions only** — Every finding, proposal, or rename must cite `file:line` with byte-exact code. "Feels wrong" is not evidence. `Read` the file before claiming anything about it.
-2. **Long-term, not patchwork** — Analyze root causes. Never apply a band-aid that defers the real fix. If a pattern is broken, fix the pattern — not the symptom.
-3. **No backwards compatibility** — Design as if the codebase was always this way. Delete legacy immediately in the same PR. No `// deprecated`, no shims, no re-exports of removed items.
-4. **Flexible, extensible, maintainable** — Prefer trait objects over enum dispatch for extension points. Prefer `*Config` structs over magic constants. Prefer `Default + builder()` over multiple constructors.
-5. **Naming consistency** — Follow `.claude/rules/naming.md` taxonomy (Manager/Registry/Tracker/Catalog/Store/Set/Engine/Aggregator/Snapshot/Payload). Check the open/closed enum list before proposing any rename.
-6. **Minimize AI context waste** — Do not send the model information it already knows (Rust syntax, what SSoT means). Do not duplicate data across files. Every token in a system prompt or tool description must earn its place.
-7. **Architecture invariants are law** — The 10 invariants in `.claude/rules/architecture.md` auto-load on `src/**` edits. A proposal contradicting any invariant is invalid by construction.
+1. **Cite `file:line`** — Read the code before claiming anything. "Feels wrong" is not evidence. Every finding must reference byte-exact code.
+2. **Fix root causes** — Never defer a real fix with a band-aid. If a pattern is broken, fix the pattern — not the symptom.
+3. **No backwards compatibility** — Delete legacy in the same PR. No `// deprecated`, no shims, no re-exports.
+4. **Trait objects over enum dispatch** for extension points. `*Config` structs over magic constants. `Default + builder()` over multiple constructors.
+5. **Naming consistency** — Follow `.claude/rules/naming.md` taxonomy. Check the open/closed enum list before proposing any rename.
+6. **Context efficiency** — Do not duplicate data across files. Every token in a system prompt or tool description must earn its place.
+7. **Architecture invariants are law** — The 10 invariants in `.claude/rules/architecture.md` auto-load on `src/**` edits. A proposal contradicting any invariant is invalid.
 
 ## Commands
 
@@ -23,7 +19,7 @@ cargo clippy --all-features -- -D warnings
 cargo fmt --all -- --check
 RUSTDOCFLAGS="-D warnings" cargo doc --all-features --no-deps
 cargo build --lib --no-default-features          # pure-core gate
-cargo test --lib audit_ --all-features           # FSM + enum evolution audit
+cargo test --lib audit_ --all-features           # FSM + enum audit
 ```
 
 All seven gates must be green before shipping.
@@ -37,20 +33,17 @@ cargo build --features "full"                   # all features except multimedia
 cargo build --all-features                      # full + multimedia
 ```
 
-Groups: `coding-tools`, `cli-auth`, `mcp`, `scheduling`, `multimedia`, `cloud-all` (aws/gcp/azure/openai/gemini), `persistence-all` (jsonl/postgres/redis), `plugins`, `otel`.
-
 ## Error Conventions
 
 - Typed enums (`SessionError`, `McpError`, `GraphError`) for module-internal errors.
-- `Error::Provider { kind, hint }` carries an actionable hint for well-known vendor failures.
+- `Error::Provider { kind, hint }` for vendor failures with actionable hint.
 - `Error::InvalidRequest(String)` for encode-time preflight rejections.
-- `Error::Config(String)` for developer-facing configuration mistakes.
+- `Error::Config(String)` for configuration mistakes.
 
 ## Lock Ordering
 
 - Never hold a lock across `.await` on a user-supplied future.
 - Multi-lock order: `session` > `task_registry` > `orchestrator`.
-- `McpManager`: `servers` > `tool_cache` > `degraded`.
 
 ## Progressive Disclosure
 
@@ -66,9 +59,5 @@ Module-specific rules in `.claude/rules/` auto-load when editing files matching 
 | `tools.md` | `Tool` trait, `ExecutionContext`, naming, cancellation |
 | `auth.md` | `CredentialProvider`, OAuth refresh, token storage |
 | `security.md` | `SecureFs`, `BashAnalyzer`, sandbox, resource limits |
-| `naming.md` | Type-suffix taxonomy, FSM terminology, enum evolution contract |
+| `naming.md` | Type-suffix taxonomy, FSM terminology, enum evolution |
 | `events.md` | EventBus fire-and-forget contract, StreamAggregator |
-
-## Review Protocol
-
-Design reviews use `/design-review <axis>`. Ground truth lives in `.claude/review/` (git-committed, not per-user memory). See `.claude/skills/design-review/SKILL.md` for the full procedure.

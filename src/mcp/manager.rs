@@ -74,6 +74,7 @@ use super::client::McpClient;
 #[cfg(feature = "mcp")]
 const DEFAULT_CACHE_TTL: Duration = Duration::from_secs(300);
 
+// Lock ordering: servers > tool_cache > degraded
 pub struct McpManager {
     #[cfg(feature = "mcp")]
     servers: Arc<RwLock<HashMap<String, McpClient>>>,
