@@ -67,6 +67,7 @@ pub mod common;
 pub mod config;
 pub mod context;
 pub mod context_scope;
+pub mod decision;
 pub mod events;
 pub mod graph;
 pub mod hooks;
@@ -98,14 +99,22 @@ pub mod workspace;
 // =========================================================================
 
 pub use agent::{
-    Agent, AgentBuilder, AgentCheckpoint, AgentConfig, AgentEvent, AgentResult, AgentRuntime,
-    RunConfig,
+    Agent, AgentBuilder, AgentCheckpoint, AgentConfig, AgentEvent, AgentEventSink, AgentInitTool,
+    AgentResult, AgentRuntime, ChannelSink, DroppingSink, InitialState, NdjsonSink, NoopSink,
+    RunConfig, SinkError, SseSink, StreamAggregator, StreamUsage, ToolCallState, ToolCallStatus,
+    ToolProgressEntry, drive_stream_into_sink, event_is_critical,
 };
 pub use auth::{Auth, Credential};
 pub use auth::{CredentialKind, CredentialRecord};
 pub use authorization::{
-    ApprovalReceiver, ApprovalRequest, ApprovalResponse, ApprovalSender, ExecutionMode, ToolPolicy,
-    approval_channel,
+    ElicitationRequest, ElicitationResponse, ExecutionMode, HumanInteractionError,
+    HumanInteractionHandler, HumanInteractionResult, Question, QuestionRequest, QuestionResponse,
+    ToolApprovalRequest, ToolApprovalResponse, ToolPolicy,
+};
+pub use events::{
+    BranchForkedPayload, BudgetAlertPayload, CacheBreakObservedPayload, CheckpointCreatedPayload,
+    Event, EventBus, EventKind, EventPayload, SessionCompactedPayload, StreamChunkKind,
+    StreamChunkPayload, TokensConsumedPayload, ToolExecutedPayload, ToolProgressPayload,
 };
 
 // Provider client stack — the only LLM call surface. There is no longer
@@ -118,6 +127,7 @@ pub use client::codec::{
     GeminiGenerateCodec, InvocationMode, ModelCodec, OpenAiChatCodec, OpenAiResponsesCodec,
 };
 pub use client::llm_call::{CircuitBrokenClient, FallingBackClient, LlmCall, RetryingClient};
+pub use client::mock::{MockLlmCall, MockResponse};
 pub use client::preset::{
     CredentialHint, ProfileRegistry, ProviderProfile, from_env as profile_from_env,
 };
@@ -317,6 +327,18 @@ pub enum Error {
         hint: Option<&'static str>,
         retryable: bool,
         status: Option<u16>,
+        /// Phase D E-2: rate-limit accounting snapshot parsed from
+        /// the failing response's headers, when the transport publishes
+        /// them. Recovery recipes use `seconds_until_reset` to pick a
+        /// data-driven backoff instead of blind exponential retry.
+        /// Absent for transports that don't publish headers (Vertex,
+        /// Bedrock, Foundry) and for error paths where the snapshot
+        /// could not be parsed.
+        /// Boxed so `Error` stays small — clippy's `result_large_err`
+        /// lint fires above ~128 bytes, and `RateLimitSnapshot` has
+        /// six `Option<_>` fields. `Option<Box<_>>` keeps the variant
+        /// a single pointer wide when no snapshot is attached.
+        rate_limit: Option<Box<ir::RateLimitSnapshot>>,
     },
 
     /// A `(codec, transport)` composition is invalid (pin violation,
@@ -339,6 +361,19 @@ pub enum Error {
     /// pointer is empty and `reason` carries the serde_json parser message.
     #[error("structured output invalid at {}: {reason}", if pointer.is_empty() { "root" } else { pointer.as_str() })]
     StructuredOutputInvalid { pointer: String, reason: String },
+
+    /// Retry budget for [`Self::StructuredOutputInvalid`] exhausted in
+    /// a single user turn. Raised by the agent loop after the model
+    /// has failed schema validation `attempts` times without
+    /// producing a conforming response. This is the terminal error
+    /// for the retry-on-invalid-structured-output path: at this
+    /// point additional retries are not going to succeed and the
+    /// caller needs to either relax the schema, switch model, or
+    /// inspect the last failing response.
+    #[error(
+        "structured output validation failed {attempts} times in a single turn; last error: {last_reason}"
+    )]
+    StructuredOutputExhausted { attempts: u32, last_reason: String },
 }
 
 /// Error helpers for the new codec/transport stack.
@@ -550,7 +585,8 @@ impl Error {
             | Error::Env(_)
             | Error::InvalidRequest(_)
             | Error::InvalidComposition { .. }
-            | Error::StructuredOutputInvalid { .. } => FailureCategory::Config,
+            | Error::StructuredOutputInvalid { .. }
+            | Error::StructuredOutputExhausted { .. } => FailureCategory::Config,
             Error::NotSupported { .. } => FailureCategory::BadRequest,
 
             // -- Transport / rate limiting / circuit --
@@ -610,6 +646,22 @@ impl Error {
     pub fn retry_after(&self) -> Option<std::time::Duration> {
         match self {
             Error::RateLimit { retry_after } => *retry_after,
+            _ => None,
+        }
+    }
+
+    /// Phase D E-2: rate-limit snapshot carried on an
+    /// [`Error::Provider`] failure, if the transport published it.
+    /// Used by [`crate::agent::recovery_recipes::RateLimitBackoffRecipe`]
+    /// to pick a data-driven retry delay from
+    /// `seconds_until_reset` instead of falling through to
+    /// exponential backoff.
+    pub fn rate_limit_snapshot(&self) -> Option<&ir::RateLimitSnapshot> {
+        match self {
+            Error::Provider {
+                rate_limit: Some(snap),
+                ..
+            } => Some(snap.as_ref()),
             _ => None,
         }
     }
@@ -791,6 +843,7 @@ mod tests {
             hint: None,
             retryable: false,
             status: Some(401),
+            rate_limit: None,
         };
         assert!(err.to_string().contains("Invalid API key"));
     }
@@ -905,6 +958,7 @@ mod tests {
                 hint: None,
                 retryable: false,
                 status: None,
+                rate_limit: None,
             };
             assert_eq!(
                 err.category(),

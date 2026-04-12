@@ -30,6 +30,12 @@ serde = { version = "^1.0", features = ["derive"] }
 serde_json = "^1.0"
 serde_yaml_bw = "2.5"
 schemars = "1.2"
+# JSON Schema validator — used by `client::schema::validate` to post-check
+# structured-output response bodies against the declared schema with full
+# Draft 2020-12 semantics (pattern, format, oneOf, allOf, numeric/length
+# constraints). Replaces a hand-rolled walker that conservatively skipped
+# these keywords and produced subtle false negatives.
+jsonschema = { version = "0.46", default-features = false }
 
 # Async utilities
 futures = "0.3"
@@ -251,6 +257,17 @@ path = "examples/structured_output.rs"
 [[example]]
 name = "customer_support_agent"
 path = "examples/customer_support_agent.rs"
+
+# Pure Layer 1 — host-neutral HTTP API server demonstrating the
+# dual-use SDK positioning. Wraps `Agent::execute_stream_into` in a
+# minimal `tokio::net::TcpListener` loop with SSE framing via
+# `SseSink` and best-effort delivery via `DroppingSink`. No
+# framework coupling, no dev-dependencies — shows that the same
+# `Agent` that powers a CLI REPL serves HTTP clients unchanged.
+# Phase D Workstream D-3.
+[[example]]
+name = "api_server"
+path = "examples/api_server.rs"
 
 # Pure Layer 1 — capability matrix + optional live execution across the
 # five built-in codecs. Demonstrates that provider diversity is a
