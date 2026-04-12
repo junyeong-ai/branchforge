@@ -52,7 +52,7 @@ Module-specific rules in `.claude/rules/` auto-load when editing files matching 
 | File | Scope |
 | :--- | :--- |
 | `architecture.md` | 10 invariants — loads on all `src/**` edits |
-| `client.md` | Provider stack, codecs, transports, ProfileRegistry |
+| `client.md` | Provider stack, codecs, transports, ProfileRegistry, LlmClient |
 | `schema.md` | `SchemaPolicy` pipeline, walker, cycle detection |
 | `ir.md` | Provider-neutral IR types, `JsonSchemaSpec`, warnings |
 | `graph-session.md` | `SessionGraph` SSoT, event replay, fork semantics |
