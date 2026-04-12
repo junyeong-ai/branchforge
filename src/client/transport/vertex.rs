@@ -292,6 +292,40 @@ impl ModelTransport for VertexTransport {
         body: &str,
     ) -> (crate::error::ProviderErrorKind, Option<&'static str>) {
         use crate::error::ProviderErrorKind;
+
+        // Invariant #6: prefer field-scoped matching on parsed JSON.
+        // Vertex returns `{"error":{"message":"...","status":"..."}}`.
+        if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(body)
+            && let Some(error) = parsed.get("error").and_then(|e| e.as_object())
+        {
+            let msg = error.get("message").and_then(|m| m.as_str()).unwrap_or("");
+
+            if matches!(status, 401 | 403)
+                && (msg.contains("quota") || msg.contains("user-project"))
+            {
+                return (
+                    ProviderErrorKind::Quota,
+                    Some(
+                        "Set GOOGLE_CLOUD_QUOTA_PROJECT or pass VertexTransport::with_quota_project(...). \
+                         If using gcloud creds, run: gcloud auth application-default set-quota-project <project>",
+                    ),
+                );
+            }
+            if matches!(status, 404)
+                && (msg.contains("Publisher Model") || msg.contains("publisher"))
+            {
+                return (
+                    ProviderErrorKind::BadRequest,
+                    Some(
+                        "Model not enabled in this project. Enable it in the Vertex AI Model Garden for the publisher.",
+                    ),
+                );
+            }
+        }
+
+        // Non-JSON fallback: plain-text service error messages (not tool
+        // outputs — Vertex embeds tool outputs in JSON content arrays, never
+        // in plain-text error bodies).
         match status {
             401 | 403 if body.contains("quota") || body.contains("user-project") => (
                 ProviderErrorKind::Quota,
@@ -310,10 +344,7 @@ impl ModelTransport for VertexTransport {
                     "Model not enabled in this project. Enable it in the Vertex AI Model Garden for the publisher.",
                 ),
             ),
-            429 => (ProviderErrorKind::RateLimit, None),
-            500..=599 => (ProviderErrorKind::Server, None),
-            400..=499 => (ProviderErrorKind::BadRequest, None),
-            _ => (ProviderErrorKind::Server, None),
+            _ => super::default_classify_status(status),
         }
     }
 }
