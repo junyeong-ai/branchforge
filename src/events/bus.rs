@@ -178,12 +178,12 @@ pub const DEFAULT_SUBSCRIBER_BUFFER: usize = 256;
 #[non_exhaustive]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum OverflowPolicy {
-    /// Silently drop the event for that subscriber (preserves the historic
-    /// fire-and-forget contract). This is the default.
-    #[default]
+    /// Silently drop the event for that subscriber.
     Drop,
     /// Drop the event and emit a `tracing::warn!` so operators can detect
-    /// lagging subscribers in production.
+    /// lagging subscribers in production. This is the default — silent loss
+    /// is worse than a log line because it makes lag invisible to operators.
+    #[default]
     WarnAndDrop,
 }
 
