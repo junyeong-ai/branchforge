@@ -96,6 +96,28 @@ pub trait ModelTransport: Send + Sync + std::fmt::Debug {
         let _ = body;
         default_classify_status(status)
     }
+
+    /// Phase C-6: parse rate-limit accounting from the HTTP response
+    /// headers of a successful (2xx) call.
+    ///
+    /// Each transport knows which headers its vendor publishes:
+    /// - Anthropic: `anthropic-ratelimit-requests-{limit,remaining,reset}`
+    ///   and `anthropic-ratelimit-tokens-{limit,remaining,reset}`.
+    /// - OpenAI: `x-ratelimit-limit-requests`, `x-ratelimit-remaining-requests`,
+    ///   `x-ratelimit-reset-requests` (and `*-tokens` siblings).
+    /// - Gemini, Vertex, Bedrock, Foundry: no stable public header contract
+    ///   today, so their transports return `None`.
+    ///
+    /// Returns `None` when the headers do not carry a recognisable
+    /// snapshot. Default implementation is `None` so transports that
+    /// have no rate-limit headers do not need to override this.
+    fn parse_rate_limit(
+        &self,
+        headers: &reqwest::header::HeaderMap,
+    ) -> Option<crate::ir::RateLimitSnapshot> {
+        let _ = headers;
+        None
+    }
 }
 
 /// Generic status-code classification used as the default for transports

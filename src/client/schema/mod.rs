@@ -42,7 +42,7 @@ mod validate;
 mod walker;
 
 pub use policy::{MinItemsPolicy, ObjectClosure, RequiredHandling, SchemaPolicy};
-pub use validate::{StructuredOutputValidationError, validate_structured_output};
+pub use validate::{SchemaValidationError, validate_structured_output};
 
 use walker::{JsonPointer, SchemaWalker};
 

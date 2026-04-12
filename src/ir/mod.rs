@@ -44,6 +44,7 @@ pub mod content;
 pub mod finish;
 pub mod model;
 pub mod provider_options;
+pub mod rate_limit;
 pub mod settings;
 pub mod stream;
 pub mod token_count;
@@ -68,6 +69,7 @@ pub use provider_options::{
     AnthropicOptions, BedrockGuardrail, BedrockOptions, CacheControl, CacheMarker, GeminiOptions,
     OpenAiOptions, ProviderOptions, ReasoningEffort, SafetySetting, VertexOptions,
 };
+pub use rate_limit::{APPROACHING_THRESHOLD, RateLimitSnapshot};
 pub use settings::{ModelSettings, ReasoningSettings};
 pub use stream::{ModelStreamChunk, PartialUsage, StreamDecodeState, StreamFraming};
 pub use token_count::TokenCount;

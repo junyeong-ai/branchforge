@@ -30,6 +30,7 @@ fn get_http_client() -> &'static reqwest::Client {
 /// This enables the progressive disclosure pattern where indices contain
 /// minimal metadata (name, description) while full content is loaded
 /// only when needed.
+#[non_exhaustive]
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ContentSource {

@@ -33,6 +33,7 @@ pub struct SubscriptionId(u64);
 ///
 /// Subscribers can filter on these to receive only relevant events.
 /// Use [`Custom`](EventKind::Custom) for application-specific event types.
+#[non_exhaustive]
 #[derive(Clone, Copy, Debug, Eq)]
 pub enum EventKind {
     /// A request was sent to the provider.
@@ -59,6 +60,19 @@ pub enum EventKind {
     BranchForked,
     /// A checkpoint was created.
     CheckpointCreated,
+    /// Phase C-6: provider rate-limit snapshot observed from a
+    /// successful response. Not a warning — this fires every time
+    /// the headers arrive, regardless of remaining budget.
+    RateLimitObserved,
+    /// Phase C-6: any axis of a rate-limit snapshot crossed the
+    /// [`crate::ir::APPROACHING_THRESHOLD`] (default 10%). Subset
+    /// of the observations above, surfaced separately so
+    /// dashboards can page without filtering every snapshot.
+    RateLimitApproaching,
+    /// Phase D E-1: prompt-cache classifier detected a break
+    /// between two consecutive requests. Carries the classified
+    /// root cause (model / system prompt / tool schema / TTL).
+    CacheBreakObserved,
     /// Custom event for extensibility.
     Custom(&'static str),
 }
@@ -77,7 +91,10 @@ impl PartialEq for EventKind {
             | (Self::BudgetAlert, Self::BudgetAlert)
             | (Self::SessionCompacted, Self::SessionCompacted)
             | (Self::BranchForked, Self::BranchForked)
-            | (Self::CheckpointCreated, Self::CheckpointCreated) => true,
+            | (Self::CheckpointCreated, Self::CheckpointCreated)
+            | (Self::RateLimitObserved, Self::RateLimitObserved)
+            | (Self::RateLimitApproaching, Self::RateLimitApproaching)
+            | (Self::CacheBreakObserved, Self::CacheBreakObserved) => true,
             (Self::Custom(a), Self::Custom(b)) => a == b,
             _ => false,
         }
@@ -100,6 +117,9 @@ impl Hash for EventKind {
             Self::SessionCompacted => state.write_u8(9),
             Self::BranchForked => state.write_u8(10),
             Self::CheckpointCreated => state.write_u8(11),
+            Self::RateLimitObserved => state.write_u8(13),
+            Self::RateLimitApproaching => state.write_u8(14),
+            Self::CacheBreakObserved => state.write_u8(15),
             Self::Custom(s) => {
                 state.write_u8(12);
                 s.hash(state);
@@ -155,6 +175,7 @@ pub type SubscriberFn = Arc<dyn Fn(Event) + Send + Sync>;
 pub const DEFAULT_SUBSCRIBER_BUFFER: usize = 256;
 
 /// What the bus does when a subscriber's channel is full at emit time.
+#[non_exhaustive]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum OverflowPolicy {
     /// Silently drop the event for that subscriber (preserves the historic
@@ -355,6 +376,60 @@ impl EventBus {
     /// Convenience: emit with just a kind and data. Discards `EmitStats`.
     pub fn emit_simple(&self, kind: EventKind, data: serde_json::Value) {
         let _ = self.emit(Event::new(kind, data));
+    }
+
+    /// Subscribe to a typed payload. The callback receives a decoded
+    /// [`super::EventPayload`] implementor instead of the raw
+    /// `Event.data: serde_json::Value`. If a received event fails to
+    /// deserialize into `D`, it is dropped and a `tracing::warn!` is
+    /// emitted so operators can detect schema drift.
+    ///
+    /// Typed subscribers live in the same per-kind slot as untyped
+    /// subscribers — the event is delivered to every matching
+    /// subscriber regardless of how it registered.
+    pub fn subscribe_typed<D, F>(&self, callback: F) -> SubscriptionId
+    where
+        D: super::typed::EventPayload,
+        F: Fn(D) + Send + Sync + 'static,
+    {
+        let callback = Arc::new(callback);
+        let wrapped: SubscriberFn =
+            Arc::new(
+                move |event: Event| match serde_json::from_value::<D>(event.data) {
+                    Ok(decoded) => callback(decoded),
+                    Err(e) => tracing::warn!(
+                        target: "branchforge::events::typed",
+                        kind = ?D::KIND,
+                        error = %e,
+                        "EventBus: failed to decode typed payload, dropping event"
+                    ),
+                },
+            );
+        self.subscribe(D::KIND, wrapped)
+    }
+
+    /// Emit a typed payload. Serializes the payload to JSON and
+    /// dispatches it through the existing [`Self::emit`] path, so
+    /// typed events are visible to untyped subscribers registered
+    /// on the same kind.
+    ///
+    /// Returns `EmitStats` for lag detection, matching [`Self::emit`].
+    /// If serialization fails (practically unreachable for
+    /// well-formed payload structs), drops the emit and returns an
+    /// empty stat block with a `tracing::warn!`.
+    pub fn emit_typed<D: super::typed::EventPayload>(&self, data: D) -> EmitStats {
+        match serde_json::to_value(&data) {
+            Ok(value) => self.emit(Event::new(D::KIND, value)),
+            Err(e) => {
+                tracing::warn!(
+                    target: "branchforge::events::typed",
+                    kind = ?D::KIND,
+                    error = %e,
+                    "EventBus: failed to serialize typed payload, dropping emit"
+                );
+                EmitStats::default()
+            }
+        }
     }
 
     /// Remove all subscribers for a specific event kind. Their drainer

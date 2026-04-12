@@ -191,18 +191,26 @@ impl ProviderClient {
 
         let response = req.send().await?;
         let status = response.status();
+        // Phase C-6 / D E-2: snapshot rate-limit headers *before*
+        // consuming the response body on either the success or error
+        // path. `parse_rate_limit` defaults to `None` for transports
+        // that don't publish them (Vertex, Bedrock, Foundry), so this
+        // is free for those presets.
+        let rate_limit = self.transport.parse_rate_limit(response.headers());
         if !status.is_success() {
             let body = response.text().await.unwrap_or_default();
             return Err(classify_response_error(
                 self.transport.as_ref(),
                 status.as_u16(),
                 &body,
+                rate_limit,
             ));
         }
 
         let raw: serde_json::Value = response.json().await?;
         let mut decoded = self.codec.decode_response(raw, mode)?;
         decoded.warnings.extend(encoded.warnings);
+        decoded.rate_limit = rate_limit;
 
         // Unexpected cache-break detection: the request declared one
         // or more cache markers (either top-level
@@ -304,12 +312,21 @@ impl ProviderClient {
             res = req.send() => res?,
         };
         let status = response.status();
+        // Phase C-6 / D E-2: rate-limit accounting is parsed from
+        // headers before any body consumption on either the
+        // success or error path. On success it is carried via a
+        // dedicated `ModelStreamChunk::RateLimit` emitted as the
+        // first chunk of the stream (before `MessageStart`); on
+        // error it rides on [`crate::Error::Provider::rate_limit`]
+        // so recovery recipes can inspect it.
+        let rate_limit = self.transport.parse_rate_limit(response.headers());
         if !status.is_success() {
             let body = response.text().await.unwrap_or_default();
             return Err(classify_response_error(
                 self.transport.as_ref(),
                 status.as_u16(),
                 &body,
+                rate_limit,
             ));
         }
 
@@ -317,7 +334,14 @@ impl ProviderClient {
         let codec = self.codec.clone();
         let warnings = encoded.warnings;
         let byte_stream = response.bytes_stream();
-        let chunk_stream = build_chunk_stream(codec, framing, byte_stream, warnings, cancel_token);
+        let chunk_stream = build_chunk_stream(
+            codec,
+            framing,
+            byte_stream,
+            warnings,
+            rate_limit,
+            cancel_token,
+        );
         Ok(chunk_stream)
     }
 }
@@ -339,6 +363,7 @@ fn build_chunk_stream(
     framing: StreamFraming,
     byte_stream: impl Stream<Item = std::result::Result<bytes::Bytes, reqwest::Error>> + Send + 'static,
     warnings: Vec<crate::ir::ModelWarning>,
+    rate_limit: Option<crate::ir::RateLimitSnapshot>,
     cancel_token: tokio_util::sync::CancellationToken,
 ) -> ChunkStream {
     use async_stream::try_stream;
@@ -347,6 +372,12 @@ fn build_chunk_stream(
         // Surface encode-time warnings up front.
         for w in warnings {
             yield ModelStreamChunk::Warning(w);
+        }
+
+        // Phase C-6: emit the rate-limit snapshot before any codec
+        // chunks so consumers see the accounting prologue first.
+        if let Some(snap) = rate_limit {
+            yield ModelStreamChunk::RateLimit(snap);
         }
 
         let mut state = StreamDecodeState::new();
@@ -535,16 +566,20 @@ fn extract_ndjson_line(buffer: &mut Vec<u8>) -> Option<Vec<u8>> {
     Some(line)
 }
 
-/// Translate a [`crate::client::schema::StructuredOutputValidationError`]
+/// Translate a [`crate::client::schema::SchemaValidationError`]
 /// into the public [`Error::StructuredOutputInvalid`] variant so callers
 /// get a stable, typed failure surface with the violating JSON pointer
 /// preserved.
-fn validation_error_to_error(err: crate::client::schema::StructuredOutputValidationError) -> Error {
-    use crate::client::schema::StructuredOutputValidationError as V;
+fn validation_error_to_error(err: crate::client::schema::SchemaValidationError) -> Error {
+    use crate::client::schema::SchemaValidationError as V;
     match err {
         V::NotJson { reason } => Error::StructuredOutputInvalid {
             pointer: String::new(),
             reason: format!("body is not valid JSON: {reason}"),
+        },
+        V::InvalidSchema { reason } => Error::StructuredOutputInvalid {
+            pointer: String::new(),
+            reason: format!("declared schema is not a valid JSON Schema: {reason}"),
         },
         V::Constraint { pointer, reason } => Error::StructuredOutputInvalid { pointer, reason },
     }
@@ -581,7 +616,17 @@ fn validate_composition(codec: &dyn ModelCodec, transport: &dyn ModelTransport) 
 /// asking the transport to classify the failure. Each transport owns its
 /// own vendor-specific patterns (Vertex quota project, Bedrock throttling,
 /// …), so adding a new transport never requires editing this function.
-fn classify_response_error(transport: &dyn ModelTransport, status: u16, body: &str) -> Error {
+///
+/// Phase D E-2: `rate_limit` is the snapshot parsed from the failing
+/// response's headers before the body was consumed. Recovery recipes
+/// read it back via [`crate::Error::rate_limit_snapshot`] to pick a
+/// data-driven retry delay.
+fn classify_response_error(
+    transport: &dyn ModelTransport,
+    status: u16,
+    body: &str,
+    rate_limit: Option<crate::ir::RateLimitSnapshot>,
+) -> Error {
     use crate::error::ProviderErrorKind;
     let snippet = body.chars().take(500).collect::<String>();
     let (kind, hint) = transport.classify_error(status, body);
@@ -595,6 +640,7 @@ fn classify_response_error(transport: &dyn ModelTransport, status: u16, body: &s
             ProviderErrorKind::RateLimit | ProviderErrorKind::Server | ProviderErrorKind::Network
         ),
         status: Some(status),
+        rate_limit: rate_limit.map(Box::new),
     }
 }
 
@@ -1315,7 +1361,12 @@ mod tests {
         match err {
             Error::StructuredOutputInvalid { pointer, reason } => {
                 assert_eq!(pointer, "/age");
-                assert!(reason.contains("expected type"), "got {reason}");
+                // `jsonschema` 0.46 reports type mismatches as
+                // `"<value>" is not of type "<expected>"`.
+                assert!(
+                    reason.contains("is not of type") && reason.contains("integer"),
+                    "got {reason}"
+                );
             }
             other => panic!("expected StructuredOutputInvalid, got {other:?}"),
         }
@@ -1401,6 +1452,7 @@ mod tests {
             StreamFraming::Sse,
             hanging,
             Vec::new(),
+            None,
             cancel.clone(),
         );
 

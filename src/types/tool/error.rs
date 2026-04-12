@@ -2,6 +2,7 @@
 
 use thiserror::Error;
 
+#[non_exhaustive]
 #[derive(Debug, Clone, Error)]
 pub enum ToolError {
     #[error("authorization denied: {tool} requires {permission}")]

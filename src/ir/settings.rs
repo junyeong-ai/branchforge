@@ -79,6 +79,7 @@ fn default_include_thoughts() -> bool {
 }
 
 /// Discrete reasoning effort level.
+#[non_exhaustive]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ReasoningEffort {

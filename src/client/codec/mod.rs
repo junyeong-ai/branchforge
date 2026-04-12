@@ -23,7 +23,6 @@
 
 pub mod anthropic_messages;
 pub mod bedrock_converse;
-pub mod gemini_cache;
 pub mod gemini_generate;
 pub mod openai_chat;
 pub mod openai_responses;
@@ -121,6 +120,7 @@ pub trait ModelCodec: Send + Sync + std::fmt::Debug {
 }
 
 /// What kind of invocation we are encoding for.
+#[non_exhaustive]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum InvocationMode {
@@ -144,6 +144,7 @@ pub struct HeaderSpec {
 }
 
 /// Where the value of a [`HeaderSpec`] comes from.
+#[non_exhaustive]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum HeaderSource {
     /// A literal constant value the codec hard-codes (e.g.
@@ -157,6 +158,7 @@ pub enum HeaderSource {
 
 /// Hint for which API version the codec targets, used by transports that
 /// route between stable and beta endpoints.
+#[non_exhaustive]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ApiVersionHint {
     /// Whatever stable version the transport considers default.

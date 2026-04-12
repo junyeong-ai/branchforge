@@ -27,11 +27,13 @@
 //! runtime.shutdown(); // Flush before exit
 //! ```
 
+pub mod cache_break;
 mod metrics;
 #[cfg(feature = "otel")]
 mod otel;
 mod spans;
 
+pub use cache_break::{CacheBreakBaseline, CacheBreakCause, classify as classify_cache_break};
 pub use metrics::{Counter, Gauge, Histogram, MetricsConfig, MetricsRegistry, MetricsSummary};
 #[cfg(feature = "otel")]
 pub use otel::{

@@ -290,6 +290,7 @@ pub fn init_tracing_subscriber(config: &OtelConfig, with_console: bool) -> Resul
 }
 
 /// Errors that can occur during OpenTelemetry initialization.
+#[non_exhaustive]
 #[derive(Debug, thiserror::Error)]
 pub enum OtelError {
     #[error("OpenTelemetry initialization failed: {0}")]

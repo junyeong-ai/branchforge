@@ -17,6 +17,7 @@ use serde::{Deserialize, Serialize};
 ///   should re-invoke the model rather than treating it as completion.
 /// - [`FinishReason::Other`] preserves any unknown raw token verbatim so
 ///   debugging and round-trip equality remain possible.
+#[non_exhaustive]
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum FinishReason {

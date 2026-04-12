@@ -9,6 +9,7 @@ use super::usage::Usage;
 use super::warning::ModelWarning;
 
 /// Wire-level framing of a streaming response body.
+#[non_exhaustive]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum StreamFraming {
@@ -34,6 +35,7 @@ pub enum StreamFraming {
 /// values: snapshot-based codecs (Gemini SSE) diff successive snapshots and
 /// emit multiple deltas at once, while Anthropic-style delta events map
 /// 1:1 to chunks.
+#[non_exhaustive]
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ModelStreamChunk {
@@ -91,6 +93,12 @@ pub enum ModelStreamChunk {
     /// Heartbeat / ping. Filtered out by default by the high-level stream
     /// adapter; codecs may emit it for diagnostic completeness.
     Heartbeat,
+    /// Phase C-6: snapshot of provider rate-limit accounting parsed
+    /// from response headers. Emitted by `ProviderClient::send_stream`
+    /// as the first chunk (before `MessageStart`) when the transport's
+    /// `parse_rate_limit` returned `Some`. Consumers use it to drive
+    /// typed observability events ahead of data arriving.
+    RateLimit(super::rate_limit::RateLimitSnapshot),
 }
 
 /// Codec-private state carried across `decode_stream_chunk` calls.

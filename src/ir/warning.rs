@@ -15,6 +15,7 @@ use serde::{Deserialize, Serialize};
 /// streaming responses. They are **never** errors — the call still completed.
 /// They tell the caller that some part of their input or some piece of the
 /// provider's output could not be honoured exactly.
+#[non_exhaustive]
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ModelWarning {

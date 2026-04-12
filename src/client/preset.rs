@@ -27,13 +27,18 @@
 //! let registry = ProfileRegistry::with_builtins();
 //! let client = registry.build("groq")?;
 //!
-//! // Or register a custom vendor at runtime.
+//! // Or register a custom vendor at runtime. The `transport_builder`
+//! // receives a `ProfileBuildContext` carrying the pre-resolved
+//! // credential and an injected `EnvLookup` seam; read base URLs
+//! // and other overrides through `ctx.env` so tests can inject
+//! // fakes without touching the process environment.
 //! let mut registry = ProfileRegistry::with_builtins();
 //! registry.register(ProviderProfile {
 //!     id: "my-internal-llm".into(),
 //!     codec: || Arc::new(OpenAiChatCodec::new()),
-//!     transport_builder: Box::new(|| {
-//!         /* build your own transport */
+//!     transport_builder: Box::new(|ctx| {
+//!         let base = ctx.env.get_or("MY_LLM_URL", "https://llm.internal");
+//!         /* build your own transport using `base` and `ctx.credential` */
 //!         todo!()
 //!     }),
 //!     credential: CredentialHint::EnvVar {
@@ -58,6 +63,7 @@ use crate::client::codec::{
 };
 use crate::client::provider_client::ProviderClient;
 use crate::client::transport::{DirectAuth, DirectTransport, ModelTransport};
+use crate::common::env::{EnvLookup, SystemEnv};
 use crate::{Error, Result};
 
 /// Where the credential for a profile comes from.
@@ -66,6 +72,7 @@ use crate::{Error, Result};
 /// registry can produce actionable error messages when a credential
 /// is missing without baking vendor-specific env-var names into the
 /// transport layer.
+#[non_exhaustive]
 pub enum CredentialHint {
     /// Read a single environment variable.
     EnvVar {
@@ -102,19 +109,32 @@ impl std::fmt::Debug for CredentialHint {
 }
 
 impl CredentialHint {
-    /// Resolve the hint to a [`SecretString`], or return a
-    /// configuration error explaining what the user must set.
+    /// Resolve the hint against the process environment. Convenience
+    /// wrapper around [`Self::resolve_with`] for production callers.
+    #[allow(dead_code)]
     fn resolve(&self, profile_id: &str) -> Result<Option<SecretString>> {
+        self.resolve_with(profile_id, &SystemEnv)
+    }
+
+    /// Resolve the hint against an injected [`EnvLookup`] and return
+    /// a configuration error explaining what the user must set.
+    ///
+    /// Phase G-3: the `env` seam lets unit tests exercise every
+    /// variant (present / absent / first-of-many / custom closure)
+    /// without mutating process-wide state. Production code paths
+    /// pass `&SystemEnv` and behave identically to the pre-G-3
+    /// `std::env::var` implementation.
+    fn resolve_with(&self, profile_id: &str, env: &dyn EnvLookup) -> Result<Option<SecretString>> {
         match self {
             Self::EnvVar { name, hint } => {
-                let val = std::env::var(name).map_err(|_| {
+                let val = env.get(name).ok_or_else(|| {
                     Error::Config(format!("{name} not set for `{profile_id}` profile. {hint}"))
                 })?;
                 Ok(Some(SecretString::from(val)))
             }
             Self::EnvVarOneOf { names, hint } => {
                 for n in *names {
-                    if let Ok(val) = std::env::var(n) {
+                    if let Some(val) = env.get(n) {
                         return Ok(Some(SecretString::from(val)));
                     }
                 }
@@ -128,6 +148,49 @@ impl CredentialHint {
     }
 }
 
+/// Phase H-1: build-time context passed to every
+/// [`ProviderProfile::transport_builder`] closure. Bundles all inputs
+/// a profile builder may need to consult so the builder signature
+/// stays stable as new concerns are added.
+///
+/// Before Phase H-1, `transport_builder` took the credential as a
+/// flat parameter and called `std::env::var` directly for base-URL
+/// overrides. That broke hermetic testing (no way to inject fake
+/// env values) and made future extensions — tenant id, region,
+/// tracing context — impossible without breaking the signature of
+/// every existing profile. This struct is the fix: new fields slot
+/// in as additions, existing profiles ignore them, and the
+/// `#[non_exhaustive]` marker documents the evolution contract.
+#[non_exhaustive]
+#[derive(Debug)]
+pub struct ProfileBuildContext<'a> {
+    /// Profile id the context belongs to. Forwarded into error
+    /// messages so a failing build names the offending profile
+    /// rather than reporting an anonymous "credential missing".
+    pub profile_id: &'a str,
+
+    /// Credential pre-resolved by the registry before the closure
+    /// runs. `None` when the profile declares [`CredentialHint::None`]
+    /// (e.g. local Ollama, custom gateways without auth).
+    pub credential: Option<SecretString>,
+
+    /// Injected environment lookup seam. Profile builders read
+    /// non-credential environment overrides — base URLs, regions,
+    /// feature flags — through this trait instead of calling
+    /// `std::env::var` directly, which keeps tests hermetic and
+    /// parallel-safe.
+    pub env: &'a dyn EnvLookup,
+}
+
+/// Type alias for the `transport_builder` closure. Uses a
+/// higher-ranked lifetime bound (`for<'a>`) so a single boxed
+/// closure can accept a fresh [`ProfileBuildContext`] with whatever
+/// lifetime the caller has in scope at build time. Callers build
+/// the context per `build_with` invocation; the HRTB lets one
+/// closure handle any call-site lifetime.
+pub type TransportBuilder =
+    Box<dyn for<'a> Fn(&ProfileBuildContext<'a>) -> Result<Arc<dyn ModelTransport>> + Send + Sync>;
+
 /// A complete description of how to build one provider client.
 pub struct ProviderProfile {
     /// Stable id used as the registry key. Convention: lowercase
@@ -135,13 +198,13 @@ pub struct ProviderProfile {
     pub id: Cow<'static, str>,
     /// Codec factory. Pure (no I/O), called once at build time.
     pub codec: fn() -> Arc<dyn ModelCodec>,
-    /// Transport builder. The closure receives the resolved
-    /// credential (if any) and returns a fully-configured
-    /// transport. The default base URL is captured inside the
-    /// closure; profiles that respect a `*_BASE_URL` env-var
-    /// override read it inside the closure too.
-    pub transport_builder:
-        Box<dyn Fn(Option<SecretString>) -> Result<Arc<dyn ModelTransport>> + Send + Sync>,
+    /// Transport builder. Receives a [`ProfileBuildContext`] at
+    /// build time carrying the pre-resolved credential, the
+    /// injected [`EnvLookup`] seam, and the owning profile id.
+    /// Base URLs and other non-credential overrides MUST be read
+    /// through `ctx.env` — not `std::env::var` — so tests can
+    /// inject fakes via [`ProfileRegistry::build_with`].
+    pub transport_builder: TransportBuilder,
     /// Where the credential comes from, declaratively.
     pub credential: CredentialHint,
     /// Optional default model id surfaced to consumers (examples,
@@ -215,16 +278,37 @@ impl ProfileRegistry {
         self.profiles.get(id)
     }
 
-    /// Resolve credentials, build the codec + transport, and
-    /// return a fully-wired [`ProviderClient`].
+    /// Resolve credentials against the process environment, build
+    /// the codec + transport, and return a fully-wired
+    /// [`ProviderClient`]. Convenience wrapper around
+    /// [`Self::build_with`] for production callers.
     pub fn build(&self, id: &str) -> Result<ProviderClient> {
+        self.build_with(id, &SystemEnv)
+    }
+
+    /// Phase G-3 / H-1: build the named profile against an injected
+    /// [`EnvLookup`]. Test harnesses pass an in-memory fake so the
+    /// whole credential resolution path AND the profile's base-URL
+    /// / endpoint overrides can be exercised without touching
+    /// process-wide environment state.
+    ///
+    /// The [`ProfileBuildContext`] constructed here carries the
+    /// resolved credential, the injected env seam, and the owning
+    /// profile id; the `transport_builder` closure receives it as
+    /// a single argument.
+    pub fn build_with(&self, id: &str, env: &dyn EnvLookup) -> Result<ProviderClient> {
         let profile = self
             .profiles
             .get(id)
             .ok_or_else(|| Error::Config(format!("unknown provider profile: `{id}`")))?;
-        let credential = profile.credential.resolve(&profile.id)?;
+        let credential = profile.credential.resolve_with(&profile.id, env)?;
         let codec = (profile.codec)();
-        let transport = (profile.transport_builder)(credential)?;
+        let ctx = ProfileBuildContext {
+            profile_id: &profile.id,
+            credential,
+            env,
+        };
+        let transport = (profile.transport_builder)(&ctx)?;
         ProviderClient::new(codec, transport)
     }
 }
@@ -239,16 +323,26 @@ impl std::fmt::Debug for ProfileRegistry {
 
 /// Resolve a profile id from `BRANCHFORGE_PROVIDER` and build it
 /// against the canonical builtin registry. This is the one-call
-/// entry point for examples and minimal applications.
+/// production entry point for examples and minimal applications.
+/// Delegates to [`from_env_with`] with [`SystemEnv`].
 pub async fn from_env() -> Result<ProviderClient> {
+    from_env_with(&SystemEnv).await
+}
+
+/// Phase H-1: [`from_env`] against an injected [`EnvLookup`]. Used
+/// by tests and embedding scenarios (serverless, sandboxed) where
+/// the `BRANCHFORGE_PROVIDER` selector and every downstream base-URL
+/// override must come from a fake or vault-backed source instead of
+/// the process environment.
+pub async fn from_env_with(env: &dyn EnvLookup) -> Result<ProviderClient> {
     let registry = ProfileRegistry::with_builtins();
-    let id = std::env::var("BRANCHFORGE_PROVIDER").map_err(|_| {
+    let id = env.get("BRANCHFORGE_PROVIDER").ok_or_else(|| {
         let known = registry.ids().collect::<Vec<_>>().join(", ");
         Error::Config(format!(
             "BRANCHFORGE_PROVIDER not set; choose one of: {known}"
         ))
     })?;
-    registry.build(&id)
+    registry.build_with(&id, env)
 }
 
 // ==========================================================================
@@ -291,16 +385,31 @@ fn direct_with_codec(
     Arc::new(DirectTransport::new(base_url, auth).with_allowed_codecs(allowed_codecs))
 }
 
+/// Phase H-1 helper: produce a typed `Error::Config` when a profile
+/// requires a credential but resolution yielded `None`. The error
+/// message names the profile id so multi-profile build sites don't
+/// surface an anonymous "credential missing".
+fn require_credential(ctx: &ProfileBuildContext<'_>) -> Result<SecretString> {
+    ctx.credential.clone().ok_or_else(|| {
+        Error::Config(format!(
+            "profile `{}` requires a credential but none resolved",
+            ctx.profile_id
+        ))
+    })
+}
+
 fn profile_anthropic() -> ProviderProfile {
     ProviderProfile {
         id: "anthropic".into(),
         codec: || Arc::new(AnthropicMessagesCodec::new()),
-        transport_builder: Box::new(|cred| {
-            let base = std::env::var("ANTHROPIC_BASE_URL")
-                .unwrap_or_else(|_| "https://api.anthropic.com".into());
+        transport_builder: Box::new(|ctx| {
+            let base = ctx
+                .env
+                .get_or("ANTHROPIC_BASE_URL", "https://api.anthropic.com");
+            let cred = require_credential(ctx)?;
             Ok(direct_with_codec(
                 base,
-                DirectAuth::XApiKey(cred.expect("anthropic profile requires credential")),
+                DirectAuth::XApiKey(cred),
                 &["anthropic-messages"],
             ))
         }),
@@ -316,12 +425,12 @@ fn profile_openai() -> ProviderProfile {
     ProviderProfile {
         id: "openai".into(),
         codec: || Arc::new(OpenAiResponsesCodec::new()),
-        transport_builder: Box::new(|cred| {
-            let base = std::env::var("OPENAI_BASE_URL")
-                .unwrap_or_else(|_| "https://api.openai.com".into());
+        transport_builder: Box::new(|ctx| {
+            let base = ctx.env.get_or("OPENAI_BASE_URL", "https://api.openai.com");
+            let cred = require_credential(ctx)?;
             Ok(direct_with_codec(
                 base,
-                DirectAuth::Bearer(cred.expect("openai profile requires credential")),
+                DirectAuth::Bearer(cred),
                 &["openai-responses"],
             ))
         }),
@@ -337,12 +446,12 @@ fn profile_openai_chat() -> ProviderProfile {
     ProviderProfile {
         id: "openai-chat".into(),
         codec: || Arc::new(OpenAiChatCodec::new()),
-        transport_builder: Box::new(|cred| {
-            let base = std::env::var("OPENAI_BASE_URL")
-                .unwrap_or_else(|_| "https://api.openai.com".into());
+        transport_builder: Box::new(|ctx| {
+            let base = ctx.env.get_or("OPENAI_BASE_URL", "https://api.openai.com");
+            let cred = require_credential(ctx)?;
             Ok(direct_with_codec(
                 base,
-                DirectAuth::Bearer(cred.expect("openai-chat profile requires credential")),
+                DirectAuth::Bearer(cred),
                 &["openai-chat"],
             ))
         }),
@@ -359,14 +468,17 @@ fn profile_gemini() -> ProviderProfile {
     ProviderProfile {
         id: "gemini".into(),
         codec: || Arc::new(GeminiGenerateCodec::new()),
-        transport_builder: Box::new(|cred| {
-            let base = std::env::var("GEMINI_BASE_URL")
-                .unwrap_or_else(|_| "https://generativelanguage.googleapis.com".into());
+        transport_builder: Box::new(|ctx| {
+            let base = ctx.env.get_or(
+                "GEMINI_BASE_URL",
+                "https://generativelanguage.googleapis.com",
+            );
+            let cred = require_credential(ctx)?;
             Ok(direct_with_codec(
                 base,
                 DirectAuth::QueryParam {
                     param: "key",
-                    value: cred.expect("gemini profile requires credential"),
+                    value: cred,
                 },
                 &["gemini-generate"],
             ))
@@ -385,7 +497,7 @@ fn profile_vertex_gemini() -> ProviderProfile {
     ProviderProfile {
         id: "vertex-gemini".into(),
         codec: || Arc::new(GeminiGenerateCodec::new()),
-        transport_builder: Box::new(|_cred| {
+        transport_builder: Box::new(|_ctx| {
             let transport = futures::executor::block_on(VertexTransport::from_env())?;
             Ok(Arc::new(transport) as Arc<dyn ModelTransport>)
         }),
@@ -402,7 +514,7 @@ fn profile_vertex_anthropic() -> ProviderProfile {
     ProviderProfile {
         id: "vertex-anthropic".into(),
         codec: || Arc::new(AnthropicMessagesCodec::new()),
-        transport_builder: Box::new(|_cred| {
+        transport_builder: Box::new(|_ctx| {
             let transport = futures::executor::block_on(VertexTransport::from_env())?;
             Ok(Arc::new(transport) as Arc<dyn ModelTransport>)
         }),
@@ -419,7 +531,7 @@ fn profile_bedrock() -> ProviderProfile {
     ProviderProfile {
         id: "bedrock".into(),
         codec: || Arc::new(BedrockConverseCodec::new()),
-        transport_builder: Box::new(|_cred| {
+        transport_builder: Box::new(|_ctx| {
             let transport = futures::executor::block_on(BedrockTransport::from_env())?;
             Ok(Arc::new(transport) as Arc<dyn ModelTransport>)
         }),
@@ -436,7 +548,7 @@ fn profile_foundry_anthropic() -> ProviderProfile {
     ProviderProfile {
         id: "foundry-anthropic".into(),
         codec: || Arc::new(AnthropicMessagesCodec::new()),
-        transport_builder: Box::new(|_cred| {
+        transport_builder: Box::new(|_ctx| {
             let transport = FoundryTransport::from_env()?;
             Ok(Arc::new(transport) as Arc<dyn ModelTransport>)
         }),
@@ -459,9 +571,9 @@ fn openai_compat_profile(
     ProviderProfile {
         id: id.into(),
         codec: || Arc::new(OpenAiChatCodec::new()),
-        transport_builder: Box::new(move |cred| {
-            let base = std::env::var(base_env).unwrap_or_else(|_| default_base.into());
-            let auth = match cred {
+        transport_builder: Box::new(move |ctx| {
+            let base = ctx.env.get_or(base_env, default_base);
+            let auth = match ctx.credential.clone() {
                 Some(secret) => DirectAuth::Bearer(secret),
                 None => DirectAuth::None,
             };
@@ -628,7 +740,7 @@ mod tests {
         r.register(ProviderProfile {
             id: "my-custom".into(),
             codec: || Arc::new(OpenAiChatCodec::new()),
-            transport_builder: Box::new(|_cred| {
+            transport_builder: Box::new(|_ctx| {
                 Ok(direct_with_codec(
                     "http://localhost:9999/v1".into(),
                     DirectAuth::None,
@@ -649,7 +761,7 @@ mod tests {
         r.register(ProviderProfile {
             id: "ollama".into(),
             codec: || Arc::new(OpenAiChatCodec::new()),
-            transport_builder: Box::new(|_cred| {
+            transport_builder: Box::new(|_ctx| {
                 Ok(direct_with_codec(
                     "http://my-internal-ollama:11434/v1".into(),
                     DirectAuth::None,
@@ -673,6 +785,255 @@ mod tests {
         assert_eq!(
             r.get("ollama").unwrap().default_model.as_deref(),
             Some("llama3.2")
+        );
+    }
+
+    // ── Phase G-3: credential resolution via injected EnvLookup ─────
+
+    /// In-memory [`EnvLookup`] fake used by the Phase G-3 test suite.
+    /// Deterministic and parallel-safe — tests never touch the
+    /// process-wide environment.
+    #[derive(Debug, Default)]
+    struct FakeEnv(std::collections::HashMap<String, String>);
+
+    impl FakeEnv {
+        fn with(mut self, key: &str, val: &str) -> Self {
+            self.0.insert(key.into(), val.into());
+            self
+        }
+    }
+
+    impl EnvLookup for FakeEnv {
+        fn get(&self, name: &str) -> Option<String> {
+            self.0.get(name).cloned()
+        }
+    }
+
+    fn unwrap_secret(hint: &CredentialHint, env: &dyn EnvLookup) -> String {
+        use secrecy::ExposeSecret;
+        hint.resolve_with("test", env)
+            .unwrap()
+            .unwrap()
+            .expose_secret()
+            .to_string()
+    }
+
+    #[test]
+    fn env_var_single_returns_value_when_present() {
+        let hint = CredentialHint::EnvVar {
+            name: "MY_KEY",
+            hint: "see docs",
+        };
+        let env = FakeEnv::default().with("MY_KEY", "top-secret");
+        assert_eq!(unwrap_secret(&hint, &env), "top-secret");
+    }
+
+    #[test]
+    fn env_var_single_missing_errors_with_name_and_hint() {
+        let hint = CredentialHint::EnvVar {
+            name: "MY_KEY",
+            hint: "https://example.com/keys",
+        };
+        let env = FakeEnv::default();
+        let err = hint.resolve_with("test", &env).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("MY_KEY") && msg.contains("https://example.com/keys"),
+            "error must surface both the var name and the user-facing hint: `{msg}`"
+        );
+    }
+
+    #[test]
+    fn env_var_one_of_first_match_wins() {
+        let hint = CredentialHint::EnvVarOneOf {
+            names: &["FIRST", "SECOND"],
+            hint: "set one",
+        };
+        let env = FakeEnv::default()
+            .with("FIRST", "first-value")
+            .with("SECOND", "second-value");
+        assert_eq!(unwrap_secret(&hint, &env), "first-value");
+    }
+
+    #[test]
+    fn env_var_one_of_second_match_when_first_missing() {
+        let hint = CredentialHint::EnvVarOneOf {
+            names: &["FIRST", "SECOND"],
+            hint: "set one",
+        };
+        let env = FakeEnv::default().with("SECOND", "second-value");
+        assert_eq!(unwrap_secret(&hint, &env), "second-value");
+    }
+
+    #[test]
+    fn env_var_one_of_all_missing_errors_lists_all_names() {
+        let hint = CredentialHint::EnvVarOneOf {
+            names: &["FIRST", "SECOND"],
+            hint: "set FIRST or SECOND",
+        };
+        let env = FakeEnv::default();
+        let err = hint.resolve_with("test", &env).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("FIRST") && msg.contains("SECOND"),
+            "error must name every candidate var: `{msg}`"
+        );
+    }
+
+    #[test]
+    fn none_hint_resolves_to_no_credential() {
+        let hint = CredentialHint::None;
+        let env = FakeEnv::default();
+        let result = hint.resolve_with("test", &env).unwrap();
+        assert!(
+            result.is_none(),
+            "None hint must produce no credential regardless of env"
+        );
+    }
+
+    #[test]
+    fn custom_closure_resolves_with_injected_env_ignored() {
+        use secrecy::ExposeSecret;
+        let hint = CredentialHint::Custom(Box::new(|| {
+            Ok(SecretString::from("closure-value".to_string()))
+        }));
+        let env = FakeEnv::default();
+        let resolved = hint
+            .resolve_with("test", &env)
+            .unwrap()
+            .expect("custom closure yields a credential");
+        assert_eq!(resolved.expose_secret(), "closure-value");
+    }
+
+    /// `ProfileRegistry::build_with` exercises the full preset
+    /// pipeline against a fake env. A profile whose credential is
+    /// present must build; a profile whose credential is missing
+    /// must surface a typed Config error pointing at the var name.
+    #[test]
+    fn profile_registry_build_with_fake_env_round_trips() {
+        let registry = ProfileRegistry::with_builtins();
+
+        // `anthropic` requires ANTHROPIC_API_KEY.
+        let ok_env = FakeEnv::default().with("ANTHROPIC_API_KEY", "sk-fake");
+        assert!(
+            registry.build_with("anthropic", &ok_env).is_ok(),
+            "build must succeed when the required key is present"
+        );
+
+        let missing_env = FakeEnv::default();
+        let err = registry.build_with("anthropic", &missing_env).unwrap_err();
+        assert!(
+            err.to_string().contains("ANTHROPIC_API_KEY"),
+            "missing credential error must name the var: `{err}`"
+        );
+    }
+
+    #[test]
+    fn profile_registry_build_with_unknown_id_errors() {
+        let registry = ProfileRegistry::with_builtins();
+        let env = FakeEnv::default();
+        let err = registry
+            .build_with("nonexistent-provider", &env)
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("nonexistent-provider"),
+            "unknown-profile error must name the id: `{err}`"
+        );
+    }
+
+    // ── Phase H-1: ProfileBuildContext seam ─────────────────────────
+
+    /// Phase H-1 regression: a profile builder that reads a base URL
+    /// override from `ctx.env` MUST see the injected `FakeEnv` value,
+    /// not the process environment. The pre-H-1 implementation called
+    /// `std::env::var` directly inside the closure and this test
+    /// would have failed because the injected fake was ignored.
+    ///
+    /// We exercise this through the `custom` profile path rather than
+    /// `anthropic` because we do not want the test to depend on a
+    /// real `DirectTransport::new` being built against a reachable
+    /// URL — instead we register a profile that simply echoes the
+    /// resolved base URL into a recorded cell.
+    #[test]
+    fn phase_h1_profile_builder_reads_base_url_from_injected_env() {
+        use std::sync::Mutex;
+
+        static RECORDED: Mutex<Option<String>> = Mutex::new(None);
+
+        let mut registry = ProfileRegistry::empty();
+        registry.register(ProviderProfile {
+            id: "h1-echo".into(),
+            codec: || Arc::new(OpenAiChatCodec::new()),
+            transport_builder: Box::new(|ctx| {
+                let base = ctx
+                    .env
+                    .get_or("H1_ECHO_BASE_URL", "https://default.invalid");
+                *RECORDED.lock().unwrap() = Some(base.clone());
+                Ok(direct_with_codec(base, DirectAuth::None, &["openai-chat"]))
+            }),
+            credential: CredentialHint::None,
+            default_model: Some("echo-model".into()),
+        });
+
+        let env = FakeEnv::default().with("H1_ECHO_BASE_URL", "http://mock.local:9999");
+        registry
+            .build_with("h1-echo", &env)
+            .expect("custom h1-echo profile must build against fake env");
+
+        let recorded = RECORDED.lock().unwrap().clone();
+        assert_eq!(
+            recorded.as_deref(),
+            Some("http://mock.local:9999"),
+            "transport_builder must read base URL through ctx.env, not std::env::var"
+        );
+    }
+
+    /// Phase H-1 regression: when a profile requires a credential but
+    /// none resolves, the error MUST name the offending profile id
+    /// (pre-H-1 builders called `cred.expect("... profile requires
+    /// credential")` with a hardcoded string, which made multi-profile
+    /// build sites hard to diagnose). The context-carried profile id
+    /// closes that gap.
+    #[test]
+    fn phase_h1_missing_credential_error_names_the_profile() {
+        let registry = ProfileRegistry::with_builtins();
+        let env = FakeEnv::default(); // no ANTHROPIC_API_KEY
+        let err = registry.build_with("anthropic", &env).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("anthropic") && msg.contains("ANTHROPIC_API_KEY"),
+            "credential-missing error must name both profile and var: `{msg}`"
+        );
+    }
+
+    /// Phase H-1 regression: `from_env_with` routes the selector and
+    /// every profile's base-URL override through a single injected
+    /// env, so a test can fully drive the "one-call entry point"
+    /// without touching process state.
+    #[tokio::test]
+    async fn phase_h1_from_env_with_respects_injected_selector() {
+        let env = FakeEnv::default()
+            .with("BRANCHFORGE_PROVIDER", "ollama")
+            .with("OLLAMA_BASE_URL", "http://mock-ollama:11434/v1");
+        // `ollama` profile has CredentialHint::None so no credential
+        // resolution is needed. We only verify that the selector and
+        // build path both honor the fake env.
+        from_env_with(&env)
+            .await
+            .expect("from_env_with must resolve and build through fake env");
+    }
+
+    /// Phase H-1 regression: `from_env_with` error path when the
+    /// selector is absent from the injected env. Lists the known
+    /// profile ids so the user can pick one.
+    #[tokio::test]
+    async fn phase_h1_from_env_with_missing_selector_lists_known() {
+        let env = FakeEnv::default(); // no BRANCHFORGE_PROVIDER
+        let err = from_env_with(&env).await.unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("BRANCHFORGE_PROVIDER") && msg.contains("anthropic"),
+            "missing-selector error must list known profiles: `{msg}`"
         );
     }
 }

@@ -337,6 +337,7 @@ impl ModelCodec for GeminiGenerateCodec {
             continuation: None,
             warnings: Vec::new(),
             raw: Some(raw),
+            rate_limit: None,
         })
     }
 

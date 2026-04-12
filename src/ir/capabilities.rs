@@ -11,6 +11,7 @@
 use serde::{Deserialize, Serialize};
 
 /// Tri-state support level for a single capability.
+#[non_exhaustive]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Support {
@@ -116,6 +117,7 @@ impl ToolCallSupport {
 /// because it cannot disambiguate parallel calls to the same function.
 /// Codecs whose wire format omits ids must use [`ToolIdSemantics::SynthesizedByIndex`] and
 /// the agent runtime must preserve part ordering when echoing tool results.
+#[non_exhaustive]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ToolIdSemantics {
@@ -181,6 +183,7 @@ impl CacheSupport {
 }
 
 /// At what granularity cache markers can be placed.
+#[non_exhaustive]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CacheGranularity {
@@ -221,6 +224,7 @@ impl ReasoningSupport {
 }
 
 /// How the system prompt is conveyed in the underlying wire format.
+#[non_exhaustive]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SystemPromptShape {

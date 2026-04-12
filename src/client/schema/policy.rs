@@ -9,6 +9,7 @@
 //! the Open-Closed Principle implemented as data rather than branches.
 
 /// Whether to close object schemas by adding `additionalProperties: false`.
+#[non_exhaustive]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ObjectClosure {
     /// Leave `additionalProperties` alone if not present (Gemini).
@@ -20,6 +21,7 @@ pub enum ObjectClosure {
 }
 
 /// How to handle `required` arrays on object schemas.
+#[non_exhaustive]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RequiredHandling {
     /// Preserve the user-supplied `required` array verbatim (Anthropic,
@@ -33,6 +35,7 @@ pub enum RequiredHandling {
 }
 
 /// How to handle `minItems` on array schemas.
+#[non_exhaustive]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MinItemsPolicy {
     /// Strip `minItems` unconditionally (OpenAI strict).

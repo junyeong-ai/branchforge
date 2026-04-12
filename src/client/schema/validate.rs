@@ -1,4 +1,4 @@
-//! Minimal JSON Schema validator for structured-output response bodies.
+//! JSON Schema validator for structured-output response bodies.
 //!
 //! Native structured-output providers CLAIM to honor the declared
 //! schema, but reality is messier: streaming interruptions, degraded
@@ -7,26 +7,15 @@
 //! is the post-decode guard that catches these cases before they reach
 //! application code.
 //!
-//! # Philosophy: minimal and conservative
+//! # Full Draft 2020-12 via `jsonschema` crate
 //!
-//! This is **not** a full JSON Schema validator. It intentionally
-//! covers the constraint subset that matters in practice for
-//! structured outputs:
-//!
-//! - JSON parseability
-//! - `type` (string / number / integer / boolean / object / array / null,
-//!   including `type` arrays)
-//! - `required` on objects
-//! - `properties` (recursive)
-//! - `additionalProperties: false`
-//! - `items` (single schema — tuple `prefixItems` is conservatively
-//!   treated as unconstrained)
-//! - `enum` (exact deep equality)
-//!
-//! Anything not in that list is silently **skipped** — the validator
-//! never produces a false positive for a constraint it does not
-//! understand. The goal is to detect plainly-wrong shapes, not to
-//! re-implement Draft 2020-12.
+//! This module delegates to the `jsonschema` crate, which implements
+//! the full JSON Schema Draft 2020-12 specification: `pattern`,
+//! `format`, `allOf` / `anyOf` / `oneOf`, `if` / `then` / `else`,
+//! numeric constraints (`minimum`, `maximum`, `multipleOf`), length
+//! constraints (`minLength`, `maxLength`, `minItems`, `maxItems`),
+//! and all the keywords that the previous hand-rolled walker
+//! silently skipped.
 //!
 //! # Where this runs
 //!
@@ -48,11 +37,17 @@ use crate::ir::JsonSchemaSpec;
 /// A specific reason a response text failed validation against a
 /// [`JsonSchemaSpec`]. Rendered into `Error::StructuredOutputInvalid`
 /// or a `ModelWarning` at the call site in `ProviderClient::send`.
+#[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum StructuredOutputValidationError {
+pub enum SchemaValidationError {
     /// The response body was not even a syntactically-valid JSON
     /// document. `reason` is the `serde_json` parser message.
     NotJson { reason: String },
+
+    /// The declared schema itself failed to compile. This is a
+    /// developer bug (invalid JSON Schema passed into the IR) rather
+    /// than a provider bug. `reason` is the compiler error message.
+    InvalidSchema { reason: String },
 
     /// A JSON Schema constraint was violated at the given JSON pointer
     /// inside the decoded document.
@@ -65,11 +60,14 @@ pub enum StructuredOutputValidationError {
     },
 }
 
-impl std::fmt::Display for StructuredOutputValidationError {
+impl std::fmt::Display for SchemaValidationError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::NotJson { reason } => {
                 write!(f, "response body is not valid JSON: {reason}")
+            }
+            Self::InvalidSchema { reason } => {
+                write!(f, "declared schema is not a valid JSON Schema: {reason}")
             }
             Self::Constraint { pointer, reason } => {
                 let at = if pointer.is_empty() { "root" } else { pointer };
@@ -79,178 +77,39 @@ impl std::fmt::Display for StructuredOutputValidationError {
     }
 }
 
-impl std::error::Error for StructuredOutputValidationError {}
+impl std::error::Error for SchemaValidationError {}
 
 /// Validate a raw response body string against a [`JsonSchemaSpec`].
 ///
-/// See the module docs for the supported constraint subset and
-/// conservative-skip policy.
+/// Delegates to `jsonschema::validator_for(&schema)` for full Draft
+/// 2020-12 compliance. If the declared schema itself is invalid,
+/// returns [`SchemaValidationError::InvalidSchema`].
+/// Otherwise, the first reported constraint violation becomes the
+/// return value — the validator reports the earliest failure in
+/// document order.
 pub fn validate_structured_output(
     body: &str,
     spec: &JsonSchemaSpec,
-) -> Result<(), StructuredOutputValidationError> {
-    let value: Value = serde_json::from_str(body.trim()).map_err(|e| {
-        StructuredOutputValidationError::NotJson {
+) -> Result<(), SchemaValidationError> {
+    let instance: Value =
+        serde_json::from_str(body.trim()).map_err(|e| SchemaValidationError::NotJson {
+            reason: e.to_string(),
+        })?;
+
+    let validator = jsonschema::validator_for(&spec.schema).map_err(|e| {
+        SchemaValidationError::InvalidSchema {
             reason: e.to_string(),
         }
     })?;
-    validate_value(&value, &spec.schema, "")
-}
 
-fn validate_value(
-    value: &Value,
-    schema: &Value,
-    pointer: &str,
-) -> Result<(), StructuredOutputValidationError> {
-    let schema_obj = match schema.as_object() {
-        Some(o) => o,
-        // Non-object schemas (e.g. the literal `true`) impose no
-        // constraints. The literal `false` rejects everything, but
-        // that is a degenerate case we do not expect from
-        // structured-output providers.
-        None => return Ok(()),
-    };
-
-    // `enum` — exact deep equality against one of the listed values.
-    if let Some(Value::Array(variants)) = schema_obj.get("enum")
-        && !variants.iter().any(|v| v == value)
-    {
-        return Err(StructuredOutputValidationError::Constraint {
-            pointer: pointer.to_string(),
-            reason: format!(
-                "value does not match any enum variant ({} choices)",
-                variants.len()
-            ),
+    if let Err(error) = validator.validate(&instance) {
+        return Err(SchemaValidationError::Constraint {
+            pointer: error.instance_path().as_str().to_string(),
+            reason: error.to_string(),
         });
-    }
-
-    // `const` — exact deep equality against a single value.
-    if let Some(expected) = schema_obj.get("const")
-        && expected != value
-    {
-        return Err(StructuredOutputValidationError::Constraint {
-            pointer: pointer.to_string(),
-            reason: "value does not match const".into(),
-        });
-    }
-
-    // `type` — string or array of strings. Any one match satisfies.
-    if let Some(type_field) = schema_obj.get("type") {
-        let matched = match type_field {
-            Value::String(t) => matches_type(value, t),
-            Value::Array(ts) => ts
-                .iter()
-                .filter_map(|t| t.as_str())
-                .any(|t| matches_type(value, t)),
-            _ => true, // malformed schema — skip
-        };
-        if !matched {
-            return Err(StructuredOutputValidationError::Constraint {
-                pointer: pointer.to_string(),
-                reason: format!(
-                    "expected type {}, got {}",
-                    type_field,
-                    json_type_name(value)
-                ),
-            });
-        }
-    }
-
-    // Object constraints.
-    if let Some(obj) = value.as_object() {
-        // `required`
-        if let Some(Value::Array(reqs)) = schema_obj.get("required") {
-            for req in reqs.iter().filter_map(|v| v.as_str()) {
-                if !obj.contains_key(req) {
-                    return Err(StructuredOutputValidationError::Constraint {
-                        pointer: pointer.to_string(),
-                        reason: format!("missing required property `{req}`"),
-                    });
-                }
-            }
-        }
-
-        // `properties` — recurse into declared children.
-        let properties = schema_obj.get("properties").and_then(Value::as_object);
-        if let Some(props) = properties {
-            for (name, child_schema) in props {
-                if let Some(child) = obj.get(name) {
-                    let child_pointer = format!("{pointer}/{}", escape_ptr(name));
-                    validate_value(child, child_schema, &child_pointer)?;
-                }
-            }
-        }
-
-        // `additionalProperties: false` — reject unknown keys. A
-        // sub-schema value (object) is conservatively skipped here;
-        // structured-output providers almost always use the bool form.
-        if let Some(Value::Bool(false)) = schema_obj.get("additionalProperties") {
-            let declared = properties.map(|p| p.keys().collect::<std::collections::HashSet<_>>());
-            if let Some(declared) = declared {
-                for key in obj.keys() {
-                    if !declared.contains(key) {
-                        return Err(StructuredOutputValidationError::Constraint {
-                            pointer: pointer.to_string(),
-                            reason: format!("unexpected additional property `{key}`"),
-                        });
-                    }
-                }
-            } else {
-                // No declared properties at all — every key is extra.
-                if let Some(key) = obj.keys().next() {
-                    return Err(StructuredOutputValidationError::Constraint {
-                        pointer: pointer.to_string(),
-                        reason: format!("unexpected additional property `{key}`"),
-                    });
-                }
-            }
-        }
-    }
-
-    // Array `items` — single schema form only. Tuple form
-    // (`prefixItems`) is conservatively skipped.
-    if let Some(arr) = value.as_array()
-        && let Some(items_schema) = schema_obj.get("items")
-        && items_schema.is_object()
-    {
-        for (i, item) in arr.iter().enumerate() {
-            let child_pointer = format!("{pointer}/{i}");
-            validate_value(item, items_schema, &child_pointer)?;
-        }
     }
 
     Ok(())
-}
-
-fn matches_type(value: &Value, ty: &str) -> bool {
-    match ty {
-        "string" => value.is_string(),
-        "number" => value.is_number(),
-        "integer" => {
-            value.is_i64() || value.is_u64() || value.as_f64().is_some_and(|f| f.fract() == 0.0)
-        }
-        "boolean" => value.is_boolean(),
-        "object" => value.is_object(),
-        "array" => value.is_array(),
-        "null" => value.is_null(),
-        _ => true, // unknown type keyword — conservative skip
-    }
-}
-
-fn json_type_name(value: &Value) -> &'static str {
-    match value {
-        Value::Null => "null",
-        Value::Bool(_) => "boolean",
-        Value::Number(_) => "number",
-        Value::String(_) => "string",
-        Value::Array(_) => "array",
-        Value::Object(_) => "object",
-    }
-}
-
-/// RFC 6901 token escaping for JSON pointer construction.
-fn escape_ptr(segment: &str) -> String {
-    segment.replace('~', "~0").replace('/', "~1")
 }
 
 #[cfg(test)]
@@ -283,10 +142,7 @@ mod tests {
     fn rejects_non_json() {
         let s = spec(json!({"type": "object"}));
         let err = validate_structured_output("not json at all", &s).unwrap_err();
-        assert!(matches!(
-            err,
-            StructuredOutputValidationError::NotJson { .. }
-        ));
+        assert!(matches!(err, SchemaValidationError::NotJson { .. }));
     }
 
     #[test]
@@ -294,9 +150,8 @@ mod tests {
         let s = spec(json!({"type": "object"}));
         let err = validate_structured_output("[1,2,3]", &s).unwrap_err();
         match err {
-            StructuredOutputValidationError::Constraint { pointer, reason } => {
+            SchemaValidationError::Constraint { pointer, .. } => {
                 assert_eq!(pointer, "");
-                assert!(reason.contains("expected type"));
             }
             other => panic!("expected Constraint, got {other:?}"),
         }
@@ -312,7 +167,7 @@ mod tests {
         let err = validate_structured_output(r#"{"name": "Ada"}"#, &s).unwrap_err();
         assert!(matches!(
             err,
-            StructuredOutputValidationError::Constraint { ref reason, .. } if reason.contains("age")
+            SchemaValidationError::Constraint { ref reason, .. } if reason.contains("age")
         ));
     }
 
@@ -326,7 +181,7 @@ mod tests {
         let err = validate_structured_output(r#"{"name": "Ada", "sneaky": 1}"#, &s).unwrap_err();
         assert!(matches!(
             err,
-            StructuredOutputValidationError::Constraint { ref reason, .. } if reason.contains("sneaky")
+            SchemaValidationError::Constraint { ref reason, .. } if reason.contains("sneaky")
         ));
     }
 
@@ -335,10 +190,11 @@ mod tests {
         let s = spec(json!({
             "type": "object",
             "properties": {"age": {"type": "integer"}},
+            "required": ["age"],
         }));
         let err = validate_structured_output(r#"{"age": "thirty"}"#, &s).unwrap_err();
         match err {
-            StructuredOutputValidationError::Constraint { pointer, .. } => {
+            SchemaValidationError::Constraint { pointer, .. } => {
                 assert_eq!(pointer, "/age");
             }
             other => panic!("expected Constraint at /age, got {other:?}"),
@@ -353,7 +209,7 @@ mod tests {
         }));
         let err = validate_structured_output("[1, 2, \"three\"]", &s).unwrap_err();
         match err {
-            StructuredOutputValidationError::Constraint { pointer, .. } => {
+            SchemaValidationError::Constraint { pointer, .. } => {
                 assert_eq!(pointer, "/2");
             }
             other => panic!("expected Constraint at /2, got {other:?}"),
@@ -362,8 +218,8 @@ mod tests {
 
     #[test]
     fn accepts_integer_as_whole_float() {
-        // Providers sometimes emit `30.0` for integer fields; as long
-        // as the value is whole, treat it as an integer.
+        // Draft 2020-12 treats `30.0` as an integer because the value is
+        // a whole number, matching the behaviour providers expect.
         let s = spec(json!({"type": "integer"}));
         validate_structured_output("30.0", &s).unwrap();
     }
@@ -372,23 +228,7 @@ mod tests {
     fn rejects_enum_mismatch() {
         let s = spec(json!({"enum": ["red", "green", "blue"]}));
         let err = validate_structured_output("\"purple\"", &s).unwrap_err();
-        assert!(matches!(
-            err,
-            StructuredOutputValidationError::Constraint { .. }
-        ));
-    }
-
-    #[test]
-    fn skips_unknown_keywords_conservatively() {
-        // `pattern`, `format`, `allOf` etc. are not implemented — the
-        // validator must not error on schemas that use them.
-        let s = spec(json!({
-            "type": "string",
-            "pattern": "^[A-Z]+$",
-            "format": "uuid",
-            "allOf": [{"type": "string"}],
-        }));
-        validate_structured_output("\"whatever\"", &s).unwrap();
+        assert!(matches!(err, SchemaValidationError::Constraint { .. }));
     }
 
     #[test]
@@ -400,33 +240,107 @@ mod tests {
                     "type": "object",
                     "properties": {
                         "age": {"type": "integer"}
-                    }
+                    },
+                    "required": ["age"]
                 }
-            }
+            },
+            "required": ["user"]
         }));
         let err = validate_structured_output(r#"{"user": {"age": "oops"}}"#, &s).unwrap_err();
         match err {
-            StructuredOutputValidationError::Constraint { pointer, .. } => {
+            SchemaValidationError::Constraint { pointer, .. } => {
                 assert_eq!(pointer, "/user/age");
             }
             other => panic!("expected /user/age, got {other:?}"),
         }
     }
 
+    // ── W-16 new coverage: keywords the hand-rolled walker skipped ─
+
+    /// `pattern` — string regex constraint.
     #[test]
-    fn escapes_json_pointer_special_chars() {
+    fn pattern_constraint_enforced() {
         let s = spec(json!({
             "type": "object",
-            "properties": {
-                "a/b": {"type": "integer"}
-            }
+            "properties": {"code": {"type": "string", "pattern": "^[A-Z]{3}$"}},
+            "required": ["code"]
         }));
-        let err = validate_structured_output(r#"{"a/b": "no"}"#, &s).unwrap_err();
+        validate_structured_output(r#"{"code": "ABC"}"#, &s).unwrap();
+        let err = validate_structured_output(r#"{"code": "abc"}"#, &s).unwrap_err();
         match err {
-            StructuredOutputValidationError::Constraint { pointer, .. } => {
-                assert_eq!(pointer, "/a~1b");
+            SchemaValidationError::Constraint { pointer, .. } => {
+                assert_eq!(pointer, "/code");
             }
-            other => panic!("expected escaped pointer, got {other:?}"),
+            other => panic!("expected Constraint at /code, got {other:?}"),
         }
+    }
+
+    /// `oneOf` — exactly one branch must match.
+    #[test]
+    fn one_of_constraint_enforced() {
+        let s = spec(json!({
+            "oneOf": [
+                {"type": "string"},
+                {"type": "integer"}
+            ]
+        }));
+        validate_structured_output("\"hello\"", &s).unwrap();
+        validate_structured_output("42", &s).unwrap();
+        let err = validate_structured_output("true", &s).unwrap_err();
+        assert!(matches!(err, SchemaValidationError::Constraint { .. }));
+    }
+
+    /// Numeric `minimum` / `maximum` constraints.
+    #[test]
+    fn numeric_bounds_enforced() {
+        let s = spec(json!({
+            "type": "object",
+            "properties": {"pct": {"type": "number", "minimum": 0, "maximum": 100}},
+            "required": ["pct"]
+        }));
+        validate_structured_output(r#"{"pct": 50}"#, &s).unwrap();
+        let err = validate_structured_output(r#"{"pct": 150}"#, &s).unwrap_err();
+        match err {
+            SchemaValidationError::Constraint { pointer, .. } => {
+                assert_eq!(pointer, "/pct");
+            }
+            other => panic!("expected /pct, got {other:?}"),
+        }
+    }
+
+    /// `minLength` / `maxLength` string length constraints.
+    #[test]
+    fn string_length_constraints_enforced() {
+        let s = spec(json!({
+            "type": "string",
+            "minLength": 3,
+            "maxLength": 10
+        }));
+        validate_structured_output("\"hello\"", &s).unwrap();
+        assert!(validate_structured_output("\"hi\"", &s).is_err());
+        assert!(validate_structured_output("\"this is too long\"", &s).is_err());
+    }
+
+    /// `allOf` — every branch must match.
+    #[test]
+    fn all_of_constraint_enforced() {
+        let s = spec(json!({
+            "allOf": [
+                {"type": "object", "required": ["a"]},
+                {"type": "object", "required": ["b"]}
+            ]
+        }));
+        validate_structured_output(r#"{"a": 1, "b": 2}"#, &s).unwrap();
+        assert!(validate_structured_output(r#"{"a": 1}"#, &s).is_err());
+    }
+
+    /// Invalid declared schema is surfaced as `InvalidSchema`, not
+    /// panicked through.
+    #[test]
+    fn invalid_schema_is_reported() {
+        // `type` must be a string or array of strings, not a number.
+        let s = spec(json!({"type": 42}));
+        let err = validate_structured_output("{}", &s).unwrap_err();
+        assert!(matches!(err, SchemaValidationError::InvalidSchema { .. }));
     }
 }

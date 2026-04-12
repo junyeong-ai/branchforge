@@ -10,7 +10,9 @@
 mod definition;
 mod error;
 mod output;
+mod overflow;
 
 pub use definition::{ToolSpec, estimate_tool_tokens};
 pub use error::ToolError;
 pub use output::{ToolInput, ToolOutput, ToolOutputBlock, ToolResult};
+pub use overflow::{MemoryOverflowStore, OverflowRef, OverflowStore, preview_of};

@@ -3,6 +3,7 @@
 use serde::{Deserialize, Serialize};
 
 use super::error::ToolError;
+use super::overflow::OverflowRef;
 use crate::ir::Usage;
 
 #[derive(Debug, Clone)]
@@ -12,6 +13,7 @@ pub struct ToolInput {
     pub input: serde_json::Value,
 }
 
+#[non_exhaustive]
 #[derive(Debug, Clone)]
 pub enum ToolOutput {
     Success(String),
@@ -20,6 +22,7 @@ pub enum ToolOutput {
     Empty,
 }
 
+#[non_exhaustive]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ToolOutputBlock {
@@ -135,6 +138,12 @@ pub struct ToolResult {
     pub output: ToolOutput,
     pub inner_usage: Option<Usage>,
     pub inner_model: Option<String>,
+    /// Phase C-7: pointer to spilled content when `output` was
+    /// truncated by the result-size spill policy. `None` means the
+    /// inline payload is the full content. Consumers that need the
+    /// original bytes (diff viewers, search re-rankers) call
+    /// [`crate::tools::OverflowStore::load`] with `overflow.id`.
+    pub overflow: Option<OverflowRef>,
 }
 
 impl ToolResult {
@@ -143,6 +152,7 @@ impl ToolResult {
             output: ToolOutput::success(content),
             inner_usage: None,
             inner_model: None,
+            overflow: None,
         }
     }
 
@@ -151,6 +161,7 @@ impl ToolResult {
             output: ToolOutput::error(message),
             inner_usage: None,
             inner_model: None,
+            overflow: None,
         }
     }
 
@@ -159,6 +170,7 @@ impl ToolResult {
             output: ToolOutput::Empty,
             inner_usage: None,
             inner_model: None,
+            overflow: None,
         }
     }
 
@@ -175,6 +187,13 @@ impl ToolResult {
     pub fn inner_call(mut self, usage: Usage, model: impl Into<String>) -> Self {
         self.inner_usage = Some(usage);
         self.inner_model = Some(model.into());
+        self
+    }
+
+    /// Attach an [`OverflowRef`] to this result. Used by
+    /// [`crate::tools::ToolRegistry`] after spilling oversized output.
+    pub fn with_overflow(mut self, overflow: OverflowRef) -> Self {
+        self.overflow = Some(overflow);
         self
     }
 
@@ -210,6 +229,7 @@ impl ToolResult {
             output: ToolOutput::authorization_denied(tool, reason),
             inner_usage: None,
             inner_model: None,
+            overflow: None,
         }
     }
 
@@ -218,6 +238,7 @@ impl ToolResult {
             output: ToolOutput::tool_error(ToolError::unknown_tool(name)),
             inner_usage: None,
             inner_model: None,
+            overflow: None,
         }
     }
 
@@ -226,6 +247,7 @@ impl ToolResult {
             output: ToolOutput::timeout(timeout_ms),
             inner_usage: None,
             inner_model: None,
+            overflow: None,
         }
     }
 
@@ -234,6 +256,7 @@ impl ToolResult {
             output: ToolOutput::security_error(message),
             inner_usage: None,
             inner_model: None,
+            overflow: None,
         }
     }
 }
@@ -244,6 +267,7 @@ impl From<ToolOutput> for ToolResult {
             output,
             inner_usage: None,
             inner_model: None,
+            overflow: None,
         }
     }
 }

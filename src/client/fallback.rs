@@ -45,6 +45,7 @@ impl FallbackConfig {
     }
 }
 
+#[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum FallbackTrigger {
     Overloaded,
@@ -86,6 +87,7 @@ mod tests {
             hint: None,
             retryable: false,
             status: Some(401),
+            rate_limit: None,
         };
         assert!(!config.should_fallback(&auth_error));
     }
@@ -129,6 +131,7 @@ mod tests {
             hint: None,
             retryable: true,
             status: Some(500),
+            rate_limit: None,
         };
         assert!(config.should_fallback(&server_error));
     }

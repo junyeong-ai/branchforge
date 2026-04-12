@@ -39,12 +39,15 @@ pub struct EventStreamHeader {
     pub value: HeaderValue,
 }
 
-/// Header value types. We only decode the types actually used by Bedrock.
+/// Header value types. Bedrock event streams use string headers
+/// for the fields we care about (`:event-type`, `:content-type`,
+/// `:message-type`). Everything else — bools, ints, bytes blobs,
+/// timestamps — collapses into [`Self::Other`] because no caller
+/// reads them.
+#[non_exhaustive]
 #[derive(Debug, Clone)]
 pub enum HeaderValue {
     String(String),
-    #[allow(dead_code)]
-    Bytes(Vec<u8>),
     Other,
 }
 
@@ -216,7 +219,10 @@ fn decode_headers(mut data: &[u8]) -> Result<Vec<EventStreamHeader>, DecodeError
                 data.advance(value_len);
                 HeaderValue::String(s)
             }
-            // Type 6 = Bytes: [value_length: u16] [value: bytes]
+            // Type 6 = Bytes: [value_length: u16] [value: bytes].
+            // We advance past the payload but do not retain it —
+            // Bedrock only sends bytes headers for fields this
+            // client does not consume.
             6 => {
                 if data.len() < 2 {
                     return Err(DecodeError::TruncatedHeader);
@@ -226,9 +232,8 @@ fn decode_headers(mut data: &[u8]) -> Result<Vec<EventStreamHeader>, DecodeError
                 if data.len() < value_len {
                     return Err(DecodeError::TruncatedHeader);
                 }
-                let b = data[..value_len].to_vec();
                 data.advance(value_len);
-                HeaderValue::Bytes(b)
+                HeaderValue::Other
             }
             // Type 0 = Bool true (no payload)
             0 => HeaderValue::Other,
@@ -294,6 +299,7 @@ fn decode_headers(mut data: &[u8]) -> Result<Vec<EventStreamHeader>, DecodeError
 }
 
 /// Errors that can occur during Event Stream frame decoding.
+#[non_exhaustive]
 #[derive(Debug, thiserror::Error)]
 pub enum DecodeError {
     #[error("invalid frame total length: {0}")]

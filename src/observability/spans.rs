@@ -24,6 +24,7 @@ pub struct TracingConfig {
     pub level: TracingLevel,
 }
 
+#[non_exhaustive]
 #[derive(Clone, Copy, Default, PartialEq, Eq)]
 pub enum TracingLevel {
     #[default]

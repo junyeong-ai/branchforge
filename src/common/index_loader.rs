@@ -4,6 +4,7 @@ use std::future::Future;
 use std::path::Path;
 use std::pin::Pin;
 
+#[non_exhaustive]
 pub enum DirAction {
     Recurse,
     LoadFile(std::path::PathBuf),

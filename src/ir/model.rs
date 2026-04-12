@@ -215,6 +215,13 @@ pub struct ModelResponse {
     /// **Application logic must not read this field.**
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub raw: Option<serde_json::Value>,
+
+    /// Phase C-6: point-in-time rate-limit accounting parsed from
+    /// provider response headers. `None` when the transport does not
+    /// publish rate-limit headers or the codec-level response carries
+    /// no HTTP context (e.g. streaming chunk reassembly path).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rate_limit: Option<super::RateLimitSnapshot>,
 }
 
 impl ModelResponse {
@@ -326,6 +333,66 @@ impl ModelResponse {
             continuation: None,
             warnings: Vec::new(),
             raw: None,
+            rate_limit: None,
+        }
+    }
+
+    /// Construct a minimal response that calls a single tool.
+    ///
+    /// `finish_reason` is [`FinishReason::ToolCalls`] so the agent
+    /// loop will dispatch the tool and continue. Useful for tests
+    /// that script a multi-turn conversation where each turn is a
+    /// discrete tool call.
+    pub fn from_tool_call(
+        id: impl Into<String>,
+        name: impl Into<String>,
+        arguments: serde_json::Value,
+    ) -> Self {
+        Self {
+            id: String::new(),
+            model: String::new(),
+            content: vec![ContentPart::ToolCall {
+                id: id.into(),
+                name: name.into(),
+                arguments,
+                origin: crate::ir::ToolOrigin::Local,
+            }],
+            finish_reason: FinishReason::ToolCalls,
+            usage: Usage::default(),
+            continuation: None,
+            warnings: Vec::new(),
+            raw: None,
+            rate_limit: None,
+        }
+    }
+
+    /// Construct a response that emits a leading text part followed
+    /// by a single tool call. Matches the common pattern where a
+    /// model narrates its plan before invoking a tool.
+    pub fn from_text_and_tool_call(
+        text: impl Into<String>,
+        id: impl Into<String>,
+        name: impl Into<String>,
+        arguments: serde_json::Value,
+    ) -> Self {
+        Self {
+            id: String::new(),
+            model: String::new(),
+            content: vec![
+                ContentPart::text(text),
+                ContentPart::ToolCall {
+                    id: id.into(),
+                    name: name.into(),
+                    arguments,
+                    origin: crate::ir::ToolOrigin::Local,
+                },
+            ],
+            finish_reason: FinishReason::ToolCalls,
+            usage: Usage::default(),
+            continuation: None,
+            warnings: Vec::new(),
+            raw: None,
+            rate_limit: None,
         }
     }
 }
@@ -392,6 +459,7 @@ pub enum Role {
 }
 
 /// Top-level system prompt.
+#[non_exhaustive]
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum SystemPrompt {
@@ -484,6 +552,7 @@ impl From<&str> for SystemPrompt {
 /// approach: the role is a typed field that the IR contract
 /// enforces uniformly, so a codec cannot accidentally let the
 /// marker text leak into the system prompt.
+#[non_exhaustive]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SystemBlockRole {
@@ -607,6 +676,7 @@ impl ToolDefinition {
 }
 
 /// Tool selection strategy.
+#[non_exhaustive]
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ToolChoice {
@@ -621,6 +691,7 @@ pub enum ToolChoice {
 }
 
 /// Structured-output response format.
+#[non_exhaustive]
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ResponseFormat {
@@ -774,6 +845,7 @@ fn short_type_name<T>() -> &'static str {
 
 /// Stateful continuation handle for providers that retain conversation
 /// state on their side (currently only OpenAI Responses).
+#[non_exhaustive]
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Continuation {
@@ -880,6 +952,7 @@ mod tests {
             continuation: None,
             warnings: Vec::new(),
             raw: None,
+            rate_limit: None,
         };
         assert_eq!(r.text(), "hello\nworld");
         assert_eq!(r.tool_calls().count(), 1);

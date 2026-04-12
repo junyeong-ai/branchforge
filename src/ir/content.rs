@@ -25,6 +25,7 @@ use serde::{Deserialize, Serialize};
 ///   version so the originating codec can verify "I wrote this, I can read
 ///   it back". Cross-codec sends drop the part with a warning rather than
 ///   silently succeeding.
+#[non_exhaustive]
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ContentPart {
@@ -228,6 +229,7 @@ impl ContentPart {
 }
 
 /// Source of media content (image, document, …).
+#[non_exhaustive]
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum MediaSource {
@@ -242,6 +244,7 @@ pub enum MediaSource {
 }
 
 /// Where the tool being called lives.
+#[non_exhaustive]
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ToolOrigin {
@@ -258,6 +261,7 @@ pub enum ToolOrigin {
 }
 
 /// Content of a [`ContentPart::ToolResult`].
+#[non_exhaustive]
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum ToolResultContent {
@@ -272,6 +276,7 @@ pub enum ToolResultContent {
 }
 
 /// Reasoning content visibility.
+#[non_exhaustive]
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "visibility", rename_all = "snake_case")]
 pub enum ReasoningContent {
@@ -286,6 +291,7 @@ pub enum ReasoningContent {
 
 /// Whether the reasoning part is the model's full reasoning trace or only a
 /// summary the provider chose to expose.
+#[non_exhaustive]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ReasoningKind {

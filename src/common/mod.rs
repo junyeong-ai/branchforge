@@ -1,6 +1,7 @@
 pub mod circuit;
 mod content_source;
 mod directory;
+pub mod env;
 mod extensions;
 #[cfg(feature = "file-resources")]
 mod file_provider;
@@ -21,6 +22,7 @@ pub use content_source::ContentSource;
 pub(crate) use directory::is_skill_file;
 #[cfg(feature = "file-resources")]
 pub(crate) use directory::{is_markdown, load_files};
+pub use env::{EnvLookup, SystemEnv};
 pub use extensions::Extensions;
 
 pub(crate) fn home_dir() -> Option<PathBuf> {

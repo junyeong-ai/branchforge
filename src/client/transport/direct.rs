@@ -16,6 +16,7 @@ use crate::Result;
 use crate::client::codec::{EndpointShape, HeaderSource, InvocationMode};
 
 /// Authentication scheme for [`DirectTransport`].
+#[non_exhaustive]
 #[derive(Clone)]
 pub enum DirectAuth {
     /// `x-api-key: <key>`. Used by Anthropic Direct.
@@ -200,6 +201,131 @@ fn trim_trailing_slash(mut s: String) -> String {
     s
 }
 
+/// Phase C-6: decode a [`crate::ir::RateLimitSnapshot`] from the
+/// response headers of a `DirectTransport` call.
+///
+/// Reads both Anthropic and OpenAI header conventions in one pass
+/// — the direct transport is shared across all three presets, and
+/// discriminating by preset would require plumbing the codec id
+/// into the call. Cheaper to try both and take whatever the server
+/// published.
+///
+/// Returns `None` when no recognisable rate-limit header is present,
+/// so the caller can tell "no snapshot" apart from "all zeros".
+fn parse_direct_rate_limit(
+    headers: &reqwest::header::HeaderMap,
+) -> Option<crate::ir::RateLimitSnapshot> {
+    use chrono::{DateTime, Utc};
+
+    fn get_u64(headers: &reqwest::header::HeaderMap, name: &str) -> Option<u64> {
+        headers.get(name)?.to_str().ok()?.parse().ok()
+    }
+
+    fn get_reset(headers: &reqwest::header::HeaderMap, name: &str) -> Option<DateTime<Utc>> {
+        let raw = headers.get(name)?.to_str().ok()?;
+        // Anthropic: ISO 8601 absolute timestamp.
+        if let Ok(ts) = DateTime::parse_from_rfc3339(raw) {
+            return Some(ts.with_timezone(&Utc));
+        }
+        // OpenAI: duration string like "1s" / "6m0s" / "1h3m2s".
+        // Parse naively by scanning digits + unit letters.
+        let mut total = 0i64;
+        let mut buf = String::new();
+        for ch in raw.chars() {
+            if ch.is_ascii_digit() || ch == '.' {
+                buf.push(ch);
+            } else {
+                let n: f64 = buf.parse().ok()?;
+                total += match ch {
+                    'h' => (n * 3600.0) as i64,
+                    'm' => (n * 60.0) as i64,
+                    's' => n as i64,
+                    'd' => (n * 86400.0) as i64,
+                    _ => return None,
+                };
+                buf.clear();
+            }
+        }
+        if total == 0 && buf.is_empty() {
+            return None;
+        }
+        // Trailing bare number (seconds) is tolerated.
+        if let Ok(n) = buf.parse::<i64>() {
+            total += n;
+        }
+        Some(Utc::now() + chrono::Duration::seconds(total))
+    }
+
+    let mut snap = crate::ir::RateLimitSnapshot::default();
+    let mut any = false;
+
+    // Anthropic headers (take precedence when present).
+    if let Some(v) = get_u64(headers, "anthropic-ratelimit-requests-limit") {
+        snap.requests_limit = Some(v);
+        any = true;
+    }
+    if let Some(v) = get_u64(headers, "anthropic-ratelimit-requests-remaining") {
+        snap.requests_remaining = Some(v);
+        any = true;
+    }
+    if let Some(v) = get_reset(headers, "anthropic-ratelimit-requests-reset") {
+        snap.requests_reset = Some(v);
+        any = true;
+    }
+    if let Some(v) = get_u64(headers, "anthropic-ratelimit-tokens-limit") {
+        snap.tokens_limit = Some(v);
+        any = true;
+    }
+    if let Some(v) = get_u64(headers, "anthropic-ratelimit-tokens-remaining") {
+        snap.tokens_remaining = Some(v);
+        any = true;
+    }
+    if let Some(v) = get_reset(headers, "anthropic-ratelimit-tokens-reset") {
+        snap.tokens_reset = Some(v);
+        any = true;
+    }
+
+    // OpenAI headers (merged into whatever Anthropic left unset).
+    if snap.requests_limit.is_none()
+        && let Some(v) = get_u64(headers, "x-ratelimit-limit-requests")
+    {
+        snap.requests_limit = Some(v);
+        any = true;
+    }
+    if snap.requests_remaining.is_none()
+        && let Some(v) = get_u64(headers, "x-ratelimit-remaining-requests")
+    {
+        snap.requests_remaining = Some(v);
+        any = true;
+    }
+    if snap.requests_reset.is_none()
+        && let Some(v) = get_reset(headers, "x-ratelimit-reset-requests")
+    {
+        snap.requests_reset = Some(v);
+        any = true;
+    }
+    if snap.tokens_limit.is_none()
+        && let Some(v) = get_u64(headers, "x-ratelimit-limit-tokens")
+    {
+        snap.tokens_limit = Some(v);
+        any = true;
+    }
+    if snap.tokens_remaining.is_none()
+        && let Some(v) = get_u64(headers, "x-ratelimit-remaining-tokens")
+    {
+        snap.tokens_remaining = Some(v);
+        any = true;
+    }
+    if snap.tokens_reset.is_none()
+        && let Some(v) = get_reset(headers, "x-ratelimit-reset-tokens")
+    {
+        snap.tokens_reset = Some(v);
+        any = true;
+    }
+
+    any.then_some(snap)
+}
+
 #[async_trait]
 impl ModelTransport for DirectTransport {
     fn id(&self) -> &'static str {
@@ -317,6 +443,13 @@ impl ModelTransport for DirectTransport {
             ),
             _ => super::default_classify_status(status),
         }
+    }
+
+    fn parse_rate_limit(
+        &self,
+        headers: &reqwest::header::HeaderMap,
+    ) -> Option<crate::ir::RateLimitSnapshot> {
+        parse_direct_rate_limit(headers)
     }
 
     async fn refresh(&self) -> Result<()> {
@@ -554,6 +687,70 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(ep.url, "https://api.anthropic.com/v1/messages");
+    }
+
+    #[test]
+    fn parse_rate_limit_reads_anthropic_headers() {
+        use reqwest::header::{HeaderMap, HeaderValue};
+        let mut h = HeaderMap::new();
+        h.insert(
+            "anthropic-ratelimit-requests-limit",
+            HeaderValue::from_static("1000"),
+        );
+        h.insert(
+            "anthropic-ratelimit-requests-remaining",
+            HeaderValue::from_static("950"),
+        );
+        h.insert(
+            "anthropic-ratelimit-requests-reset",
+            HeaderValue::from_static("2026-04-11T19:30:00Z"),
+        );
+        h.insert(
+            "anthropic-ratelimit-tokens-limit",
+            HeaderValue::from_static("400000"),
+        );
+        h.insert(
+            "anthropic-ratelimit-tokens-remaining",
+            HeaderValue::from_static("250000"),
+        );
+        let snap = super::parse_direct_rate_limit(&h).expect("snapshot present");
+        assert_eq!(snap.requests_limit, Some(1000));
+        assert_eq!(snap.requests_remaining, Some(950));
+        assert_eq!(snap.tokens_limit, Some(400_000));
+        assert_eq!(snap.tokens_remaining, Some(250_000));
+        assert!(snap.requests_reset.is_some());
+    }
+
+    #[test]
+    fn parse_rate_limit_reads_openai_headers() {
+        use reqwest::header::{HeaderMap, HeaderValue};
+        let mut h = HeaderMap::new();
+        h.insert(
+            "x-ratelimit-limit-requests",
+            HeaderValue::from_static("5000"),
+        );
+        h.insert(
+            "x-ratelimit-remaining-requests",
+            HeaderValue::from_static("4999"),
+        );
+        h.insert(
+            "x-ratelimit-limit-tokens",
+            HeaderValue::from_static("200000"),
+        );
+        h.insert(
+            "x-ratelimit-remaining-tokens",
+            HeaderValue::from_static("199900"),
+        );
+        let snap = super::parse_direct_rate_limit(&h).expect("snapshot present");
+        assert_eq!(snap.requests_limit, Some(5000));
+        assert_eq!(snap.requests_remaining, Some(4999));
+        assert_eq!(snap.tokens_remaining, Some(199_900));
+    }
+
+    #[test]
+    fn parse_rate_limit_returns_none_when_no_headers_match() {
+        use reqwest::header::HeaderMap;
+        assert!(super::parse_direct_rate_limit(&HeaderMap::new()).is_none());
     }
 
     #[test]

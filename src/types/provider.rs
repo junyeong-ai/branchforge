@@ -12,6 +12,7 @@ use serde::{Deserialize, Serialize};
 ///
 /// Used for provider-aware cost attribution when calculating pricing
 /// across different API providers (Anthropic, OpenAI, Gemini, etc.).
+#[non_exhaustive]
 #[derive(Clone, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum UsageProvider {
     #[default]

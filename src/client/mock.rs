@@ -16,6 +16,7 @@ use crate::Result;
 use crate::ir::{ModelResponse, ModelStreamChunk};
 
 /// One scripted response in the mock queue.
+#[non_exhaustive]
 pub enum MockResponse {
     /// A complete unary response.
     Unary(Box<ModelResponse>),
@@ -78,6 +79,39 @@ impl MockLlmCall {
         self
     }
 
+    /// Enqueue a text-only assistant response. Shortcut for
+    /// `then_response(ModelResponse::from_text(text))`.
+    pub fn then_text(self, text: impl Into<String>) -> Self {
+        self.then_response(ModelResponse::from_text(text))
+    }
+
+    /// Enqueue an assistant response that calls a single tool.
+    /// Shortcut for `then_response(ModelResponse::from_tool_call(...))`.
+    pub fn then_tool_call(
+        self,
+        id: impl Into<String>,
+        name: impl Into<String>,
+        arguments: serde_json::Value,
+    ) -> Self {
+        self.then_response(ModelResponse::from_tool_call(id, name, arguments))
+    }
+
+    /// Enqueue an assistant response that narrates a text block and
+    /// then calls a tool — the common "let me check …" pattern.
+    /// Shortcut for
+    /// `then_response(ModelResponse::from_text_and_tool_call(...))`.
+    pub fn then_text_and_tool_call(
+        self,
+        text: impl Into<String>,
+        id: impl Into<String>,
+        name: impl Into<String>,
+        arguments: serde_json::Value,
+    ) -> Self {
+        self.then_response(ModelResponse::from_text_and_tool_call(
+            text, id, name, arguments,
+        ))
+    }
+
     /// Enqueue a streaming response as a vec of chunk results.
     pub fn then_stream(self, chunks: Vec<Result<ModelStreamChunk>>) -> Self {
         self.queue
@@ -85,6 +119,73 @@ impl MockLlmCall {
             .unwrap()
             .push_back(MockResponse::Stream(chunks));
         self
+    }
+
+    /// Enqueue a scripted text-only streaming response: a
+    /// `MessageStart`, one `TextDelta` per chunk in `deltas`, then a
+    /// `Finish` with `FinishReason::Stop`. Matches the wire shape
+    /// every real codec emits, so agent-loop tests that exercise
+    /// streaming can avoid hand-rolling the Start/Delta/Finish
+    /// triad.
+    pub fn then_stream_text(self, deltas: impl IntoIterator<Item = impl Into<String>>) -> Self {
+        use crate::ir::{FinishReason, Role, Usage};
+
+        let mut chunks: Vec<Result<ModelStreamChunk>> = vec![Ok(ModelStreamChunk::MessageStart {
+            id: String::new(),
+            model: String::new(),
+            role: Role::Assistant,
+        })];
+        for delta in deltas {
+            chunks.push(Ok(ModelStreamChunk::TextDelta {
+                index: 0,
+                text: delta.into(),
+            }));
+        }
+        chunks.push(Ok(ModelStreamChunk::Finish {
+            reason: FinishReason::Stop,
+            usage: Usage::default(),
+        }));
+        self.then_stream(chunks)
+    }
+
+    /// Enqueue a scripted streaming response that emits one tool
+    /// call. The generated sequence is
+    /// `MessageStart → ToolCallStart → ToolCallArgsDelta → ToolCallEnd → Finish(ToolCalls)`
+    /// with `arguments` serialised as a single JSON fragment —
+    /// matches the canonical wire shape every codec produces for
+    /// non-streaming tool arguments.
+    pub fn then_stream_tool_call(
+        self,
+        id: impl Into<String>,
+        name: impl Into<String>,
+        arguments: serde_json::Value,
+    ) -> Self {
+        use crate::ir::{FinishReason, Role, ToolOrigin, Usage};
+
+        let partial_json = serde_json::to_string(&arguments).unwrap_or_else(|_| "{}".to_string());
+        let chunks: Vec<Result<ModelStreamChunk>> = vec![
+            Ok(ModelStreamChunk::MessageStart {
+                id: String::new(),
+                model: String::new(),
+                role: Role::Assistant,
+            }),
+            Ok(ModelStreamChunk::ToolCallStart {
+                index: 0,
+                id: id.into(),
+                name: name.into(),
+                origin: ToolOrigin::Local,
+            }),
+            Ok(ModelStreamChunk::ToolCallArgsDelta {
+                index: 0,
+                partial_json,
+            }),
+            Ok(ModelStreamChunk::ToolCallEnd { index: 0 }),
+            Ok(ModelStreamChunk::Finish {
+                reason: FinishReason::ToolCalls,
+                usage: Usage::default(),
+            }),
+        ];
+        self.then_stream(chunks)
     }
 
     /// Enqueue an error.
@@ -239,5 +340,117 @@ mod tests {
     async fn panics_when_queue_empty() {
         let mock = MockLlmCall::new();
         let _ = mock.send(&simple_request()).await;
+    }
+
+    #[tokio::test]
+    async fn then_text_shortcut() {
+        let mock = MockLlmCall::new().then_text("hi");
+        let resp = mock.send(&simple_request()).await.unwrap();
+        assert_eq!(resp.text(), "hi");
+    }
+
+    #[tokio::test]
+    async fn then_tool_call_shortcut() {
+        let mock =
+            MockLlmCall::new().then_tool_call("call_1", "Bash", serde_json::json!({"cmd": "ls"}));
+        let resp = mock.send(&simple_request()).await.unwrap();
+        assert!(matches!(resp.finish_reason, FinishReason::ToolCalls));
+        let tool_calls: Vec<_> = resp.tool_calls().collect();
+        assert_eq!(tool_calls.len(), 1);
+        if let crate::ir::ContentPart::ToolCall { id, name, .. } = tool_calls[0] {
+            assert_eq!(id, "call_1");
+            assert_eq!(name, "Bash");
+        } else {
+            panic!("expected ToolCall");
+        }
+    }
+
+    #[tokio::test]
+    async fn then_stream_text_builds_full_chunk_sequence() {
+        let mock = MockLlmCall::new().then_stream_text(["Hello ", "world"]);
+        let stream = mock
+            .send_stream(
+                &simple_request(),
+                tokio_util::sync::CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+        let chunks: Vec<_> = stream.collect().await;
+        // Start + 2 deltas + Finish
+        assert_eq!(chunks.len(), 4);
+        assert!(matches!(
+            chunks[0].as_ref().unwrap(),
+            ModelStreamChunk::MessageStart { .. }
+        ));
+        assert!(matches!(
+            chunks[3].as_ref().unwrap(),
+            ModelStreamChunk::Finish { .. }
+        ));
+    }
+
+    #[tokio::test]
+    async fn then_stream_tool_call_builds_full_sequence() {
+        let mock = MockLlmCall::new().then_stream_tool_call(
+            "call_1",
+            "Bash",
+            serde_json::json!({"cmd": "ls"}),
+        );
+        let stream = mock
+            .send_stream(
+                &simple_request(),
+                tokio_util::sync::CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+        let chunks: Vec<_> = stream.collect().await;
+        // MessageStart + ToolCallStart + ToolCallArgsDelta + ToolCallEnd + Finish(ToolCalls)
+        assert_eq!(chunks.len(), 5);
+        assert!(matches!(
+            chunks[1].as_ref().unwrap(),
+            ModelStreamChunk::ToolCallStart { .. }
+        ));
+        assert!(matches!(
+            chunks[4].as_ref().unwrap(),
+            ModelStreamChunk::Finish {
+                reason: FinishReason::ToolCalls,
+                ..
+            }
+        ));
+    }
+
+    /// B-4 end-to-end: a three-turn scripted conversation
+    /// (text + tool call → text → text) using nothing but the
+    /// fluent `then_*` helpers. Proves the full agent-loop shape
+    /// is testable without hand-rolling a single JSON literal.
+    #[tokio::test]
+    async fn scripted_three_turn_conversation() {
+        let mock = MockLlmCall::new()
+            .then_text_and_tool_call(
+                "Let me search",
+                "call_1",
+                "Search",
+                serde_json::json!({"query": "rust async"}),
+            )
+            .then_text("Here are the results")
+            .then_text("Done");
+
+        // 3 items in the queue.
+        assert_eq!(mock.remaining(), 3);
+
+        // First turn: assistant narrates + calls a tool.
+        let r1 = mock.send(&simple_request()).await.unwrap();
+        assert_eq!(r1.text(), "Let me search");
+        assert!(matches!(r1.finish_reason, FinishReason::ToolCalls));
+
+        // Second turn: assistant reports after tool result fed in.
+        let r2 = mock.send(&simple_request()).await.unwrap();
+        assert_eq!(r2.text(), "Here are the results");
+
+        // Third turn: final answer.
+        let r3 = mock.send(&simple_request()).await.unwrap();
+        assert_eq!(r3.text(), "Done");
+
+        assert_eq!(mock.call_count(), 3);
+        assert_eq!(mock.remaining(), 0);
     }
 }

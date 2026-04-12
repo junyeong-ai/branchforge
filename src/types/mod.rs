@@ -15,5 +15,6 @@ pub use metrics::ModelUsage;
 pub use provider::UsageProvider;
 pub use server_tool::ServerToolUse;
 pub use tool::{
-    ToolError, ToolInput, ToolOutput, ToolOutputBlock, ToolResult, ToolSpec, estimate_tool_tokens,
+    MemoryOverflowStore, OverflowRef, OverflowStore, ToolError, ToolInput, ToolOutput,
+    ToolOutputBlock, ToolResult, ToolSpec, estimate_tool_tokens, preview_of,
 };

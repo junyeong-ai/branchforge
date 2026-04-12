@@ -5,5 +5,12 @@
 //! which handles fail-closed, security-critical hooks.
 
 mod bus;
+mod typed;
 
 pub use bus::{Event, EventBus, EventKind, SubscriberFn, SubscriptionHandle, SubscriptionId};
+pub use typed::{
+    BranchForkedPayload, BudgetAlertPayload, CacheBreakObservedPayload, CheckpointCreatedPayload,
+    EventPayload, RateLimitApproachingPayload, RateLimitObservedPayload, SessionCompactedPayload,
+    StreamChunkKind, StreamChunkPayload, TokensConsumedPayload, ToolExecutedPayload,
+    ToolProgressPayload,
+};
