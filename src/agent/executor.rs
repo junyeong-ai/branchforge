@@ -108,6 +108,8 @@ impl Agent {
             execution_mode: ExecutionMode::Auto,
             human: None,
             context_scope: None,
+            iteration_gate: Arc::new(super::policy::DefaultIterationGate),
+            tool_selection_strategy: Arc::new(super::policy::DefaultToolSelectionStrategy),
             _shutdown_guard: shutdown.clone().drop_guard(),
             shutdown,
         });

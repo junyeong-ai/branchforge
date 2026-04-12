@@ -66,6 +66,12 @@ impl AgentBuilder {
 
         agent.runtime_mut().execution_mode = self.execution_mode;
         agent.runtime_mut().human = self.human;
+        if let Some(gate) = self.iteration_gate {
+            agent.runtime_mut().iteration_gate = gate;
+        }
+        if let Some(strategy) = self.tool_selection_strategy {
+            agent.runtime_mut().tool_selection_strategy = strategy;
+        }
 
         if let Some(messages) = self.initial_messages {
             agent = agent.initial_messages(messages);

@@ -11,6 +11,7 @@ mod execution;
 mod executor;
 pub mod model_config;
 mod options;
+pub mod policy;
 pub mod recovery_executor;
 pub mod recovery_recipes;
 mod request;

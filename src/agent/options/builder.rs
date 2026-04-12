@@ -93,6 +93,8 @@ pub struct AgentBuilder {
     pub(super) hooks: HookRegistry,
     pub(super) execution_mode: ExecutionMode,
     pub(super) human: Option<Arc<dyn crate::authorization::HumanInteractionHandler>>,
+    pub(super) iteration_gate: Option<Arc<dyn crate::agent::policy::IterationGate>>,
+    pub(super) tool_selection_strategy: Option<Arc<dyn crate::agent::policy::ToolSelectionStrategy>>,
     pub(super) custom_tools: Vec<Arc<dyn Tool>>,
     pub(super) sandbox_settings: Option<crate::config::SandboxConfig>,
     pub(super) authorization_policy_explicit: bool,
@@ -1235,6 +1237,35 @@ impl AgentBuilder {
     /// Replaces sandbox settings directly.
     pub fn sandbox_settings(mut self, settings: crate::config::SandboxConfig) -> Self {
         self.sandbox_settings = Some(settings);
+        self
+    }
+
+    /// Custom iteration gate controlling when the agent loop should stop.
+    ///
+    /// The gate is called at the top of every iteration with an
+    /// [`IterationContext`](crate::agent::policy::IterationContext) snapshot.
+    /// The default ([`DefaultIterationGate`](crate::agent::policy::DefaultIterationGate))
+    /// checks max iterations and shutdown signal.
+    pub fn iteration_gate(
+        mut self,
+        gate: impl crate::agent::policy::IterationGate + 'static,
+    ) -> Self {
+        self.iteration_gate = Some(Arc::new(gate));
+        self
+    }
+
+    /// Custom tool selection strategy controlling which model-proposed
+    /// tool calls proceed to execution.
+    ///
+    /// Called after the model returns tool calls but before hooks,
+    /// HITL approval, and validation. The default
+    /// ([`DefaultToolSelectionStrategy`](crate::agent::policy::DefaultToolSelectionStrategy))
+    /// passes all calls through unchanged.
+    pub fn tool_selection_strategy(
+        mut self,
+        strategy: impl crate::agent::policy::ToolSelectionStrategy + 'static,
+    ) -> Self {
+        self.tool_selection_strategy = Some(Arc::new(strategy));
         self
     }
 }

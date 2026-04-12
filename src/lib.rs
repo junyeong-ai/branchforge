@@ -117,6 +117,10 @@ pub use agent::{
     RunConfig, SinkError, SseSink, StreamAggregator, StreamUsage, ToolCallState, ToolCallStatus,
     ToolProgressEntry, drive_stream_into_sink, event_is_critical,
 };
+pub use agent::policy::{
+    DefaultIterationGate, DefaultToolSelectionStrategy, GateDecision, IterationContext,
+    IterationGate, ToolCallProposal, ToolPlan, ToolSelectionContext, ToolSelectionStrategy,
+};
 pub use auth::{Auth, Credential};
 pub use auth::{CredentialKind, CredentialRecord};
 pub use authorization::{

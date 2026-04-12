@@ -78,6 +78,10 @@ pub struct AgentRuntime {
     pub(crate) orchestrator: Option<Arc<RwLock<PromptOrchestrator>>>,
     pub(crate) coordination: Option<Arc<dyn Coordination>>,
     pub(crate) agent_directory: Option<Arc<AgentDirectory>>,
+
+    // ── Policy extension points ─────────────────────────────────────
+    pub(crate) iteration_gate: Arc<dyn super::policy::IterationGate>,
+    pub(crate) tool_selection_strategy: Arc<dyn super::policy::ToolSelectionStrategy>,
 }
 
 impl AgentRuntime {
