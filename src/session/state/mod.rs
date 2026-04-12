@@ -396,6 +396,37 @@ impl Session {
         self.graph.current_branch_nodes(self.graph.primary_branch)
     }
 
+    /// Append a typed node to a branch. Channels all external graph
+    /// mutation through `Session` so the SSoT invariant (doc on
+    /// `Session.graph`) is maintained at the call-site level.
+    pub(crate) fn append_graph_node(
+        &mut self,
+        branch_id: crate::graph::BranchId,
+        kind: crate::graph::NodeKind,
+        payload: serde_json::Value,
+    ) -> Result<crate::graph::NodeId, crate::graph::GraphError> {
+        self.graph.append_node(branch_id, kind, payload)
+    }
+
+    /// Fork a new branch from the given node on the same graph.
+    pub(crate) fn fork_graph_branch(
+        &mut self,
+        fork_from: Option<crate::graph::NodeId>,
+        name: &str,
+    ) -> Result<crate::graph::BranchId, crate::graph::GraphError> {
+        self.graph.fork_branch(fork_from, name)
+    }
+
+    /// Soft-archive graph nodes before `watermark`. See
+    /// [`SessionGraph::archive_before`] for the watermark semantics and
+    /// tool-call pair walkback guarantee.
+    pub(crate) fn archive_graph_before(
+        &mut self,
+        watermark: crate::graph::NodeId,
+    ) -> Result<usize, crate::graph::GraphError> {
+        self.graph.archive_before(watermark)
+    }
+
     fn graph_projected_messages(&self) -> Vec<SessionMessage> {
         let branch_nodes = self.current_branch_graph_nodes();
 

@@ -1570,11 +1570,9 @@ mod tests {
                 .graph
                 .current_branch_nodes(session.graph.primary_branch)[0]
                 .id;
-            let branch = session.graph.fork_branch(Some(root), "right");
-            let branch = branch.unwrap();
+            let branch = session.fork_graph_branch(Some(root), "right").unwrap();
             session
-                .graph
-                .append_node(
+                .append_graph_node(
                     branch,
                     crate::graph::NodeKind::Assistant,
                     serde_json::json!({"content": [{"type": "text", "text": "right"}]}),

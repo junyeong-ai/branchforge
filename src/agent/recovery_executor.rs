@@ -197,7 +197,7 @@ impl RecoveryExecutor<'_> {
                 }
 
                 let watermark = user_turn_ids[rounds];
-                match session.graph.archive_before(watermark) {
+                match session.archive_graph_before(watermark) {
                     Ok(archived) => {
                         info!(
                             rounds,

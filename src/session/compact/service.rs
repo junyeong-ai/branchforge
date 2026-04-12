@@ -186,7 +186,7 @@ impl Compactor {
         let saved_tokens = crate::ir::TokenCount::new((removed_chars / 4) as u64);
 
         let branch_id = session.graph.primary_branch;
-        session.graph.append_node(
+        session.append_graph_node(
             branch_id,
             crate::graph::NodeKind::Summary,
             serde_json::json!({

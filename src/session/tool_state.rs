@@ -202,7 +202,7 @@ impl ToolState {
             } else {
                 None
             };
-            session.graph.append_node(
+            session.append_graph_node(
                 branch_id,
                 NodeKind::ToolResult,
                 serde_json::json!({
