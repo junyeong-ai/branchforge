@@ -27,6 +27,8 @@
 //! runtime.shutdown(); // Flush before exit
 //! ```
 
+#![allow(missing_docs)]
+
 pub mod cache_break;
 mod metrics;
 #[cfg(feature = "otel")]

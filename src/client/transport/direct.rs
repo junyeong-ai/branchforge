@@ -4,6 +4,8 @@
 //! Used by `anthropic`, `openai`, `openai-chat`, and `gemini` presets, plus
 //! any OpenAI-compatible third party (`base_url` override).
 
+#![allow(missing_docs)]
+
 use std::collections::HashMap;
 use std::sync::Arc;
 

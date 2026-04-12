@@ -1,5 +1,7 @@
 //! API Key Helper for dynamic credential generation.
 
+#![allow(missing_docs)]
+
 use std::process::Stdio;
 use std::sync::Arc;
 use std::time::{Duration, Instant};

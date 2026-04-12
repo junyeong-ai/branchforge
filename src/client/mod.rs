@@ -16,6 +16,8 @@
 //! `Arc<dyn LlmCall>` and the public `query`/`stream` helpers in `lib.rs`
 //! resolve a profile from environment variables on demand.
 
+#![allow(missing_docs)]
+
 pub mod cache;
 pub mod codec;
 pub mod fallback;

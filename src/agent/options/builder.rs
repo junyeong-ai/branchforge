@@ -23,6 +23,8 @@
 //! # }
 //! ```
 
+#![allow(missing_docs)]
+
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;

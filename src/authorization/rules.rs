@@ -1,5 +1,7 @@
 //! Tool policy rules and evaluation.
 
+#![allow(missing_docs)]
+
 use std::collections::HashMap;
 
 use regex::Regex;

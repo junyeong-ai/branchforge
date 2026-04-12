@@ -19,6 +19,8 @@
 //! # });
 //! ```
 
+#![allow(missing_docs)]
+
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use std::sync::Arc;

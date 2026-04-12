@@ -9,6 +9,8 @@
 //! For the modern OpenAI primary endpoint (Responses API) see
 //! [`super::openai_responses`].
 
+#![allow(missing_docs)]
+
 use serde_json::{Value, json};
 
 use super::{ApiVersionHint, EncodedRequest, EndpointShape, InvocationMode, ModelCodec};

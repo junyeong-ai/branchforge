@@ -1,5 +1,7 @@
 //! Agent events and result types.
 
+#![allow(missing_docs)]
+
 use serde::{Deserialize, Serialize};
 
 use super::state::{AgentMetrics, AgentState};

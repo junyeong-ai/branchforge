@@ -23,6 +23,8 @@
 //! [`crate::ir::ModelSettings::max_output_tokens`] directly when set,
 //! or the `DEFAULT_MAX_OUTPUT_TOKENS` fallback.
 
+#![allow(missing_docs)]
+
 use crate::ir::{ContentPart, Message, ModelRequest, SystemPrompt};
 
 /// Upper bound for the output-token side of the estimate when

@@ -1,5 +1,7 @@
 //! Subagent index loader.
 
+#![allow(missing_docs)]
+
 use std::path::Path;
 
 use serde::{Deserialize, Serialize};

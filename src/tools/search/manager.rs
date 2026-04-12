@@ -1,5 +1,7 @@
 //! Tool search manager for coordinating search operations.
 
+#![allow(missing_docs)]
+
 use std::collections::HashMap;
 use std::sync::Arc;
 

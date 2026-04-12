@@ -1,3 +1,5 @@
+#![allow(missing_docs)]
+
 use serde::{Deserialize, Serialize};
 
 use super::types::{Bookmark, BranchId, Checkpoint, NodeId, NodeKind, NodeProvenance};

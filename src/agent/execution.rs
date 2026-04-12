@@ -1,5 +1,7 @@
 //! Agent execution logic with session-based context management.
 
+#![allow(missing_docs)]
+
 use std::sync::Arc;
 use std::time::Instant;
 

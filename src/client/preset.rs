@@ -50,6 +50,8 @@
 //! let client = registry.build("my-internal-llm")?;
 //! ```
 
+#![allow(missing_docs)]
+
 use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::sync::Arc;

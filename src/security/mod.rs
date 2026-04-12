@@ -8,6 +8,8 @@
 //! - Process resource limits via `setrlimit`
 //! - OS-level sandboxing (Landlock on Linux, Seatbelt on macOS)
 
+#![allow(missing_docs)]
+
 #[cfg(feature = "coding-tools")]
 pub mod bash;
 pub mod fs;

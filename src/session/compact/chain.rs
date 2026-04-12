@@ -6,6 +6,8 @@
 //!
 //! Integrates a [`CircuitBreaker`] to stop retrying after consecutive failures.
 
+#![allow(missing_docs)]
+
 use std::sync::Arc;
 
 use tracing::{debug, info, warn};

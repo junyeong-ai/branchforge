@@ -31,6 +31,8 @@
 //! tolerated. The grammar is intentionally restrictive — it does not
 //! attempt to parse arbitrary regex or shell expressions.
 
+#![allow(missing_docs)]
+
 use std::fmt;
 
 use super::rules::{ToolRule, ToolRuleDecision};

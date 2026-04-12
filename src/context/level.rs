@@ -3,6 +3,8 @@
 //! Provides leveled resource loading with fixed override order:
 //! Enterprise → User → Project → Local (later levels override earlier).
 
+#![allow(missing_docs)]
+
 use std::path::PathBuf;
 
 use async_trait::async_trait;

@@ -3,6 +3,8 @@
 //! Provides built-in atomic metrics for local tracking, with optional
 //! OpenTelemetry export when the `otel` feature is enabled.
 
+#![allow(missing_docs)]
+
 use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
 use std::time::Duration;
 

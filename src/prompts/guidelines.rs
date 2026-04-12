@@ -4,6 +4,8 @@
 //! descriptions slim (~1-3 sentences) while behavioral guidance adapts to the
 //! active tool surface.
 
+#![allow(missing_docs)]
+
 /// A prompt guideline that is conditionally included based on active tools.
 #[derive(Debug, Clone)]
 pub struct PromptGuideline {

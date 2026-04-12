@@ -14,6 +14,8 @@
 //! specific runtime when useful, or just call [`is_container`] for
 //! the boolean.
 
+#![allow(missing_docs)]
+
 use std::fs;
 use std::path::Path;
 

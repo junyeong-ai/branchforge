@@ -8,6 +8,8 @@
 //!
 //! See plan §3 for the rationale behind each axis.
 
+#![allow(missing_docs)]
+
 use serde::{Deserialize, Serialize};
 
 /// Tri-state support level for a single capability.

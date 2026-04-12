@@ -1,5 +1,7 @@
 //! Hook manager for registering and executing hooks.
 
+#![allow(missing_docs)]
+
 use super::{Hook, HookContext, HookEvent, HookInput, HookOutput};
 use std::collections::HashMap;
 use std::sync::Arc;

@@ -1,5 +1,7 @@
 //! Session configuration.
 
+#![allow(missing_docs)]
+
 use serde::{Deserialize, Serialize};
 
 use super::policy::SessionAuthorization;

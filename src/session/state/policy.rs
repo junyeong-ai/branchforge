@@ -4,6 +4,8 @@
 //! For runtime tool policy checking with rules, see `crate::authorization::ToolPolicy`.
 //! For runtime execution mode, see `crate::authorization::ExecutionMode`.
 
+#![allow(missing_docs)]
+
 use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};

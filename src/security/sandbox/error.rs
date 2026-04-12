@@ -1,5 +1,7 @@
 //! Sandbox error types.
 
+#![allow(missing_docs)]
+
 use std::io;
 use std::path::PathBuf;
 

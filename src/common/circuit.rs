@@ -3,6 +3,8 @@
 //! Generic circuit breaker pattern for protecting against cascading failures.
 //! Used by the HTTP client resilience layer and compaction pipeline.
 
+#![allow(missing_docs)]
+
 use std::sync::RwLock;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::time::Duration;

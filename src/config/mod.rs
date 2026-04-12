@@ -13,6 +13,8 @@
 //! # }
 //! ```
 
+#![allow(missing_docs)]
+
 pub mod cloud;
 pub mod composite;
 pub mod env;

@@ -7,6 +7,8 @@
 //! drop-in replacements for the raw types they wrap, while preventing
 //! accidental mixing of semantically distinct identifiers.
 
+#![allow(missing_docs)]
+
 /// Generate a newtype wrapper around `uuid::Uuid` with a private field
 /// and a complete trait surface.
 ///
@@ -158,6 +160,7 @@ macro_rules! string_id {
             serde::Deserialize,
         )]
         #[serde(transparent)]
+        #[allow(missing_docs)]
         pub struct $Name(String);
 
         impl $Name {

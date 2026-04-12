@@ -1,5 +1,7 @@
 //! Context management with progressive disclosure for optimal token usage.
 
+#![allow(missing_docs)]
+
 pub mod builder;
 pub mod environment_source;
 #[cfg(feature = "local-fs")]

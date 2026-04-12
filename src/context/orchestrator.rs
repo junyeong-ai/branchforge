@@ -5,6 +5,8 @@
 //! 2. Context-aware loading (rules based on file path)
 //! 3. On-demand loading (explicit skill/rule requests)
 
+#![allow(missing_docs)]
+
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;

@@ -10,6 +10,8 @@
 //! See plan §1 for the codec/transport split rationale and plan §2 for the
 //! IR shape.
 
+#![allow(missing_docs)]
+
 use serde_json::{Value, json};
 
 use super::{

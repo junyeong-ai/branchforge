@@ -1,5 +1,7 @@
 //! Execution context for tool operations.
 
+#![allow(missing_docs)]
+
 #[cfg(feature = "local-fs")]
 use std::path::Path;
 use std::path::PathBuf;

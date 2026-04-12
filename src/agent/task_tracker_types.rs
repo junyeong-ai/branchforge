@@ -5,6 +5,8 @@
 //! API consumers) needs to reference. Splitting them out keeps
 //! `task_tracker.rs` focused on the registry's behaviour.
 
+#![allow(missing_docs)]
+
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use tokio::sync::oneshot;

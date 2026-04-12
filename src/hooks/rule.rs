@@ -3,6 +3,8 @@
 //! Used by plugin loader, skill frontmatter, and subagent frontmatter
 //! to define lifecycle hooks in a uniform format.
 
+#![allow(missing_docs)]
+
 use serde::{Deserialize, Serialize};
 
 use crate::config::HookConfig;

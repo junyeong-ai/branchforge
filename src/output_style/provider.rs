@@ -1,5 +1,7 @@
 //! Output style provider implementations using common infrastructure.
 
+#![allow(missing_docs)]
+
 use super::OutputStyle;
 use crate::common::InMemoryProvider as GenericInMemoryProvider;
 

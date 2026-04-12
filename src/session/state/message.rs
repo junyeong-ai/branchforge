@@ -1,5 +1,7 @@
 //! Session message types.
 
+#![allow(missing_docs)]
+
 use chrono::{DateTime, Utc};
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};

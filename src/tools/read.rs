@@ -1,5 +1,7 @@
 //! Read tool - reads file contents with TOCTOU protection and multimedia support.
 
+#![allow(missing_docs)]
+
 use std::fmt::Write;
 use std::path::Path;
 

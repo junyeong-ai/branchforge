@@ -1,5 +1,7 @@
 //! Automatic model fallback for handling overload and rate limit errors.
 
+#![allow(missing_docs)]
+
 use std::collections::HashSet;
 
 #[derive(Debug, Clone)]

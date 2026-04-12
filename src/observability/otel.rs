@@ -3,6 +3,8 @@
 //! This module provides OpenTelemetry SDK initialization and configuration
 //! for exporting traces and metrics to OTLP-compatible backends.
 
+#![allow(missing_docs)]
+
 use std::time::Duration;
 
 use opentelemetry::{KeyValue, global};

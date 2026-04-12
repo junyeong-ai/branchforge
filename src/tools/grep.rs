@@ -1,5 +1,7 @@
 //! Grep tool - content search with regex using ripgrep.
 
+#![allow(missing_docs)]
+
 use std::process::Stdio;
 
 use async_trait::async_trait;

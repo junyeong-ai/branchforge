@@ -23,6 +23,8 @@
 //! `cache_control`) are smuggled through `additionalModelRequestFields`
 //! when the user supplies them via [`crate::ir::AnthropicOptions`].
 
+#![allow(missing_docs)]
+
 use serde_json::{Value, json};
 
 use super::{ApiVersionHint, EncodedRequest, EndpointShape, InvocationMode, ModelCodec};

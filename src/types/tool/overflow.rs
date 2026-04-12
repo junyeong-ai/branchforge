@@ -20,6 +20,8 @@
 //!   by downstream users (S3, Postgres, Redis) without touching
 //!   the agent runtime.
 
+#![allow(missing_docs)]
+
 use std::collections::HashMap;
 use std::sync::Arc;
 

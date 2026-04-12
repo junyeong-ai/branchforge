@@ -36,6 +36,8 @@
 //! # }
 //! ```
 
+#![allow(missing_docs)]
+
 use futures::{Stream, StreamExt};
 use std::collections::HashMap;
 

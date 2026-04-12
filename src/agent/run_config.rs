@@ -1,5 +1,7 @@
 //! Per-execution configuration overrides.
 
+#![allow(missing_docs)]
+
 use std::time::Duration;
 
 use crate::authorization::ExecutionMode;

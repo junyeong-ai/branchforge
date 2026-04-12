@@ -1,6 +1,8 @@
 //! Portable model knobs that every codec understands (and may emit
 //! [`ModelWarning`](super::warning::ModelWarning) for unsupported values).
 
+#![allow(missing_docs)]
+
 use serde::{Deserialize, Serialize};
 
 /// Provider-agnostic generation knobs.

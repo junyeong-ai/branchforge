@@ -6,6 +6,8 @@
 //! through Bedrock, through Vertex, etc., so the pricing layer needs an
 //! explicit tag rather than guessing from the model string alone.
 
+#![allow(missing_docs)]
+
 use serde::{Deserialize, Serialize};
 
 /// Provider that generated a given usage record.

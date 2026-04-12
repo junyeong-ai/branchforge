@@ -1,5 +1,7 @@
 //! Credential types.
 
+#![allow(missing_docs)]
+
 use std::fmt;
 
 use chrono::{DateTime, Duration, Utc};

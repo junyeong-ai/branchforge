@@ -49,6 +49,8 @@
 //! caught in code review, since a deadlock only manifests under
 //! concurrent load and may be hard to reproduce.
 
+#![allow(missing_docs)]
+
 #[cfg(feature = "mcp")]
 use std::collections::HashMap;
 #[cfg(feature = "mcp")]

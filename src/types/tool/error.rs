@@ -1,5 +1,7 @@
 //! Tool error types.
 
+#![allow(missing_docs)]
+
 use thiserror::Error;
 
 #[non_exhaustive]

@@ -38,6 +38,8 @@
 //! pure-core builds (no handler wired) safe to run against
 //! supervised-mode agents.
 
+#![allow(missing_docs)]
+
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 

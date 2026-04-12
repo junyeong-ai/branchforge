@@ -38,6 +38,7 @@ Empirical code facts captured from direct reads. Design-review findings that con
 - 112,201 LOC across 310 `.rs` files
 - `cargo test --lib --no-default-features` → 1,364 tests (pure core)
 - 6-gate green on `main` @ commit 22af99a
+- **Doc-debt** (post-P0-1): 198 files carry `#![allow(missing_docs)]` carve-out. `#![deny(missing_docs)]` is installed at `src/lib.rs:58`. Target: monotonic decrease to 0 by Phase 8. Each phase PR that touches a module MUST remove the carve-out for that module and document its public items as part of the PR.
 
 ## Refresh policy
 

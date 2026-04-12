@@ -1,5 +1,7 @@
 //! Session state management.
 
+#![allow(missing_docs)]
+
 mod config;
 mod enums;
 mod ids;

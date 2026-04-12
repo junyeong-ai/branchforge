@@ -1,3 +1,5 @@
+#![allow(missing_docs)]
+
 use serde::{Deserialize, Serialize};
 
 pub use crate::models::LONG_CONTEXT_THRESHOLD;

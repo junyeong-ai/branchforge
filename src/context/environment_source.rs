@@ -20,6 +20,8 @@
 //!
 //! See `docs/architecture/layering.md` §2.1 for where each source lives.
 
+#![allow(missing_docs)]
+
 /// A single fact to include in the environment block of a system prompt.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EnvironmentFact {

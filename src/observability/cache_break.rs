@@ -42,6 +42,8 @@
 //! with `snapshot` / `compare` methods and a pure classifier
 //! returning a typed cause enum.
 
+#![allow(missing_docs)]
+
 use std::collections::BTreeMap;
 use std::hash::{DefaultHasher, Hash, Hasher};
 

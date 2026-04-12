@@ -1,5 +1,7 @@
 //! Write tool - creates or overwrites files with atomic operations.
 
+#![allow(missing_docs)]
+
 use async_trait::async_trait;
 use schemars::JsonSchema;
 use serde::Deserialize;

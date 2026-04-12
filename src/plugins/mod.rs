@@ -29,6 +29,8 @@
 //!     └── .mcp.json
 //! ```
 
+#![allow(missing_docs)]
+
 mod discovery;
 mod error;
 mod loader;

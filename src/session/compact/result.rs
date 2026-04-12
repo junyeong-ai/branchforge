@@ -1,5 +1,7 @@
 //! Result of a session compaction or projection truncation.
 
+#![allow(missing_docs)]
+
 use crate::decision::DecisionReason;
 use crate::ir::TokenCount;
 

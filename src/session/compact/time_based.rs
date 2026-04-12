@@ -5,6 +5,8 @@
 //! This aligns with server-side prompt cache TTLs: after a period of inactivity,
 //! cached prefixes may have expired, making old tool results pure overhead.
 
+#![allow(missing_docs)]
+
 use std::time::Duration;
 
 use async_trait::async_trait;

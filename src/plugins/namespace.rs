@@ -1,3 +1,5 @@
+#![allow(missing_docs)]
+
 pub const NAMESPACE_SEP: char = ':';
 
 pub fn namespaced(plugin: &str, resource: &str) -> String {

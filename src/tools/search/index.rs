@@ -1,5 +1,7 @@
 //! Tool index for efficient searching.
 
+#![allow(missing_docs)]
+
 use crate::ir::TokenCount;
 use crate::mcp::McpToolDefinition;
 use crate::types::estimate_tool_tokens;

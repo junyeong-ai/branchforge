@@ -5,6 +5,8 @@
 //!
 //! Uses `rust_decimal` for precise monetary calculations without floating-point errors.
 
+#![allow(missing_docs)]
+
 use std::collections::HashMap;
 use std::sync::LazyLock;
 

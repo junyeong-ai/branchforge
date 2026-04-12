@@ -1,5 +1,7 @@
 //! Session-related types for persistence and tracking.
 
+#![allow(missing_docs)]
+
 use std::path::{Path, PathBuf};
 
 use chrono::{DateTime, Utc};

@@ -22,6 +22,8 @@
 //! assignment via the `Session` API is no longer permitted — use
 //! [`super::Session::transition`] instead.
 
+#![allow(missing_docs)]
+
 use serde::{Deserialize, Serialize};
 use std::fmt;
 

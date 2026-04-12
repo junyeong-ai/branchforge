@@ -2,6 +2,8 @@
 //!
 //! Reference: <https://code.claude.com/docs/en/sandboxing>
 
+#![allow(missing_docs)]
+
 use std::collections::HashSet;
 use std::path::PathBuf;
 

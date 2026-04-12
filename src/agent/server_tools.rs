@@ -12,6 +12,8 @@
 //! invocations come back as ordinary `ContentPart::ToolCall` blocks
 //! with `ToolOrigin::BuiltinServer { namespace }`.
 
+#![allow(missing_docs)]
+
 use serde::{Deserialize, Serialize};
 
 /// Whether server-side tool responses should include inline citations.

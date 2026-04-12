@@ -1,5 +1,7 @@
 //! Environment variable sanitization.
 
+#![allow(missing_docs)]
+
 use std::collections::HashMap;
 
 const SAFE_ENV_VARS: &[&str] = &[

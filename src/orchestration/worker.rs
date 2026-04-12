@@ -1,5 +1,7 @@
 //! Worker specification and result types.
 
+#![allow(missing_docs)]
+
 use serde::{Deserialize, Serialize};
 
 /// Constraints applied when spawning worker agents.

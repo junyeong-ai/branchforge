@@ -48,6 +48,8 @@
 //! backup or (b) write a downgrade migration and land it on the
 //! older branch.
 
+#![allow(missing_docs)]
+
 use serde::{Deserialize, Serialize};
 
 /// Schema version stamped on every persisted session payload.

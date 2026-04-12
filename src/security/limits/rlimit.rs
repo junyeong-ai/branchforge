@@ -1,5 +1,7 @@
 //! Resource limits using setrlimit.
 
+#![allow(missing_docs)]
+
 use crate::security::SecurityError;
 
 const KB: u64 = 1024;

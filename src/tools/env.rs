@@ -1,5 +1,7 @@
 //! Tool execution environment.
 
+#![allow(missing_docs)]
+
 #[cfg(feature = "coding-tools")]
 use std::sync::Arc;
 

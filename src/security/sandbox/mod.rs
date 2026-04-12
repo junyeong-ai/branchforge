@@ -6,6 +6,8 @@
 //!
 //! Reference: <https://code.claude.com/docs/en/sandboxing>
 
+#![allow(missing_docs)]
+
 mod config;
 mod detect;
 mod error;

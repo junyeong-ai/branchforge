@@ -6,6 +6,8 @@
 //! 3. Local settings: .claude/settings.local.json (not committed)
 //! 4. Managed settings: organization policy (locked, cannot be overridden)
 
+#![allow(missing_docs)]
+
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 

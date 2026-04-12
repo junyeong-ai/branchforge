@@ -5,6 +5,8 @@
 //! a setting is silently dropped or clamped, the user finds out at runtime
 //! through `ModelResponse::warnings`, not through inexplicable behaviour.
 
+#![allow(missing_docs)]
+
 use serde::{Deserialize, Serialize};
 
 /// A non-fatal degradation that occurred while encoding a request or

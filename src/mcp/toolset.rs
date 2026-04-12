@@ -21,6 +21,8 @@
 //! lookup; Manager = lifecycle ownership) these two names are
 //! already correctly applied.
 
+#![allow(missing_docs)]
+
 use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};

@@ -1,5 +1,7 @@
 //! AST-based bash command analysis using tree-sitter.
 
+#![allow(missing_docs)]
+
 use std::collections::HashSet;
 use std::sync::LazyLock;
 

@@ -1,5 +1,7 @@
 //! Search engine implementations for tool discovery.
 
+#![allow(missing_docs)]
+
 use super::index::{ToolIndex, ToolIndexEntry};
 
 #[non_exhaustive]

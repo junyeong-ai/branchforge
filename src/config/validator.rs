@@ -2,6 +2,8 @@
 //!
 //! Validates configuration values before use.
 
+#![allow(missing_docs)]
+
 use std::collections::HashMap;
 use std::ops::RangeInclusive;
 

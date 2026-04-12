@@ -5,6 +5,8 @@
 //! agent runtime consumes these via `AgentConfig`; they are independent
 //! from the `(codec, transport)` pair the request is sent on.
 
+#![allow(missing_docs)]
+
 use std::collections::{HashMap, HashSet};
 use std::env;
 

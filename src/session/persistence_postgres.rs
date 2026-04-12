@@ -29,6 +29,8 @@
 //! # }
 //! ```
 
+#![allow(missing_docs)]
+
 use std::collections::VecDeque;
 use std::sync::Arc;
 use std::time::Duration;

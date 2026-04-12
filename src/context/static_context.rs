@@ -3,6 +3,8 @@
 //! Content that is always loaded and cached for the entire session.
 //! Per Anthropic best practices, static content uses 1-hour TTL.
 
+#![allow(missing_docs)]
+
 use crate::ir::SystemBlock;
 use crate::mcp::make_mcp_name;
 use crate::types::ToolSpec;

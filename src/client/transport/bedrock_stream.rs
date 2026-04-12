@@ -13,6 +13,8 @@
 //! [message_crc: u32]         - CRC-32 over everything before this field
 //! ```
 
+#![allow(missing_docs)]
+
 use bytes::{Buf, BytesMut};
 
 /// Compute CRC-32 (ISO 3309) over the given byte slice.

@@ -1,3 +1,5 @@
+#![allow(missing_docs)]
+
 use rust_decimal::Decimal;
 
 use super::{ContextWindow, PricingTier, WindowStatus};

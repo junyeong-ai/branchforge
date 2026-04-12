@@ -1,5 +1,7 @@
 //! Secure file handle with TOCTOU protection.
 
+#![allow(missing_docs)]
+
 use std::ffi::CString;
 use std::io::{Read, Write};
 use std::mem::ManuallyDrop;

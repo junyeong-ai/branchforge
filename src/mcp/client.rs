@@ -2,6 +2,8 @@
 //!
 //! This module provides a high-level MCP client that wraps rmcp functionality.
 
+#![allow(missing_docs)]
+
 #[cfg(feature = "mcp")]
 use serde_json::Value;
 #[cfg(feature = "mcp")]

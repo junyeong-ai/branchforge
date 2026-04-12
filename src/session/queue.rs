@@ -1,5 +1,7 @@
 //! Input queue for handling concurrent user inputs.
 
+#![allow(missing_docs)]
+
 use std::collections::VecDeque;
 use std::sync::Arc;
 

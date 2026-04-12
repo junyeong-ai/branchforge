@@ -1,5 +1,7 @@
 //! Hook traits and types.
 
+#![allow(missing_docs)]
+
 use crate::types::ToolOutput;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};

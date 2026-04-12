@@ -1,3 +1,5 @@
+#![allow(missing_docs)]
+
 pub mod diff;
 pub mod error;
 pub mod event;

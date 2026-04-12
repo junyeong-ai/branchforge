@@ -1,3 +1,5 @@
+#![allow(missing_docs)]
+
 mod builtin;
 mod family;
 mod provider;

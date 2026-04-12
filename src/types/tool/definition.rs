@@ -10,6 +10,8 @@
 //! Naming: `ToolDefinition` is reserved for the wire-format IR type. Any
 //! "tool definition with extras" is a [`ToolSpec`].
 
+#![allow(missing_docs)]
+
 use serde::{Deserialize, Serialize};
 
 /// Local runtime spec for a tool: schema + lazy-load metadata.

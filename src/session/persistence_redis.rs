@@ -1,5 +1,7 @@
 //! Redis persistence backend for sessions.
 
+#![allow(missing_docs)]
+
 use async_trait::async_trait;
 use redis::AsyncCommands;
 use redis::Script;

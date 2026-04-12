@@ -8,6 +8,8 @@
 //! capturing the start timestamp, duration, and outcome of recent runs so
 //! operators can audit recurring tasks and detect abnormal latency.
 
+#![allow(missing_docs)]
+
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};

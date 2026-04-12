@@ -2,6 +2,8 @@
 //!
 //! Provides circuit breaker pattern for provider fault isolation.
 
+#![allow(missing_docs)]
+
 pub use crate::common::circuit::{CircuitBreaker, CircuitConfig, CircuitState};
 
 use std::sync::Arc;

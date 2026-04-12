@@ -1,5 +1,7 @@
 //! MCP (Model Context Protocol) server integration.
 
+#![allow(missing_docs)]
+
 pub mod client;
 #[cfg(feature = "mcp")]
 pub mod elicitation;

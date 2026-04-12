@@ -3,6 +3,8 @@
 //! Allows the coordinator agent to send follow-up messages to running
 //! worker agents, continuing their context without spawning new agents.
 
+#![allow(missing_docs)]
+
 use std::sync::Arc;
 
 use async_trait::async_trait;

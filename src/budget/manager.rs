@@ -1,5 +1,7 @@
 //! Multi-tenant budget management.
 
+#![allow(missing_docs)]
+
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 

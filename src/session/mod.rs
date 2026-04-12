@@ -1,5 +1,7 @@
 //! Session management for stateful conversations.
 
+#![allow(missing_docs)]
+
 mod archive;
 pub mod compact;
 mod export;

@@ -1,5 +1,7 @@
 //! SecurityGuard: Pre-execution input validation for tools.
 
+#![allow(missing_docs)]
+
 #[cfg(feature = "coding-tools")]
 use std::path::Path;
 

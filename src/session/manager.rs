@@ -1,5 +1,7 @@
 //! Session lifecycle management.
 
+#![allow(missing_docs)]
+
 use std::sync::Arc;
 
 use super::persistence::{MemoryPersistence, Persistence};

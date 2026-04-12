@@ -1,3 +1,5 @@
+#![allow(missing_docs)]
+
 pub mod circuit;
 mod content_source;
 mod directory;

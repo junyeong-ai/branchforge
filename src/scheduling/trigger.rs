@@ -3,6 +3,8 @@
 //! Provides webhook-style triggers that can be invoked via HTTP
 //! or programmatically to start agent execution on demand.
 
+#![allow(missing_docs)]
+
 use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;

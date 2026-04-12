@@ -6,6 +6,8 @@
 //! behaviour: spawning background tasks, reconciling persisted state,
 //! handling cancellation, and producing terminal snapshots.
 
+#![allow(missing_docs)]
+
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;

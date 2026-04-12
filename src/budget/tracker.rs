@@ -1,5 +1,7 @@
 //! Budget tracking for individual agent sessions.
 
+#![allow(missing_docs)]
+
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use rust_decimal::Decimal;

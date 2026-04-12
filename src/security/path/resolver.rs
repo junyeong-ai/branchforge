@@ -1,5 +1,7 @@
 //! TOCTOU-safe path resolution using openat() with O_NOFOLLOW.
 
+#![allow(missing_docs)]
+
 use std::ffi::{CString, OsStr, OsString};
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::io::{AsFd, BorrowedFd, OwnedFd};

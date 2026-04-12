@@ -1,5 +1,7 @@
 //! Security error types.
 
+#![allow(missing_docs)]
+
 use std::path::PathBuf;
 use thiserror::Error;
 

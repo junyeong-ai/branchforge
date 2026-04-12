@@ -1,5 +1,7 @@
 //! Tool state for thread-safe state access.
 
+#![allow(missing_docs)]
+
 use std::collections::VecDeque;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};

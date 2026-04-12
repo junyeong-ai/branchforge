@@ -4,6 +4,8 @@
 //! the projection boundary forward (all prior messages are excluded from
 //! future API calls).
 
+#![allow(missing_docs)]
+
 use async_trait::async_trait;
 
 use super::CompactResult;

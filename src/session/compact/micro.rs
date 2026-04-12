@@ -7,6 +7,8 @@
 //! and applied during `to_api_messages()`. They are intentionally transient:
 //! lost on session reload, restoring full content from the graph.
 
+#![allow(missing_docs)]
+
 use async_trait::async_trait;
 
 use super::CompactResult;

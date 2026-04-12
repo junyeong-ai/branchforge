@@ -4,6 +4,8 @@
 //! against the same model. The per-request shape comes from `ir::Usage`;
 //! this is the rolled-up view that surfaces in `AgentMetrics`.
 
+#![allow(missing_docs)]
+
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 

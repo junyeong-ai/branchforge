@@ -1,5 +1,7 @@
 //! Security policy configuration.
 
+#![allow(missing_docs)]
+
 use crate::authorization::ToolPolicy;
 
 #[derive(Debug, Clone)]

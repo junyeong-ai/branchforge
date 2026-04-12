@@ -30,6 +30,8 @@
 //!   [`crate::ir::ModelWarning::LossyEncode`] to the response and
 //!   return normally. The caller decides whether to escalate.
 
+#![allow(missing_docs)]
+
 use serde_json::Value;
 
 use crate::ir::JsonSchemaSpec;

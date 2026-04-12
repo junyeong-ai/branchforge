@@ -55,7 +55,7 @@
 //! ```
 
 #![cfg_attr(docsrs, feature(doc_cfg))]
-#![allow(missing_docs)]
+#![deny(missing_docs)]
 #![deny(rustdoc::broken_intra_doc_links)]
 
 pub mod agent;
@@ -89,6 +89,7 @@ pub mod security;
 pub mod session;
 pub mod skills;
 pub mod subagents;
+/// Token counting primitives and the [`TokenCount`](tokens::TokenCount) newtype.
 pub mod tokens;
 pub mod tools;
 pub mod types;
@@ -202,8 +203,12 @@ pub use subagents::{SubagentFrontmatter, SubagentIndexLoader};
 /// Error type for branchforge operations.
 ///
 /// All errors include actionable context to help diagnose and resolve issues.
+/// Variant-level docs are carried by `#[error("…")]` attributes; per-field
+/// docs are intentionally suppressed because the field names are self-
+/// describing in the Display output.
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
+#[allow(missing_docs)]
 pub enum Error {
     /// Authentication failed.
     #[error("Authentication failed: {message}")]
@@ -560,6 +565,7 @@ impl std::fmt::Display for FailureCategory {
 }
 
 impl Error {
+    /// Construct an [`Error::Authentication`] with the given message.
     pub fn auth(message: impl Into<String>) -> Self {
         Error::Authentication {
             message: message.into(),
@@ -628,14 +634,17 @@ impl Error {
         }
     }
 
+    /// `true` if this error signals an authentication failure.
     pub fn is_unauthorized(&self) -> bool {
         matches!(self, Error::Authentication { .. })
     }
 
+    /// `true` if this error signals an overloaded provider that is likely retryable.
     pub fn is_overloaded(&self) -> bool {
         matches!(self, Error::ModelOverloaded { .. })
     }
 
+    /// HTTP-like status code reported by the provider, if any.
     pub fn status_code(&self) -> Option<u16> {
         match self {
             Error::Provider { status, .. } => *status,
@@ -643,6 +652,7 @@ impl Error {
         }
     }
 
+    /// Retry-after hint from a rate-limit error, if the provider supplied one.
     pub fn retry_after(&self) -> Option<std::time::Duration> {
         match self {
             Error::RateLimit { retry_after } => *retry_after,
@@ -799,6 +809,7 @@ impl From<mcp::McpError> for Error {
     }
 }
 
+/// Crate-wide `Result` alias bound to [`Error`].
 pub type Result<T> = std::result::Result<T, Error>;
 
 /// Simple one-shot query helper.

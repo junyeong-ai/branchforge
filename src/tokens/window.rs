@@ -1,3 +1,5 @@
+#![allow(missing_docs)]
+
 use super::tier::{DEFAULT_CRITICAL_THRESHOLD, DEFAULT_WARNING_THRESHOLD};
 use crate::models::{Capabilities, ModelSpec};
 

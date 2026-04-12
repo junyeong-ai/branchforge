@@ -1,3 +1,5 @@
+#![allow(missing_docs)]
+
 use secrecy::SecretString;
 use serde::{Deserialize, Serialize};
 

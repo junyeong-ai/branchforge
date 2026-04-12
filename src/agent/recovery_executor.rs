@@ -16,6 +16,8 @@
 //! (for collapse/compact), `LlmCall` (for compaction), and
 //! `EventBus` (for telemetry).
 
+#![allow(missing_docs)]
+
 use std::time::Duration;
 
 use tracing::{info, warn};

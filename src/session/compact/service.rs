@@ -3,6 +3,8 @@
 //! Summarizes the entire conversation when context exceeds threshold.
 //! Ported from Claude Code CLI's compact implementation for full compatibility.
 
+#![allow(missing_docs)]
+
 use serde::{Deserialize, Serialize};
 
 use super::CompactResult;

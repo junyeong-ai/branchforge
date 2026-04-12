@@ -1,5 +1,7 @@
 //! Command-based hooks that execute shell commands.
 
+#![allow(missing_docs)]
+
 use std::collections::HashMap;
 use std::process::Stdio;
 use std::time::Duration;

@@ -1,5 +1,7 @@
 //! Session Persistence Backends
 
+#![allow(missing_docs)]
+
 use std::collections::HashMap;
 use std::sync::Arc;
 

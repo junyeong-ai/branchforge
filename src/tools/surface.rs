@@ -25,6 +25,8 @@
 //! The `*_tools()` static helpers return the tool name list for each tier;
 //! they are compile-time constants and are safe to call in any build.
 
+#![allow(missing_docs)]
+
 use std::collections::HashSet;
 
 use crate::authorization::{ToolPolicy, ToolRule};

@@ -17,6 +17,8 @@
 //! metadata methods; the blanket impl converts them into `Tool`
 //! automatically.
 
+#![allow(missing_docs)]
+
 use std::any::Any;
 
 use async_trait::async_trait;

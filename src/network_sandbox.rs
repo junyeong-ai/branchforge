@@ -1,5 +1,7 @@
 //! Network sandbox for domain filtering and access control.
 
+#![allow(missing_docs)]
+
 use std::collections::HashSet;
 
 use crate::config::NetworkSandboxConfig;

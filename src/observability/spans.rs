@@ -11,6 +11,8 @@
 //! because downstream billing / reconciliation pipelines require exact
 //! decimal fidelity; converting through `f64` would leak rounding error.
 
+#![allow(missing_docs)]
+
 use rust_decimal::Decimal;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;

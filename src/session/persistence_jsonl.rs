@@ -22,6 +22,8 @@
 //!         └── ...
 //! ```
 
+#![allow(missing_docs)]
+
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::hash::{BuildHasher, Hash, Hasher};
 use std::io::{BufRead, BufReader, Write};

@@ -12,6 +12,8 @@
 //! they are cheap to define and the DX of "turn on a feature and a struct
 //! field appears" would be confusing.
 
+#![allow(missing_docs)]
+
 use serde::{Deserialize, Serialize};
 
 pub use super::settings::ReasoningEffort;

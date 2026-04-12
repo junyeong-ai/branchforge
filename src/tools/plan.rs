@@ -1,5 +1,7 @@
 //! Plan tool for structured planning workflow.
 
+#![allow(missing_docs)]
+
 use async_trait::async_trait;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};

@@ -1,3 +1,5 @@
+#![allow(missing_docs)]
+
 use crate::graph::{NodeId, ReplayInput, SessionGraph};
 use crate::session::{SessionError, SessionResult};
 

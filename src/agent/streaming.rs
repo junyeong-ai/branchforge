@@ -1,5 +1,7 @@
 //! Agent streaming execution with session-based context management.
 
+#![allow(missing_docs)]
+
 use std::collections::VecDeque;
 use std::sync::Arc;
 use std::time::Instant;

@@ -1,5 +1,7 @@
 //! OAuth configuration and request building for Claude Code CLI authentication.
 
+#![allow(missing_docs)]
+
 use std::collections::HashMap;
 
 use crate::agent::BetaConfig;

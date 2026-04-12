@@ -1,5 +1,7 @@
 //! Tenant-based budget management for API cost control.
 
+#![allow(missing_docs)]
+
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 

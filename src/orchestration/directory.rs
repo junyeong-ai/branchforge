@@ -3,6 +3,8 @@
 //! Manages agent lifecycle and provides inter-agent messaging via
 //! named lookup. Agents register on spawn and are cleaned up on completion.
 
+#![allow(missing_docs)]
+
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU8, Ordering};
 

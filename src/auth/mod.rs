@@ -4,6 +4,8 @@
 //! SDK users should use `Auth` to configure authentication, which internally
 //! resolves to `Credential` for API requests.
 
+#![allow(missing_docs)]
+
 mod cache;
 mod config;
 mod credential;

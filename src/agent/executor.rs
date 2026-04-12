@@ -1,5 +1,7 @@
 //! Agent core structure and construction.
 
+#![allow(missing_docs)]
+
 use std::sync::Arc;
 
 use tokio::sync::RwLock;

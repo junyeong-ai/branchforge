@@ -23,6 +23,8 @@
 //!   `response.output_text.delta`, `response.function_call_arguments.delta`,
 //!   `response.reasoning.delta`, etc. event names.
 
+#![allow(missing_docs)]
+
 use serde_json::{Value, json};
 
 use super::{ApiVersionHint, EncodedRequest, EndpointShape, InvocationMode, ModelCodec};

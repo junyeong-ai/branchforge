@@ -1,5 +1,7 @@
 //! Streaming response chunks.
 
+#![allow(missing_docs)]
+
 use serde::{Deserialize, Serialize};
 
 use super::content::{ContentPart, ReasoningSignature, ToolOrigin};

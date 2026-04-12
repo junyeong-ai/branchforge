@@ -1,5 +1,7 @@
 //! Secure filesystem operations with TOCTOU protection.
 
+#![allow(missing_docs)]
+
 mod handle;
 
 pub use handle::SecureFileHandle;

@@ -8,6 +8,8 @@
 //! - [`FallingBackClient`] — try a primary `LlmCall`, then a fallback.
 //! - [`CircuitBrokenClient`] — circuit-breaker pattern around any `LlmCall`.
 
+#![allow(missing_docs)]
+
 use async_trait::async_trait;
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;

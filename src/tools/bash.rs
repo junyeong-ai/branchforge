@@ -1,5 +1,7 @@
 //! Bash tool - shell command execution with security hardening.
 
+#![allow(missing_docs)]
+
 use std::process::Stdio;
 use std::sync::Arc;
 use std::time::Duration;

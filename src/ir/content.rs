@@ -6,6 +6,8 @@
 //! [`ContentPart::Unknown`] (with a schema version) so that they round-trip
 //! through the originating codec but do not pollute the neutral surface.
 
+#![allow(missing_docs)]
+
 use serde::{Deserialize, Serialize};
 
 /// One semantic unit of content within a [`Message`](super::model::Message).

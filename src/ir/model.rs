@@ -1,5 +1,7 @@
 //! Top-level request and response types.
 
+#![allow(missing_docs)]
+
 use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};

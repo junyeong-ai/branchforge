@@ -2,6 +2,8 @@
 //!
 //! Domain-separated configuration for clarity and maintainability.
 
+#![allow(missing_docs)]
+
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::Duration;

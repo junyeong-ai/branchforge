@@ -22,6 +22,8 @@
 //! advertises [`ToolIdSemantics::SynthesizedByIndex`] so the agent runtime
 //! preserves part ordering as the disambiguator.
 
+#![allow(missing_docs)]
+
 use serde_json::{Value, json};
 
 use super::{ApiVersionHint, EncodedRequest, EndpointShape, InvocationMode, ModelCodec};

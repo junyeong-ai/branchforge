@@ -10,6 +10,8 @@
 //! reference specific file paths and line numbers rather than blindly
 //! trusting worker summaries.
 
+#![allow(missing_docs)]
+
 use std::sync::Arc;
 
 use super::traits::{Coordination, CoordinationContext};

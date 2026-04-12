@@ -38,6 +38,8 @@
 //! let result = executor.execute("commit", Some("fix bug")).await;
 //! ```
 
+#![allow(missing_docs)]
+
 mod index;
 mod index_loader;
 mod processing;
