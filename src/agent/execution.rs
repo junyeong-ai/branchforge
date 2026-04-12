@@ -292,15 +292,24 @@ impl Agent {
         info!(prompt_len = final_prompt.len(), "Starting agent execution");
 
         loop {
-            if self.runtime.shutdown.is_cancelled() {
-                self.persist_session_state().await?;
-                break;
-            }
-
             metrics.iterations += 1;
-            if metrics.iterations > effective_max_iterations {
-                warn!(max = effective_max_iterations, "Max iterations reached");
-                break;
+
+            let gate_ctx = super::policy::IterationContext {
+                iteration: metrics.iterations,
+                max_iterations: effective_max_iterations,
+                structured_output_attempts,
+                max_structured_output_retries: MAX_STRUCTURED_OUTPUT_RETRIES,
+                recovery_attempts,
+                total_usage: &total_usage,
+                is_shutdown_requested: self.runtime.shutdown.is_cancelled(),
+            };
+            match self.runtime.iteration_gate.should_continue(&gate_ctx) {
+                super::policy::GateDecision::Continue => {}
+                super::policy::GateDecision::Stop { reason } => {
+                    info!(reason = %reason, "Iteration gate stopped the loop");
+                    self.persist_session_state().await?;
+                    break;
+                }
             }
 
             self.check_budget()?;
@@ -534,8 +543,9 @@ impl Agent {
                 break;
             }
 
-            // Extract tool calls from the response content
-            let tool_calls: Vec<_> = response
+            // Extract tool calls from the response content and run them
+            // through the ToolSelectionStrategy before hooks/HITL/validation.
+            let raw_calls: Vec<_> = response
                 .content
                 .iter()
                 .filter_map(|part| match part {
@@ -544,14 +554,38 @@ impl Agent {
                         name,
                         arguments,
                         ..
-                    } => Some((id.clone(), name.clone(), arguments.clone())),
+                    } => Some(super::policy::ToolCallProposal {
+                        id: id.clone(),
+                        name: name.clone(),
+                        input: arguments.clone(),
+                    }),
                     _ => None,
                 })
                 .collect();
+
+            let selection_ctx = super::policy::ToolSelectionContext {
+                iteration: metrics.iterations,
+                total_usage: &total_usage,
+                model: &ir_request.model,
+            };
+            let plan = self.runtime.tool_selection_strategy.plan(raw_calls, &selection_ctx);
+
             let hook_ctx = self.hook_context();
 
-            let mut prepared = Vec::with_capacity(tool_calls.len());
-            let mut blocked = Vec::with_capacity(tool_calls.len());
+            let mut prepared = Vec::with_capacity(plan.execute.len());
+            let mut blocked: Vec<crate::ir::ContentPart> = plan
+                .skip
+                .into_iter()
+                .map(|(call, reason)| {
+                    crate::ir::ContentPart::tool_error(&call.id, reason).with_tool_name(&call.name)
+                })
+                .collect();
+
+            let tool_calls: Vec<_> = plan
+                .execute
+                .into_iter()
+                .map(|c| (c.id, c.name, c.input))
+                .collect();
 
             for (tool_id, tool_name, tool_input) in &tool_calls {
                 let pre_input =
