@@ -15,9 +15,11 @@ use tokio::sync::RwLock;
 
 #[cfg(feature = "mcp")]
 use super::McpContent;
+#[cfg(feature = "mcp")]
+use super::McpToolAnnotations;
 use super::{
     McpClientState, McpError, McpResourceDefinition, McpResult, McpServerConfig, McpServerInfo,
-    McpServerSnapshot, McpTimeouts, McpToolAnnotations, McpToolDefinition, McpToolResult,
+    McpServerSnapshot, McpTimeouts, McpToolDefinition, McpToolResult,
 };
 
 #[cfg(feature = "mcp")]

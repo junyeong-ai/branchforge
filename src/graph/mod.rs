@@ -5,6 +5,12 @@ pub mod error;
 pub mod event;
 pub mod explorer;
 pub mod export;
+#[cfg(any(
+    feature = "jsonl",
+    feature = "postgres",
+    feature = "redis-backend",
+    test
+))]
 pub mod materializer;
 pub mod provenance;
 pub mod query;
@@ -20,6 +26,12 @@ pub use error::GraphError;
 pub use event::{EventMetadata, GraphEvent, GraphEventBody};
 pub use explorer::{BranchSummary, GraphExplorer, NodeSummary, TreeNodeSummary, TreeRenderMode};
 pub use export::{BranchExport, ExportBookmark, ExportCheckpoint, ExportNode, ExportTreeNode};
+#[cfg(any(
+    feature = "jsonl",
+    feature = "postgres",
+    feature = "redis-backend",
+    test
+))]
 pub(crate) use materializer::GraphMaterializer;
 pub use provenance::{ProvenanceDigest, ProvenanceSummarizer};
 pub use query::{GraphFilter, GraphQuery};
