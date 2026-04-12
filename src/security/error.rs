@@ -3,6 +3,7 @@
 use std::path::PathBuf;
 use thiserror::Error;
 
+#[non_exhaustive]
 #[derive(Debug, Error)]
 pub enum SecurityError {
     #[error("path escapes sandbox: {0}")]

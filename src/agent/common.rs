@@ -24,6 +24,72 @@ use super::state_formatter::collect_compaction_state;
 /// Default fallback model used when inner tool usage does not specify a model.
 const DEFAULT_FALLBACK_MODEL: &str = "claude-haiku-4-5";
 
+/// Phase D C-1: request tool approval through the unified
+/// [`crate::authorization::HumanInteractionHandler`] channel.
+///
+/// Handles all four fail-closed paths uniformly so both the
+/// non-streaming and streaming agent loops share one code path:
+///
+/// 1. No handler wired → deny with configuration hint.
+/// 2. Handler returned `NotSupported` → deny with the same hint.
+/// 3. Handler exceeded [`DEFAULT_APPROVAL_TIMEOUT_SECS`] → deny
+///    with a timeout reason.
+/// 4. Handler returned `Err(Handler(msg))` → deny with the msg.
+///
+/// All four cases produce a concrete
+/// [`crate::authorization::ToolApprovalResponse::Deny`] so the caller
+/// never needs to branch on handler presence or error kind.
+pub(crate) async fn request_tool_approval(
+    handler: Option<&dyn crate::authorization::HumanInteractionHandler>,
+    tool_name: &str,
+    tool_call_id: &str,
+    tool_input: &Value,
+    execution_mode_label: &str,
+) -> crate::authorization::ToolApprovalResponse {
+    use crate::authorization::{
+        HumanInteractionError, ToolApprovalRequest, ToolApprovalResponse,
+        approval::DEFAULT_APPROVAL_TIMEOUT_SECS,
+    };
+    use std::time::Duration;
+
+    let Some(handler) = handler else {
+        return ToolApprovalResponse::Deny {
+            reason: format!(
+                "Tool '{tool_name}' requires review but no HumanInteractionHandler is wired. \
+                 Use AgentBuilder::human_handler() to enable human-in-the-loop."
+            ),
+        };
+    };
+
+    let request = ToolApprovalRequest {
+        tool_name: tool_name.into(),
+        tool_call_id: tool_call_id.into(),
+        tool_input: tool_input.clone(),
+        reason: format!("Tool '{tool_name}' requires approval in {execution_mode_label} mode"),
+    };
+
+    match tokio::time::timeout(
+        Duration::from_secs(DEFAULT_APPROVAL_TIMEOUT_SECS),
+        handler.approve_tool(request),
+    )
+    .await
+    {
+        Ok(Ok(resp)) => resp,
+        Ok(Err(HumanInteractionError::NotSupported(_))) => ToolApprovalResponse::Deny {
+            reason: "HumanInteractionHandler does not support tool approval".into(),
+        },
+        Ok(Err(HumanInteractionError::Timeout)) => ToolApprovalResponse::Deny {
+            reason: "Approval timed out (handler)".into(),
+        },
+        Ok(Err(HumanInteractionError::Handler(msg))) => ToolApprovalResponse::Deny {
+            reason: format!("Approval handler error: {msg}"),
+        },
+        Err(_) => ToolApprovalResponse::Deny {
+            reason: "Approval timed out".into(),
+        },
+    }
+}
+
 /// Extract structured output from text if an output schema is configured.
 pub(crate) fn extract_structured_output(schema: Option<&Value>, text: &str) -> Option<Value> {
     schema?;
@@ -189,21 +255,20 @@ pub(crate) fn accumulate_response_usage(
 }
 
 /// Emit a [`TokensConsumed`](crate::events::EventKind::TokensConsumed) event
-/// for real-time token tracking.
+/// for real-time token tracking. Dispatches via the typed payload
+/// path so subscribers can register with
+/// [`crate::events::EventBus::subscribe_typed`].
 pub(crate) fn emit_tokens_consumed(
     event_bus: Option<&crate::events::EventBus>,
     usage: &crate::ir::Usage,
     model: &str,
 ) {
     if let Some(bus) = event_bus {
-        bus.emit_simple(
-            crate::events::EventKind::TokensConsumed,
-            serde_json::json!({
-                "input_tokens": usage.input_tokens,
-                "output_tokens": usage.output_tokens,
-                "model": model,
-            }),
-        );
+        bus.emit_typed(crate::events::TokensConsumedPayload {
+            input_tokens: usage.input_tokens,
+            output_tokens: usage.output_tokens,
+            model: model.to_string(),
+        });
     }
 }
 
@@ -216,14 +281,11 @@ pub(crate) fn emit_tool_executed(
     is_error: bool,
 ) {
     if let Some(bus) = event_bus {
-        bus.emit_simple(
-            crate::events::EventKind::ToolExecuted,
-            serde_json::json!({
-                "tool_name": tool_name,
-                "duration_ms": duration_ms,
-                "is_error": is_error,
-            }),
-        );
+        bus.emit_typed(crate::events::ToolExecutedPayload {
+            tool_name: tool_name.to_string(),
+            duration_ms,
+            is_error,
+        });
     }
 }
 
@@ -237,15 +299,12 @@ pub(crate) fn emit_tool_progress(
     status: &crate::tools::ProgressStatus,
 ) {
     if let Some(bus) = event_bus {
-        bus.emit_simple(
-            crate::events::EventKind::ToolProgress,
-            serde_json::json!({
-                "tool_id": tool_id,
-                "tool_name": tool_name,
-                "step": step,
-                "status": status,
-            }),
-        );
+        bus.emit_typed(crate::events::ToolProgressPayload {
+            tool_id: tool_id.to_string(),
+            tool_name: tool_name.to_string(),
+            step: step.to_string(),
+            status: *status,
+        });
     }
 }
 
@@ -258,42 +317,40 @@ pub(crate) fn maybe_emit_budget_alert(
 ) {
     let Some(bus) = event_bus else { return };
     let status = budget_tracker.check();
-    match status {
+    let payload = match status {
         crate::budget::BudgetStatus::WithinBudget {
             used,
             limit,
             remaining,
         } => {
-            let pct = if limit > Decimal::ZERO {
-                (used / limit * Decimal::from(100)).round_dp(1).to_string()
+            let threshold = limit * Decimal::from(alert_threshold_pct) / Decimal::from(100);
+            if used < threshold {
+                return;
+            }
+            let utilization = if limit > Decimal::ZERO {
+                use rust_decimal::prelude::ToPrimitive;
+                (used / limit).to_f64().unwrap_or(0.0).clamp(0.0, 1.0)
             } else {
-                "0".to_string()
+                0.0
             };
-            if used >= limit * Decimal::from(alert_threshold_pct) / Decimal::from(100) {
-                bus.emit_simple(
-                    crate::events::EventKind::BudgetAlert,
-                    serde_json::json!({
-                        "used_usd": used.to_string(),
-                        "limit_usd": limit.to_string(),
-                        "remaining_usd": remaining.to_string(),
-                        "percentage": pct,
-                    }),
-                );
+            crate::events::BudgetAlertPayload {
+                used_usd: used,
+                limit_usd: limit,
+                remaining_usd: remaining,
+                utilization,
             }
         }
         crate::budget::BudgetStatus::Exceeded { used, limit, .. } => {
-            bus.emit_simple(
-                crate::events::EventKind::BudgetAlert,
-                serde_json::json!({
-                    "used_usd": used.to_string(),
-                    "limit_usd": limit.to_string(),
-                    "remaining_usd": "0",
-                    "percentage": "100",
-                }),
-            );
+            crate::events::BudgetAlertPayload {
+                used_usd: used,
+                limit_usd: limit,
+                remaining_usd: Decimal::ZERO,
+                utilization: 1.0,
+            }
         }
-        crate::budget::BudgetStatus::Unlimited { .. } => {}
-    }
+        crate::budget::BudgetStatus::Unlimited { .. } => return,
+    };
+    bus.emit_typed(payload);
 }
 
 /// Accumulate inner usage from a tool result (e.g., subagent calls).
@@ -374,9 +431,13 @@ pub(crate) async fn maybe_invoke_explicit_skill_command(
     let actual_input = pre_output.updated_input.unwrap_or(raw_input);
     #[cfg(feature = "local-fs")]
     {
-        let permission = tools
-            .context()
-            .check_explicit_skill_permission(&actual_input);
+        // Phase D A-1: ask the Skill tool for its subjects rather
+        // than going through a parallel extractor registry.
+        let subjects = tools
+            .get("Skill")
+            .map(|t| t.permission_subjects(&actual_input))
+            .unwrap_or_default();
+        let permission = tools.context().check_explicit_skill_permission(&subjects);
         if !permission.is_allowed() {
             return Err(crate::Error::Authorization(permission.reason().to_string()));
         }
@@ -558,14 +619,11 @@ pub(crate) async fn handle_compaction(
             );
             metrics.record_compaction();
             if let Some(bus) = runtime.event_bus.as_deref() {
-                bus.emit_simple(
-                    crate::events::EventKind::SessionCompacted,
-                    serde_json::json!({
-                        "session_id": session_id,
-                        "saved_tokens": saved_tokens.get(),
-                        "summary": summary,
-                    }),
-                );
+                bus.emit_typed(crate::events::SessionCompactedPayload {
+                    session_id: session_id.to_string(),
+                    saved_tokens: saved_tokens.get(),
+                    summary: summary.clone(),
+                });
             }
 
             let state_sections = collect_compaction_state(&runtime.tools).await;

@@ -4,6 +4,7 @@ use std::collections::HashSet;
 
 use crate::config::NetworkSandboxConfig;
 
+#[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DomainCheck {
     Allowed,

@@ -13,8 +13,6 @@ use crate::session::{SessionAccessScope, SessionManager, ToolState};
 
 #[cfg(feature = "local-fs")]
 use std::collections::HashMap;
-#[cfg(feature = "local-fs")]
-use std::sync::Arc;
 
 #[cfg(feature = "local-fs")]
 use crate::authorization::{PermissionDecision, ToolLimits};
@@ -29,17 +27,18 @@ use crate::security::path::SafePath;
 #[cfg(feature = "local-fs")]
 use crate::security::sandbox::SandboxResult;
 #[cfg(feature = "local-fs")]
-use crate::security::{ResourceLimits, SecurityContext, SecurityError};
+use crate::security::{ResourceLimits, SecurityContext, SecurityError, SecurityExtension};
 
 // `DomainCheck` is Layer 1 (lives in `crate::network_sandbox`) but a helper
 // that returns it (`ExecutionContext::check_domain`) is feature-gated because
-// the data source currently flows through `self.security.network`. Once the
+// the data source currently flows through `self.security().network`. Once the
 // NetworkSandbox handle becomes a direct ExecutionContext field this gate can
 // go away — tracked as a Phase 2 follow-up.
 #[cfg(feature = "local-fs")]
 use crate::network_sandbox::DomainCheck;
 
 /// Step lifecycle status for tool progress events.
+#[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ProgressStatus {
@@ -68,20 +67,6 @@ pub(crate) const PROGRESS_CHANNEL_CAPACITY: usize = 256;
 
 #[derive(Clone)]
 pub struct ExecutionContext {
-    /// Filesystem security context — present only under the `local-fs`
-    /// feature. A Layer 2a (local-fs) build inserts `SecureFs`, the FS
-    /// sandbox, and the tool policy here. Pure Layer 1 builds do not carry
-    /// this field at all; tools that need filesystem primitives live in
-    /// Layer 2a or Layer 2b and are therefore compiled only when this field
-    /// exists.
-    ///
-    /// This field is an implementation detail of the current migration and
-    /// will be replaced by a `LocalFsExtension` / `CodingExtension` pair in
-    /// the [`Extensions`] TypeMap once the full Phase 1 refactor lands. Tool
-    /// authors should **not** introduce new direct accesses to it — instead
-    /// read context via `ctx.extensions().get::<YourExtension>()`.
-    #[cfg(feature = "local-fs")]
-    security: Arc<SecurityContext>,
     hooks: Option<HookRegistry>,
     session_id: Option<String>,
     session_manager: Option<SessionManager>,
@@ -89,11 +74,14 @@ pub struct ExecutionContext {
     progress_tx: Option<ProgressSender>,
     cancel_token: Option<CancellationToken>,
     /// Type-keyed heterogeneous storage for feature-gated and user-provided
-    /// context (workspace root, security policy, git state, telemetry sinks,
-    /// tenant ids, …).
+    /// context — filesystem/shell security (`SecurityExtension`), HITL
+    /// handler (`HumanInteractionExtension`), workspace root, git state,
+    /// telemetry sinks, tenant ids, …
     ///
-    /// See [`crate::common::Extensions`] for the rationale and
-    /// `docs/architecture/layering.md` §4 for the layering contract.
+    /// Phase G-4 moved the Layer 2a/2b filesystem/shell security handle
+    /// here (from a feature-gated struct field) so `ExecutionContext`'s
+    /// byte layout is feature-invariant. See [`crate::common::Extensions`]
+    /// and `docs/architecture/layering.md` §4 for the rationale.
     extensions: Extensions,
 }
 
@@ -111,11 +99,8 @@ impl ExecutionContext {
     /// `local-fs` feature) inject a `SecureFs` handle on top of this via
     /// the [`Extensions`] mechanism.
     pub fn empty() -> Self {
-        Self {
-            #[cfg(feature = "local-fs")]
-            security: Arc::new(
-                SecurityContext::try_permissive().expect("try_permissive never fails in practice"),
-            ),
+        #[allow(unused_mut)]
+        let mut ctx = Self {
             hooks: None,
             session_id: None,
             session_manager: None,
@@ -123,15 +108,25 @@ impl ExecutionContext {
             progress_tx: None,
             cancel_token: None,
             extensions: Extensions::new(),
+        };
+        // Layer 2a builds seed a permissive security extension so tools
+        // invoked against an "empty" context still have fs/network/sandbox
+        // primitives to call. Pure Layer 1 builds compile without this
+        // block and tools that need security simply don't exist.
+        #[cfg(feature = "local-fs")]
+        {
+            let permissive =
+                SecurityContext::try_permissive().expect("try_permissive never fails in practice");
+            ctx.extensions.insert(SecurityExtension::new(permissive));
         }
+        ctx
     }
 
     /// Layer 2a constructor: build an execution context around an existing
     /// [`SecurityContext`]. Available only under the `local-fs` feature.
     #[cfg(feature = "local-fs")]
     pub fn new(security: SecurityContext) -> Self {
-        Self {
-            security: Arc::new(security),
+        let mut ctx = Self {
             hooks: None,
             session_id: None,
             session_manager: None,
@@ -139,7 +134,9 @@ impl ExecutionContext {
             progress_tx: None,
             cancel_token: None,
             extensions: Extensions::new(),
-        }
+        };
+        ctx.extensions.insert(SecurityExtension::new(security));
+        ctx
     }
 
     /// Layer 2a constructor: build an execution context rooted at `root`,
@@ -156,16 +153,8 @@ impl ExecutionContext {
     /// embedding scenarios.
     #[cfg(feature = "local-fs")]
     pub fn try_permissive() -> Result<Self, SecurityError> {
-        Ok(Self {
-            security: Arc::new(SecurityContext::try_permissive()?),
-            hooks: None,
-            session_id: None,
-            session_manager: None,
-            session_scope: None,
-            progress_tx: None,
-            cancel_token: None,
-            extensions: Extensions::new(),
-        })
+        let security = SecurityContext::try_permissive()?;
+        Ok(Self::new(security))
     }
 
     pub fn with_hooks(mut self, hooks: HookRegistry, session_id: impl Into<String>) -> Self {
@@ -346,20 +335,43 @@ impl ExecutionContext {
     // build has none of these methods — feature-gated tools that need them
     // are themselves feature-gated, so the gate alignment holds.
     //
-    // These helpers are scheduled for migration to `Extensions`-backed
-    // lookups in a Phase 2 follow-up. New tool authors should not add
-    // helpers here; instead insert your own extension type and read it back
-    // from `ctx.extensions().get::<YourExtension>()`.
+    // Phase G-4 moved the `SecurityContext` handle from a feature-gated
+    // struct field into the [`Extensions`] type-map, so these helpers now
+    // read through `security()` rather than `self.security`. The external
+    // API is unchanged — tool authors keep calling `ctx.open_read(path)`,
+    // `ctx.analyze_bash(cmd)`, etc. New tool authors who need their own
+    // optional context concerns should register their own extension type
+    // (see `HumanInteractionExtension` / `SecurityExtension` as patterns)
+    // and read it back via `ctx.extensions().get::<YourExtension>()`.
     // =========================================================================
+
+    /// Phase G-4: internal accessor for the [`SecurityContext`] stored in
+    /// the [`Extensions`] type-map. Every Layer 2a constructor
+    /// (`empty`, `new`, `from_path`, `try_permissive`) registers a
+    /// `SecurityExtension`, so absence here is an invariant violation —
+    /// it means the caller constructed an `ExecutionContext` by hand
+    /// without going through a supported path. The `expect` message
+    /// names the remediation explicitly.
+    #[cfg(feature = "local-fs")]
+    fn security(&self) -> &SecurityContext {
+        self.extensions
+            .get::<SecurityExtension>()
+            .map(|ext| ext.context())
+            .expect(
+                "SecurityExtension not registered on Layer 2a ExecutionContext — \
+                 construct via ExecutionContext::new / from_path / try_permissive, \
+                 or insert a SecurityExtension into the Extensions type-map manually",
+            )
+    }
 
     #[cfg(feature = "local-fs")]
     pub fn root(&self) -> &Path {
-        self.security.root()
+        self.security().root()
     }
 
     #[cfg(feature = "local-fs")]
     pub fn limits_for(&self, tool_name: &str) -> ToolLimits {
-        self.security
+        self.security()
             .policy
             .tool_policy
             .limits(tool_name)
@@ -369,7 +381,7 @@ impl ExecutionContext {
 
     #[cfg(feature = "local-fs")]
     pub fn resolve(&self, input: &str) -> Result<SafePath, SecurityError> {
-        self.security.fs.resolve(input)
+        self.security().fs.resolve(input)
     }
 
     #[cfg(feature = "local-fs")]
@@ -378,7 +390,7 @@ impl ExecutionContext {
         input: &str,
         limits: &ToolLimits,
     ) -> Result<SafePath, SecurityError> {
-        self.security.fs.resolve_with_limits(input, limits)
+        self.security().fs.resolve_with_limits(input, limits)
     }
 
     #[cfg(feature = "local-fs")]
@@ -434,27 +446,27 @@ impl ExecutionContext {
 
     #[cfg(feature = "local-fs")]
     pub fn open_read(&self, input: &str) -> Result<SecureFileHandle, SecurityError> {
-        self.security.fs.open_read(input)
+        self.security().fs.open_read(input)
     }
 
     #[cfg(feature = "local-fs")]
     pub fn open_write(&self, input: &str) -> Result<SecureFileHandle, SecurityError> {
-        self.security.fs.open_write(input)
+        self.security().fs.open_write(input)
     }
 
     #[cfg(feature = "local-fs")]
     pub fn is_within(&self, path: &Path) -> bool {
-        self.security.fs.is_within(path)
+        self.security().fs.is_within(path)
     }
 
     #[cfg(feature = "coding-tools")]
     pub fn analyze_bash(&self, command: &str) -> BashAnalysis {
-        self.security.bash.analyze(command)
+        self.security().bash.analyze(command)
     }
 
     #[cfg(feature = "coding-tools")]
     pub fn validate_bash(&self, command: &str) -> Result<BashAnalysis, String> {
-        self.security.bash.validate(command)
+        self.security().bash.validate(command)
     }
 
     #[cfg(feature = "coding-tools")]
@@ -464,37 +476,37 @@ impl ExecutionContext {
 
     #[cfg(feature = "local-fs")]
     pub fn resource_limits(&self) -> &ResourceLimits {
-        &self.security.limits
+        &self.security().limits
     }
 
     #[cfg(feature = "local-fs")]
     pub fn check_domain(&self, domain: &str) -> DomainCheck {
-        self.security.network.check(domain)
+        self.security().network.check(domain)
     }
 
     #[cfg(feature = "local-fs")]
     pub fn can_bypass_sandbox(&self) -> bool {
-        self.security.policy.can_bypass_sandbox()
+        self.security().policy.can_bypass_sandbox()
     }
 
     #[cfg(feature = "local-fs")]
     pub fn is_sandboxed(&self) -> bool {
-        self.security.is_sandboxed()
+        self.security().is_sandboxed()
     }
 
     #[cfg(feature = "local-fs")]
     pub fn should_auto_allow_bash(&self) -> bool {
-        self.security.should_auto_allow_bash()
+        self.security().should_auto_allow_bash()
     }
 
     #[cfg(feature = "local-fs")]
     pub fn wrap_command(&self, command: &str) -> SandboxResult<String> {
-        self.security.sandbox.wrap_command(command)
+        self.security().sandbox.wrap_command(command)
     }
 
     #[cfg(feature = "local-fs")]
     pub fn sandbox_env(&self) -> HashMap<String, String> {
-        self.security.sandbox.environment_vars()
+        self.security().sandbox.environment_vars()
     }
 
     #[cfg(feature = "coding-tools")]
@@ -503,18 +515,25 @@ impl ExecutionContext {
         self.sanitized_env().with_vars(sandbox_env)
     }
 
+    /// Phase D Workstream A-1: the tool is the single source of truth
+    /// for subject extraction. Callers pass the result of
+    /// [`crate::tools::Tool::permission_subjects`] directly — the
+    /// authorization module no longer maintains a parallel extractor
+    /// registry.
     #[cfg(feature = "local-fs")]
-    pub fn check_tool_policy(
-        &self,
-        tool_name: &str,
-        input: &serde_json::Value,
-    ) -> PermissionDecision {
-        self.security.policy.tool_policy.check(tool_name, input)
+    pub fn check_tool_policy(&self, tool_name: &str, subjects: &[String]) -> PermissionDecision {
+        self.security()
+            .policy
+            .tool_policy
+            .check(tool_name, subjects)
     }
 
     #[cfg(feature = "local-fs")]
-    pub fn check_explicit_skill_permission(&self, input: &serde_json::Value) -> PermissionDecision {
-        self.security.policy.tool_policy.check_explicit_skill(input)
+    pub fn check_explicit_skill_permission(&self, subjects: &[String]) -> PermissionDecision {
+        self.security()
+            .policy
+            .tool_policy
+            .check_explicit_skill(subjects)
     }
 
     #[cfg(feature = "local-fs")]
@@ -523,7 +542,7 @@ impl ExecutionContext {
         tool_name: &str,
         input: &serde_json::Value,
     ) -> Result<(), String> {
-        SecurityGuard::validate(&self.security, tool_name, input).map_err(|e| e.to_string())
+        SecurityGuard::validate(self.security(), tool_name, input).map_err(|e| e.to_string())
     }
 }
 
@@ -618,7 +637,19 @@ mod tests {
         assert!(ctx.session_id().is_none());
         assert!(ctx.cancel_token().is_none());
         assert!(ctx.session_manager().is_none());
+        // Phase G-4: pure Layer 1 builds start with an empty type-map;
+        // Layer 2a builds seed `SecurityExtension` so tool dispatchers
+        // (`open_read`, `analyze_bash`, …) work against a permissive
+        // default security context without explicit wiring.
+        #[cfg(not(feature = "local-fs"))]
         assert!(ctx.extensions().is_empty());
+        #[cfg(feature = "local-fs")]
+        assert!(
+            ctx.extensions()
+                .get::<crate::security::SecurityExtension>()
+                .is_some(),
+            "Layer 2a empty() must seed SecurityExtension"
+        );
     }
 
     #[test]

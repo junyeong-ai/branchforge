@@ -57,6 +57,52 @@ use serde::de::DeserializeOwned;
 
 use crate::Result;
 
+/// Metadata captured when a typed [`AgentContract`] is registered on a
+/// [`super::TaskTool`]. Holds the subagent type, description, and a
+/// type-erased input validator closure so the tool can preflight-check
+/// that the untyped `TaskInput.prompt` parses as the contract's input
+/// schema before the subagent is spawned.
+///
+/// The validator is a plain function pointer (no captures) which keeps
+/// `TypedContractEntry: Clone + Send + Sync` without relying on `dyn`.
+#[derive(Clone)]
+pub struct TypedContractEntry {
+    /// Built-in subagent name this contract dispatches to
+    /// (`C::SUBAGENT_TYPE`).
+    pub subagent_type: &'static str,
+    /// Short description surfaced alongside the subagent in the
+    /// `Task` tool catalogue.
+    pub description: &'static str,
+    /// Type-erased preflight validator. Given the raw JSON prompt body
+    /// that would be sent to the subagent, returns `Ok(())` iff it
+    /// parses as the contract's `Input`.
+    pub validate_prompt: fn(&str) -> Result<()>,
+}
+
+impl TypedContractEntry {
+    /// Construct the entry for the given [`AgentContract`]. This is the
+    /// one function that materialises the type-erased validator for
+    /// `C::Input`.
+    pub fn for_contract<C: AgentContract>() -> Self {
+        Self {
+            subagent_type: C::SUBAGENT_TYPE,
+            description: C::description(),
+            validate_prompt: validate_prompt_as::<C>,
+        }
+    }
+}
+
+fn validate_prompt_as<C: AgentContract>(prompt: &str) -> Result<()> {
+    serde_json::from_str::<C::Input>(prompt)
+        .map(|_| ())
+        .map_err(|e| {
+            crate::Error::InvalidRequest(format!(
+                "typed subagent `{subagent}` prompt is not valid JSON for contract input: {e}",
+                subagent = C::SUBAGENT_TYPE,
+            ))
+        })
+}
+
 /// A typed input/output contract for subagent invocations.
 ///
 /// Implementors are zero-sized marker types that pin a particular
@@ -120,6 +166,27 @@ impl<C: AgentContract> TypedAgentInvoker<C> {
     /// typed input losslessly.
     pub fn encode_prompt(&self, input: &C::Input) -> Result<String> {
         serde_json::to_string(input).map_err(crate::Error::from)
+    }
+
+    /// Build a complete [`super::TaskInput`] ready to be handed to
+    /// `TaskTool` via the `Tool::execute` entry point. The
+    /// `description` is what the dispatcher will show the user for
+    /// this invocation.
+    pub fn build_task_input(
+        &self,
+        input: &C::Input,
+        description: impl Into<String>,
+    ) -> Result<super::TaskInput> {
+        Ok(super::TaskInput {
+            description: description.into(),
+            prompt: self.encode_prompt(input)?,
+            subagent_type: C::SUBAGENT_TYPE.to_string(),
+            model: None,
+            run_in_background: None,
+            resume: None,
+            replay_session: None,
+            replay_from_node: None,
+        })
     }
 
     /// Decode a [`super::TaskOutput`] back into the typed contract
@@ -201,7 +268,7 @@ mod tests {
         let inv = TypedAgentInvoker::<DemoContract>::new();
         let task_out = super::super::TaskOutput {
             agent_id: "a".into(),
-            status: crate::agent::task_output::TaskStatus::Completed,
+            status: crate::session::SessionState::Completed,
             text: None,
             content: None,
             structured_output: Some(serde_json::json!({"summary": "hello"})),
@@ -218,7 +285,7 @@ mod tests {
         let inv = TypedAgentInvoker::<DemoContract>::new();
         let task_out = super::super::TaskOutput {
             agent_id: "a".into(),
-            status: crate::agent::task_output::TaskStatus::Completed,
+            status: crate::session::SessionState::Completed,
             text: Some(r#"{"summary":"from text"}"#.into()),
             content: None,
             structured_output: None,
@@ -235,7 +302,7 @@ mod tests {
         let inv = TypedAgentInvoker::<DemoContract>::new();
         let task_out = super::super::TaskOutput {
             agent_id: "a".into(),
-            status: crate::agent::task_output::TaskStatus::Completed,
+            status: crate::session::SessionState::Completed,
             text: None,
             content: None,
             structured_output: None,
@@ -251,7 +318,7 @@ mod tests {
         let inv = TypedAgentInvoker::<DemoContract>::new();
         let task_out = super::super::TaskOutput {
             agent_id: "a".into(),
-            status: crate::agent::task_output::TaskStatus::Completed,
+            status: crate::session::SessionState::Completed,
             text: None,
             content: None,
             structured_output: Some(serde_json::json!({"wrong_field": 1})),

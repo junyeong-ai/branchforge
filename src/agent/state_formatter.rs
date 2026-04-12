@@ -1,7 +1,7 @@
 //! State formatting utilities for agent compaction.
 
 use crate::ToolRegistry;
-use crate::session::types::{Plan, PlanStatus, TodoItem};
+use crate::session::types::{Plan, PlanState, TodoItem};
 
 /// Format todo list for system-reminder after compaction.
 pub fn format_todo_summary(todos: &[TodoItem]) -> String {
@@ -15,13 +15,13 @@ pub fn format_todo_summary(todos: &[TodoItem]) -> String {
 
 /// Format plan state for system-reminder after compaction.
 pub fn format_plan_summary(plan: &Plan) -> String {
-    let status = match plan.status {
-        PlanStatus::Draft => "Draft",
-        PlanStatus::Approved => "Approved",
-        PlanStatus::Executing => "Executing",
-        PlanStatus::Completed => "Completed",
-        PlanStatus::Failed => "Failed",
-        PlanStatus::Cancelled => "Cancelled",
+    let status = match plan.state() {
+        PlanState::Draft => "Draft",
+        PlanState::Approved => "Approved",
+        PlanState::Executing => "Executing",
+        PlanState::Completed => "Completed",
+        PlanState::Failed => "Failed",
+        PlanState::Cancelled => "Cancelled",
     };
 
     let mut summary = format!("Status: {}", status);
@@ -45,13 +45,13 @@ pub async fn collect_compaction_state(tools: &ToolRegistry) -> Vec<String> {
         }
 
         if let Some(plan) = tool_state.current_plan().await
-            && !plan.status.is_terminal()
+            && !plan.state().is_terminal()
         {
             sections.push(format!("## Active Plan\n{}", format_plan_summary(&plan)));
         }
     }
 
-    let running_tasks = tools.task_registry().list_running().await;
+    let running_tasks = tools.task_tracker().list_running().await;
     if !running_tasks.is_empty() {
         let tasks_summary = running_tasks
             .iter()

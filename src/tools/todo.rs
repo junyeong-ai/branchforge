@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use super::SchemaTool;
 use super::context::ExecutionContext;
 use crate::session::SessionId;
-use crate::session::session_state::ToolState;
+use crate::session::tool_state::ToolState;
 use crate::session::types::{TodoItem, TodoStatus};
 use crate::types::ToolResult;
 
@@ -16,28 +16,10 @@ use crate::types::ToolResult;
 pub struct TodoInputItem {
     #[schemars(length(min = 1))]
     pub content: String,
-    pub status: TodoInputStatus,
+    pub status: TodoStatus,
     #[serde(rename = "activeForm")]
     #[schemars(length(min = 1))]
     pub active_form: String,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "snake_case")]
-pub enum TodoInputStatus {
-    Pending,
-    InProgress,
-    Completed,
-}
-
-impl From<TodoInputStatus> for TodoStatus {
-    fn from(status: TodoInputStatus) -> Self {
-        match status {
-            TodoInputStatus::Pending => TodoStatus::Pending,
-            TodoInputStatus::InProgress => TodoStatus::InProgress,
-            TodoInputStatus::Completed => TodoStatus::Completed,
-        }
-    }
 }
 
 pub struct TodoWriteTool {
@@ -69,7 +51,7 @@ impl SchemaTool for TodoWriteTool {
         let in_progress_count = input
             .todos
             .iter()
-            .filter(|t| matches!(t.status, TodoInputStatus::InProgress))
+            .filter(|t| matches!(t.status, TodoStatus::InProgress))
             .count();
 
         if in_progress_count > 1 {
@@ -84,9 +66,9 @@ impl SchemaTool for TodoWriteTool {
             .map(|t| {
                 let mut item = TodoItem::new(self.session_id, &t.content, &t.active_form);
                 match t.status {
-                    TodoInputStatus::Pending => {}
-                    TodoInputStatus::InProgress => item.start(),
-                    TodoInputStatus::Completed => item.complete(),
+                    TodoStatus::Pending => {}
+                    TodoStatus::InProgress => item.start(),
+                    TodoStatus::Completed => item.complete(),
                 }
                 item
             })

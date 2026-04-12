@@ -6,9 +6,10 @@ use serde::{Deserialize, Serialize};
 
 use super::SchemaTool;
 use super::context::ExecutionContext;
-use crate::session::session_state::ToolState;
+use crate::session::tool_state::ToolState;
 use crate::types::ToolResult;
 
+#[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum PlanAction {
@@ -79,7 +80,8 @@ impl PlanTool {
             Explore the codebase and design your approach.\n\
             Use action: \"update\" to record your plan.\n\
             Use action: \"complete\" when ready to proceed.",
-            plan.id, plan.status
+            plan.id,
+            plan.state()
         ))
     }
 
@@ -108,7 +110,7 @@ impl PlanTool {
                     Proceed with implementation.",
                     plan.id,
                     plan.name.as_deref().unwrap_or("Unnamed"),
-                    plan.status,
+                    plan.state(),
                     content
                 ))
             }
@@ -130,7 +132,8 @@ impl PlanTool {
                     "Plan cancelled.\n\
                     Plan ID: {}\n\
                     Status: {:?}",
-                    plan.id, plan.status
+                    plan.id,
+                    plan.state()
                 ))
             }
             None => ToolResult::error("No active plan found."),
@@ -182,7 +185,7 @@ impl PlanTool {
                     ## Content Preview\n\n{}",
                     plan.id,
                     plan.name.as_deref().unwrap_or("Unnamed"),
-                    plan.status,
+                    plan.state(),
                     plan.created_at.format("%Y-%m-%d %H:%M:%S UTC"),
                     content_preview
                 ))

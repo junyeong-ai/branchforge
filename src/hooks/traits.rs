@@ -546,6 +546,7 @@ impl HookContext {
 }
 
 /// Origin of a hook registration.
+#[non_exhaustive]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum HookSource {
     #[default]

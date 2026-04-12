@@ -7,6 +7,25 @@ use crate::ir::FinishReason;
 use crate::ir::Message;
 use crate::ir::TokenCount;
 
+/// One tool entry in [`AgentEvent::Init::tools`]. Carries the
+/// tool name, description, self-declared read-only classification
+/// (the `is_read_only` default, since `Init` has no per-call
+/// input), and any aliases. Consumers use this to populate
+/// capability panels without having to call the agent back.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgentInitTool {
+    pub name: String,
+    pub description: String,
+    /// Search hint for fuzzy selection. Same source as
+    /// `Tool::search_hint` — useful for populating command
+    /// palettes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub search_hint: Option<String>,
+    /// Alternative names the runtime accepts for this tool.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub aliases: Vec<String>,
+}
+
 /// Events emitted during agent execution.
 ///
 /// These events provide real-time visibility into the agent's progress:
@@ -21,9 +40,38 @@ use crate::ir::TokenCount;
 /// {"type": "tool_start", "id": "t1", "name": "Read", "input": {...}}
 /// {"type": "complete", "text": "...", "usage": {...}, ...}
 /// ```
+#[non_exhaustive]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum AgentEvent {
+    /// Stream prologue: describes the initial capabilities the
+    /// agent is about to start with. Emitted **exactly once**, as
+    /// the first event of every `execute_stream` invocation,
+    /// before any model call. UIs and dashboards use this to
+    /// render "what this agent can do" panels without having to
+    /// wait for the first tool call to see a tool name.
+    ///
+    /// All fields are point-in-time snapshots — they reflect the
+    /// agent's configuration at the moment the stream started.
+    /// Subsequent mid-stream mutations (e.g. `tool_search` loading
+    /// additional tools on demand) surface through their own
+    /// events, not by re-emitting `Init`.
+    Init {
+        /// Primary model id the agent is about to call. May be
+        /// overridden per-turn by the `ModelSelection` hook.
+        model: String,
+        /// Execution mode snapshot: `auto`, `supervised`, `plan`.
+        execution_mode: String,
+        /// Tool catalogue the agent has access to at stream
+        /// start. One entry per registered tool.
+        tools: Vec<AgentInitTool>,
+        /// Subagent names the agent can delegate to.
+        subagents: Vec<String>,
+        /// Skill names the agent can invoke.
+        skills: Vec<String>,
+        /// Human-readable names of connected MCP servers, if any.
+        mcp_servers: Vec<String>,
+    },
     /// Incremental text output from the model.
     Text {
         /// The text delta (incremental chunk from streaming).
@@ -104,6 +152,7 @@ impl AgentEvent {
     /// Useful for routing, logging, and filtering without full serialization.
     pub fn event_type(&self) -> &'static str {
         match self {
+            Self::Init { .. } => "init",
             Self::Text { .. } => "text",
             Self::Thinking { .. } => "thinking",
             Self::ToolStart { .. } => "tool_start",

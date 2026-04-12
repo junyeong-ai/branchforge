@@ -10,18 +10,18 @@ use super::env::ToolExecutionEnv;
 use super::registry::ToolRegistry;
 use super::surface::ToolSurface;
 use super::traits::Tool;
-use crate::agent::{TaskOutputTool, TaskRegistry, TaskTool};
+use crate::agent::{TaskOutputTool, TaskTool, TaskTracker};
 use crate::authorization::ToolPolicy;
 use crate::common::IndexRegistry;
 use crate::hooks::HookRegistry;
-use crate::session::session_state::ToolState;
+use crate::session::tool_state::ToolState;
 use crate::session::{MemoryPersistence, SessionAccessScope, SessionId, SessionManager};
 use crate::subagents::SubagentIndex;
 
 pub struct ToolRegistryBuilder {
     access: ToolSurface,
     working_dir: Option<PathBuf>,
-    task_registry: Option<TaskRegistry>,
+    task_tracker: Option<TaskTracker>,
     skill_executor: Option<crate::skills::SkillRuntime>,
     subagent_registry: Option<IndexRegistry<SubagentIndex>>,
     policy: Option<ToolPolicy>,
@@ -34,6 +34,8 @@ pub struct ToolRegistryBuilder {
     scope: Option<SessionAccessScope>,
     delegation_runtime: Option<crate::agent::DelegationRuntime>,
     custom_tools: Vec<Arc<dyn Tool>>,
+    overflow_store: Option<Arc<dyn super::OverflowStore>>,
+    human_handler: Option<Arc<dyn crate::authorization::HumanInteractionHandler>>,
 }
 
 impl ToolRegistryBuilder {
@@ -47,7 +49,7 @@ impl ToolRegistryBuilder {
         Self {
             access: ToolSurface::default(),
             working_dir: None,
-            task_registry: None,
+            task_tracker: None,
             skill_executor: None,
             subagent_registry: None,
             policy: None,
@@ -60,7 +62,34 @@ impl ToolRegistryBuilder {
             scope: None,
             delegation_runtime: None,
             custom_tools: Vec::new(),
+            overflow_store: None,
+            human_handler: None,
         }
+    }
+
+    /// Phase D C-2: attach a unified
+    /// [`crate::authorization::HumanInteractionHandler`] so
+    /// built-in HITL tools (AskUserQuestion today, more in future)
+    /// can route through it via the [`super::ExecutionContext`]
+    /// extensions TypeMap. Normally populated by
+    /// `AgentBuilder::human_handler` — custom registry builders
+    /// can call this directly.
+    pub fn human_handler(
+        mut self,
+        handler: Arc<dyn crate::authorization::HumanInteractionHandler>,
+    ) -> Self {
+        self.human_handler = Some(handler);
+        self
+    }
+
+    /// Phase C-7: attach an [`super::OverflowStore`] for result-size
+    /// spill. When set, any tool result that exceeds the tool's
+    /// `max_result_size_bytes()` is spilled to the store and the
+    /// inline payload is replaced with a short preview + an
+    /// [`super::OverflowRef`]. Defaults to no spill.
+    pub fn overflow_store(mut self, store: Arc<dyn super::OverflowStore>) -> Self {
+        self.overflow_store = Some(store);
+        self
     }
 
     /// Register a custom tool. Custom tools participate in access filtering
@@ -86,8 +115,8 @@ impl ToolRegistryBuilder {
         self
     }
 
-    pub fn task_registry(mut self, registry: TaskRegistry) -> Self {
-        self.task_registry = Some(registry);
+    pub fn task_tracker(mut self, registry: TaskTracker) -> Self {
+        self.task_tracker = Some(registry);
         self
     }
 
@@ -187,6 +216,16 @@ impl ToolRegistryBuilder {
         // uniformly across builds.
         context.insert_extension(crate::Workspace::new(wd.clone()));
 
+        // Phase D C-2: wire the unified HITL handler into the
+        // execution context so tools that need human interaction
+        // (currently `AskUserQuestion`, more to come) can reach it
+        // through `ctx.extensions().get::<HumanInteractionExtension>()`.
+        if let Some(handler) = self.human_handler.clone() {
+            context.insert_extension(crate::authorization::HumanInteractionExtension::new(
+                handler,
+            ));
+        }
+
         let session_id = self.session_id.unwrap_or_default();
         if let Some(ref manager) = self.session_manager {
             context = context.with_session_manager(manager.clone());
@@ -197,23 +236,23 @@ impl ToolRegistryBuilder {
         if let Some(ref scope) = self.scope {
             context = context.with_session_scope(scope.clone());
         }
-        let task_registry = self.task_registry.unwrap_or_else(|| {
+        let task_tracker = self.task_tracker.unwrap_or_else(|| {
             if let Some(ref manager) = self.session_manager {
-                let registry = TaskRegistry::new(manager.persistence());
+                let registry = TaskTracker::new(manager.persistence());
                 if let Some(ref parent_session_id) = self.session_id {
                     registry.parent_session(*parent_session_id)
                 } else {
                     registry
                 }
             } else {
-                TaskRegistry::new(Arc::new(MemoryPersistence::new()))
+                TaskTracker::new(Arc::new(MemoryPersistence::new()))
             }
         });
         let tool_state = self
             .tool_state
             .unwrap_or_else(|| ToolState::new(session_id));
 
-        let mut task_tool_builder = TaskTool::new(task_registry.clone());
+        let mut task_tool_builder = TaskTool::new(task_tracker.clone());
         if let Some(manager) = self.session_manager.clone() {
             task_tool_builder = task_tool_builder.session_manager(manager);
         }
@@ -230,12 +269,13 @@ impl ToolRegistryBuilder {
             None => Arc::new(crate::skills::SkillTool::defaults()),
         };
 
-        // Always available tools
+        // Always available tools (Layer 1 core surface).
         let mut all_tools: Vec<Arc<dyn Tool>> = vec![
             task_tool,
-            Arc::new(TaskOutputTool::new(task_registry.clone())),
+            Arc::new(TaskOutputTool::new(task_tracker.clone())),
             Arc::new(super::TodoWriteTool::new(tool_state.clone(), session_id)),
             Arc::new(super::PlanTool::new(tool_state.clone())),
+            Arc::new(super::AskUserQuestionTool),
             skill_tool,
         ];
 
@@ -266,7 +306,10 @@ impl ToolRegistryBuilder {
             env = env.with_process_manager(process_manager);
         }
 
-        let registry = ToolRegistry::from_env(task_registry, env);
+        let mut registry = ToolRegistry::from_env(task_tracker, env);
+        if let Some(store) = self.overflow_store {
+            registry.set_overflow_store(store);
+        }
 
         for tool in all_tools {
             if access.is_allowed(tool.name()) {

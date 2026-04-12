@@ -1,13 +1,9 @@
 //! Tool policy rules and evaluation.
 
 use std::collections::HashMap;
-use std::sync::Arc;
 
 use regex::Regex;
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
-
-use super::extractors::{InputExtractor, default_extractors};
 
 fn anchor_pattern(pattern: &str) -> String {
     let has_start = pattern.starts_with('^');
@@ -21,6 +17,7 @@ fn anchor_pattern(pattern: &str) -> String {
 }
 
 /// Reason a permission check denied or deferred an operation.
+#[non_exhaustive]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum PermissionDeniedReason {
     PolicyDeny(String),
@@ -48,7 +45,27 @@ impl std::fmt::Display for PermissionDeniedReason {
     }
 }
 
+impl crate::decision::DecisionReason for PermissionDeniedReason {
+    fn category(&self) -> &'static str {
+        match self {
+            Self::PolicyDeny(_) => "policy_deny",
+            Self::PlanModeBlocked => "plan_mode",
+            Self::SupervisedReview => "supervised_review",
+            Self::NotRegistered => "not_registered",
+            Self::HookBlocked(_) => "hook_blocked",
+            Self::BudgetExceeded => "budget_exceeded",
+            Self::NoMatchingRule => "no_matching_rule",
+            Self::Custom(_) => "custom",
+        }
+    }
+
+    fn summary(&self) -> String {
+        self.to_string()
+    }
+}
+
 /// Decision for a tool policy check.
+#[non_exhaustive]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum PermissionDecision {
     Allow,
@@ -139,6 +156,7 @@ impl ToolLimits {
 }
 
 /// Whether a rule allows or denies.
+#[non_exhaustive]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ToolRuleDecision {
@@ -177,44 +195,63 @@ impl ToolRule {
     /// ```
     ///
     /// See [`super::dsl`] for the full grammar and subject classifier.
-    /// **Panics** on a malformed rule string — call
-    /// [`super::dsl::parse_to_tool_rule`] directly when handling
-    /// runtime-generated rule strings that may be invalid.
-    pub fn from_dsl(rule_str: &str, default_decision: ToolRuleDecision) -> Self {
+    ///
+    /// # Phase D E-3: fallible surface
+    ///
+    /// Returns a typed [`super::dsl::PermissionDslError`] on parse
+    /// or regex-compile failure. Config loaders should surface this
+    /// as an [`crate::Error::Config`]; in-process callers with
+    /// hardcoded, known-valid strings can use [`Self::allow`] /
+    /// [`Self::deny`], which panic on malformed input (trust for
+    /// compile-time constants, not for user-supplied config).
+    pub fn from_dsl(
+        rule_str: &str,
+        default_decision: ToolRuleDecision,
+    ) -> Result<Self, super::dsl::PermissionDslError> {
         super::dsl::parse_to_tool_rule(rule_str, default_decision)
+    }
+
+    /// Convenience for hardcoded, statically known rule strings
+    /// (e.g. `ToolRule::allow(".*")` inside `ToolSurface`). Panics
+    /// on a malformed rule — use [`Self::from_dsl`] for user
+    /// input. The panic message is stable and points at the
+    /// offending pattern.
+    pub fn allow(rule_str: &str) -> Self {
+        Self::from_dsl(rule_str, ToolRuleDecision::Allow)
             .unwrap_or_else(|e| panic!("invalid permission rule `{rule_str}`: {e}"))
     }
 
-    /// Convenience: parse `rule_str` and apply [`ToolRuleDecision::Allow`]
-    /// when the DSL string does not specify an explicit decision.
-    pub fn allow(rule_str: &str) -> Self {
-        Self::from_dsl(rule_str, ToolRuleDecision::Allow)
-    }
-
-    /// Convenience: parse `rule_str` and apply [`ToolRuleDecision::Deny`]
-    /// when the DSL string does not specify an explicit decision.
+    /// Convenience for hardcoded, statically known deny rules.
+    /// See [`Self::allow`] for the panic contract.
     pub fn deny(rule_str: &str) -> Self {
         Self::from_dsl(rule_str, ToolRuleDecision::Deny)
+            .unwrap_or_else(|e| panic!("invalid permission rule `{rule_str}`: {e}"))
     }
 
-    /// Crate-internal raw constructor used by the DSL parser. Bypasses
-    /// the DSL grammar — callers must already have parsed/validated
-    /// the pattern.
-    pub(crate) fn new_internal(
+    /// Crate-internal raw constructor used by the DSL parser after
+    /// the grammar has accepted `pattern`. Skips the DSL grammar
+    /// step but still compiles the anchored regex, which is where
+    /// the `InvalidToolPattern` failure mode is caught.
+    pub(crate) fn try_new_from_dsl(
         pattern: impl Into<String>,
         input_pattern: Option<String>,
         decision: ToolRuleDecision,
-    ) -> Self {
+    ) -> Result<Self, super::dsl::PermissionDslError> {
         let pattern = pattern.into();
         let anchored = anchor_pattern(&pattern);
-        let compiled = Regex::new(&anchored).ok();
-        Self {
+        let compiled = Regex::new(&anchored).map_err(|err| {
+            super::dsl::PermissionDslError::InvalidToolPattern {
+                pattern: pattern.clone(),
+                details: err.to_string(),
+            }
+        })?;
+        Ok(Self {
             pattern,
             input_pattern,
             decision,
             reason: None,
-            compiled,
-        }
+            compiled: Some(compiled),
+        })
     }
 
     pub fn input_pattern(mut self, pattern: impl Into<String>) -> Self {
@@ -242,58 +279,33 @@ impl ToolRule {
         }
     }
 
-    pub fn matches_with_input(&self, tool_name: &str, input: &Value) -> bool {
-        self.matches_with_input_extractors(tool_name, input, None)
-    }
-
-    pub fn matches_with_input_extractors(
-        &self,
-        tool_name: &str,
-        input: &Value,
-        extractors: Option<&HashMap<String, Arc<dyn InputExtractor>>>,
-    ) -> bool {
+    /// Test whether this rule applies to a tool call given the subjects
+    /// that tool extracted from its own input.
+    ///
+    /// `subjects` is produced by [`crate::tools::Tool::permission_subjects`]
+    /// — the tool is the single source of truth for "what strings should
+    /// `Tool(pattern)` match against?". A rule matches if any subject
+    /// satisfies the pattern. An empty subjects slice with a present
+    /// `input_pattern` means "no match" (fail-closed).
+    pub fn matches_with_subjects(&self, tool_name: &str, subjects: &[String]) -> bool {
         if !self.matches(tool_name) {
             return false;
         }
 
-        match &self.input_pattern {
-            Some(pattern) => self.match_input_pattern(pattern, tool_name, input, extractors),
-            None => true,
-        }
-    }
-
-    fn match_input_pattern(
-        &self,
-        pattern: &str,
-        tool_name: &str,
-        input: &Value,
-        extractors: Option<&HashMap<String, Arc<dyn InputExtractor>>>,
-    ) -> bool {
-        // WebFetch domain matching is a special case that requires more than
-        // simple field extraction.
-        if tool_name == "WebFetch" {
-            if let Some(domain) = pattern.strip_prefix("domain:") {
-                return input
-                    .get("url")
-                    .and_then(|v| v.as_str())
-                    .map(|url| Self::matches_domain(url, domain))
-                    .unwrap_or(false);
-            }
-            let input_str = input.get("url").and_then(|v| v.as_str());
-            return input_str
-                .map(|s| self.match_pattern(pattern, s))
-                .unwrap_or(false);
-        }
-
-        let input_str = extractors
-            .and_then(|map| map.get(tool_name))
-            .and_then(|ext| ext.extract(input));
-
-        let Some(input_str) = input_str else {
-            return false;
+        let Some(pattern) = &self.input_pattern else {
+            return true;
         };
 
-        self.match_pattern(pattern, input_str)
+        // Domain patterns (e.g. `WebFetch(domain:github.com)`) require
+        // URL parsing rather than raw prefix matching. The tool's
+        // `permission_subjects` already returns the full URL as a
+        // subject; the rule walks the subjects and applies the
+        // domain-aware matcher.
+        if let Some(domain) = pattern.strip_prefix("domain:") {
+            return subjects.iter().any(|s| Self::matches_domain(s, domain));
+        }
+
+        subjects.iter().any(|s| self.match_pattern(pattern, s))
     }
 
     fn match_pattern(&self, pattern: &str, input: &str) -> bool {
@@ -332,60 +344,15 @@ impl ToolRule {
     }
 }
 
+#[derive(Clone, Default, Debug)]
 pub struct ToolPolicy {
     pub rules: Vec<ToolRule>,
     pub tool_limits: HashMap<String, ToolLimits>,
-    extractors: HashMap<String, Arc<dyn InputExtractor>>,
-}
-
-impl std::fmt::Debug for ToolPolicy {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("ToolPolicy")
-            .field("rules", &self.rules)
-            .field("tool_limits", &self.tool_limits)
-            .field(
-                "extractors",
-                &format!("({} entries)", self.extractors.len()),
-            )
-            .finish()
-    }
-}
-
-impl Default for ToolPolicy {
-    fn default() -> Self {
-        Self {
-            rules: Vec::new(),
-            tool_limits: HashMap::new(),
-            extractors: default_extractors()
-                .into_iter()
-                .map(|(k, v)| (k.to_string(), v))
-                .collect(),
-        }
-    }
-}
-
-impl Clone for ToolPolicy {
-    fn clone(&self) -> Self {
-        Self {
-            rules: self.rules.clone(),
-            tool_limits: self.tool_limits.clone(),
-            extractors: self.extractors.clone(),
-        }
-    }
 }
 
 impl ToolPolicy {
     pub fn new() -> Self {
         Self::default()
-    }
-
-    /// Register a custom input extractor for a tool name.
-    pub fn register_extractor(
-        &mut self,
-        tool_name: impl Into<String>,
-        extractor: Arc<dyn InputExtractor>,
-    ) {
-        self.extractors.insert(tool_name.into(), extractor);
     }
 
     pub fn builder() -> ToolPolicyBuilder {
@@ -397,19 +364,25 @@ impl ToolPolicy {
         Self::builder().allow(".*").build()
     }
 
-    /// Check a tool against rules only.
+    /// Check a tool call against the policy's rules.
     ///
-    /// - First check deny rules: if any match, return Deny.
-    /// - Then check allow rules: if any match, return Allow.
-    /// - Default: Deny("no matching rule").
-    pub fn check(&self, tool_name: &str, input: &Value) -> PermissionDecision {
-        // Deny rules first (highest priority)
+    /// `subjects` is the tool's self-declared list of subjects for this
+    /// input, obtained by the caller via
+    /// [`crate::tools::Tool::permission_subjects`]. The policy is the
+    /// rule engine; the tool is the extractor. See the module docs for
+    /// the rationale.
+    ///
+    /// Evaluation order:
+    /// 1. Deny rules — if any match, return `Deny`.
+    /// 2. Allow rules — if any match, return `Allow`.
+    /// 3. Default — `Deny { reason: NoMatchingRule }`.
+    pub fn check(&self, tool_name: &str, subjects: &[String]) -> PermissionDecision {
         for rule in self
             .rules
             .iter()
             .filter(|r| r.decision == ToolRuleDecision::Deny)
         {
-            if rule.matches_with_input_extractors(tool_name, input, Some(&self.extractors)) {
+            if rule.matches_with_subjects(tool_name, subjects) {
                 return PermissionDecision::Deny {
                     reason: PermissionDeniedReason::PolicyDeny(
                         rule.reason
@@ -420,37 +393,37 @@ impl ToolPolicy {
             }
         }
 
-        // Allow rules
         for rule in self
             .rules
             .iter()
             .filter(|r| r.decision == ToolRuleDecision::Allow)
         {
-            if rule.matches_with_input_extractors(tool_name, input, Some(&self.extractors)) {
+            if rule.matches_with_subjects(tool_name, subjects) {
                 return PermissionDecision::Allow;
             }
         }
 
-        // Default: deny
         PermissionDecision::Deny {
             reason: PermissionDeniedReason::NoMatchingRule,
         }
     }
 
-    /// Check permission for an explicit user-requested skill invocation such as `/review-pr`.
+    /// Check permission for an explicit user-requested skill invocation
+    /// such as `/review-pr`.
     ///
-    /// This is intentionally distinct from model-driven `Skill` tool use:
+    /// Intentionally distinct from model-driven `Skill` tool use:
     /// - deny rules still take precedence
-    /// - allow rules are honored
-    /// - if no rule matches, the explicit wrapper invocation is allowed and
-    ///   nested tool usage remains governed by the delegated runtime policy
-    pub fn check_explicit_skill(&self, input: &Value) -> PermissionDecision {
+    /// - allow rules are honoured
+    /// - if no rule matches, the explicit wrapper invocation is allowed
+    ///   and nested tool usage remains governed by the delegated runtime
+    ///   policy.
+    pub fn check_explicit_skill(&self, subjects: &[String]) -> PermissionDecision {
         for rule in self
             .rules
             .iter()
             .filter(|r| r.decision == ToolRuleDecision::Deny)
         {
-            if rule.matches_with_input_extractors("Skill", input, Some(&self.extractors)) {
+            if rule.matches_with_subjects("Skill", subjects) {
                 return PermissionDecision::Deny {
                     reason: PermissionDeniedReason::PolicyDeny(
                         rule.reason
@@ -466,7 +439,7 @@ impl ToolPolicy {
             .iter()
             .filter(|r| r.decision == ToolRuleDecision::Allow)
         {
-            if rule.matches_with_input_extractors("Skill", input, Some(&self.extractors)) {
+            if rule.matches_with_subjects("Skill", subjects) {
                 return PermissionDecision::Allow;
             }
         }
@@ -524,6 +497,34 @@ impl ToolPolicyBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::Value;
+
+    /// Test helper mirroring what each tool's `permission_subjects`
+    /// returns. Used to drive `ToolPolicy::check` from tests without
+    /// depending on the whole Tool trait — keeps the rules module
+    /// testable in isolation.
+    fn subjects(tool: &str, input: &Value) -> Vec<String> {
+        let field = |key: &str| {
+            input
+                .get(key)
+                .and_then(Value::as_str)
+                .map(str::to_string)
+                .into_iter()
+                .collect::<Vec<_>>()
+        };
+        match tool {
+            "Bash" => field("command"),
+            "Skill" => field("skill"),
+            "Read" | "Write" | "Edit" => field("file_path"),
+            "Glob" | "Grep" => field("path"),
+            "WebFetch" => field("url"),
+            _ => Vec::new(),
+        }
+    }
+
+    fn check(policy: &ToolPolicy, tool: &str, input: &Value) -> PermissionDecision {
+        policy.check(tool, &subjects(tool, input))
+    }
 
     #[test]
     fn test_tool_decision() {
@@ -567,22 +568,14 @@ mod tests {
             .allow(".*")
             .deny("Skill(internal)")
             .build();
-        assert!(
-            policy
-                .check("Skill", &serde_json::json!({"skill": "internal"}))
-                .is_denied()
-        );
-        assert!(
-            policy
-                .check("Skill", &serde_json::json!({"skill": "commit"}))
-                .is_allowed()
-        );
+        assert!(check(&policy, "Skill", &serde_json::json!({"skill": "internal"})).is_denied());
+        assert!(check(&policy, "Skill", &serde_json::json!({"skill": "commit"})).is_allowed());
     }
 
     #[test]
     fn test_policy_permissive() {
         let policy = ToolPolicy::permissive();
-        let result = policy.check("AnyTool", &Value::Null);
+        let result = check(&policy, "AnyTool", &Value::Null);
         assert!(result.is_allowed());
     }
 
@@ -590,17 +583,17 @@ mod tests {
     fn test_policy_deny_takes_precedence() {
         let policy = ToolPolicy::builder().allow(".*").deny("Write").build();
 
-        assert!(policy.check("Read", &Value::Null).is_allowed());
-        assert!(policy.check("Write", &Value::Null).is_denied());
+        assert!(check(&policy, "Read", &Value::Null).is_allowed());
+        assert!(check(&policy, "Write", &Value::Null).is_denied());
     }
 
     #[test]
     fn test_policy_allow_rules() {
         let policy = ToolPolicy::builder().allow("Bash").allow("Read").build();
 
-        assert!(policy.check("Bash", &Value::Null).is_allowed());
-        assert!(policy.check("Read", &Value::Null).is_allowed());
-        assert!(policy.check("Write", &Value::Null).is_denied());
+        assert!(check(&policy, "Bash", &Value::Null).is_allowed());
+        assert!(check(&policy, "Read", &Value::Null).is_allowed());
+        assert!(check(&policy, "Write", &Value::Null).is_denied());
     }
 
     #[test]
@@ -610,8 +603,8 @@ mod tests {
         let git_input = serde_json::json!({"command": "git status"});
         let rm_input = serde_json::json!({"command": "rm -rf /"});
 
-        assert!(policy.check("Bash", &git_input).is_allowed());
-        assert!(policy.check("Bash", &rm_input).is_denied());
+        assert!(check(&policy, "Bash", &git_input).is_allowed());
+        assert!(check(&policy, "Bash", &rm_input).is_denied());
     }
 
     #[test]
@@ -634,8 +627,8 @@ mod tests {
         let github_input = serde_json::json!({"url": "https://github.com/user/repo"});
         let other_input = serde_json::json!({"url": "https://example.com/page"});
 
-        assert!(policy.check("WebFetch", &github_input).is_allowed());
-        assert!(policy.check("WebFetch", &other_input).is_denied());
+        assert!(check(&policy, "WebFetch", &github_input).is_allowed());
+        assert!(check(&policy, "WebFetch", &other_input).is_denied());
     }
 
     #[test]
@@ -648,25 +641,28 @@ mod tests {
         let exact = serde_json::json!({"url": "https://github.com/user/repo"});
         let subdomain = serde_json::json!({"url": "https://api.github.com/repos"});
         let with_port = serde_json::json!({"url": "https://github.com:443/path"});
-        assert!(policy.check("WebFetch", &exact).is_allowed());
-        assert!(policy.check("WebFetch", &subdomain).is_allowed());
-        assert!(policy.check("WebFetch", &with_port).is_allowed());
+        assert!(check(&policy, "WebFetch", &exact).is_allowed());
+        assert!(check(&policy, "WebFetch", &subdomain).is_allowed());
+        assert!(check(&policy, "WebFetch", &with_port).is_allowed());
 
         // Should deny: bypass attempts
         let fake_subdomain = serde_json::json!({"url": "https://github.com.attacker.com/path"});
         let query_bypass = serde_json::json!({"url": "https://attacker.com?url=github.com"});
         let path_bypass = serde_json::json!({"url": "https://attacker.com/github.com"});
         let partial_match = serde_json::json!({"url": "https://notgithub.com/page"});
-        assert!(policy.check("WebFetch", &fake_subdomain).is_denied());
-        assert!(policy.check("WebFetch", &query_bypass).is_denied());
-        assert!(policy.check("WebFetch", &path_bypass).is_denied());
-        assert!(policy.check("WebFetch", &partial_match).is_denied());
+        assert!(check(&policy, "WebFetch", &fake_subdomain).is_denied());
+        assert!(check(&policy, "WebFetch", &query_bypass).is_denied());
+        assert!(check(&policy, "WebFetch", &path_bypass).is_denied());
+        assert!(check(&policy, "WebFetch", &partial_match).is_denied());
     }
 
     #[test]
     fn test_explicit_skill_invocation_allowed_in_default_mode() {
         let policy = ToolPolicy::default();
-        let result = policy.check_explicit_skill(&serde_json::json!({"skill": "review-pr"}));
+        let result = policy.check_explicit_skill(&subjects(
+            "Skill",
+            &serde_json::json!({"skill": "review-pr"}),
+        ));
         assert!(result.is_allowed());
     }
 
@@ -676,12 +672,18 @@ mod tests {
 
         assert!(
             policy
-                .check_explicit_skill(&serde_json::json!({"skill": "review-pr"}))
+                .check_explicit_skill(&subjects(
+                    "Skill",
+                    &serde_json::json!({"skill": "review-pr"})
+                ))
                 .is_allowed()
         );
         assert!(
             policy
-                .check_explicit_skill(&serde_json::json!({"skill": "internal"}))
+                .check_explicit_skill(&subjects(
+                    "Skill",
+                    &serde_json::json!({"skill": "internal"})
+                ))
                 .is_denied()
         );
     }

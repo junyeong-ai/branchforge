@@ -26,7 +26,20 @@ impl SchemaTool for WriteTool {
     type Input = WriteInput;
 
     const NAME: &'static str = "Write";
+    const SEARCH_HINT: Option<&'static str> = Some("write file to disk, overwriting if exists");
     const DESCRIPTION: &'static str = "Write a file to the local filesystem. Overwrites existing files. Creates parent directories if needed. Prefer Edit for modifying existing files.";
+
+    fn is_destructive_typed(&self, _input: &WriteInput) -> bool {
+        // Write overwrites existing files — destructive in that sense.
+        // We cannot know from the input alone whether the target
+        // exists, so we declare destructive unconditionally. HITL
+        // approval flows will prompt on every Write.
+        true
+    }
+
+    fn permission_subjects_typed(&self, input: &WriteInput) -> Vec<String> {
+        vec![input.file_path.clone()]
+    }
 
     async fn handle(&self, input: WriteInput, context: &ExecutionContext) -> ToolResult {
         let path = match context.try_resolve_for(Self::NAME, &input.file_path) {

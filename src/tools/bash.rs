@@ -243,7 +243,44 @@ impl SchemaTool for BashTool {
     type Input = BashInput;
 
     const NAME: &'static str = "Bash";
+    const SEARCH_HINT: Option<&'static str> = Some("execute a bash shell command");
     const DESCRIPTION: &'static str = "Execute a bash command with optional timeout (default 120s, max 600s). Use `run_in_background: true` for long-running commands. Quote paths with spaces. Output is truncated at 30000 characters.";
+
+    fn is_read_only_typed(&self, input: &BashInput) -> bool {
+        // Input-aware: a Bash command is read-only only when the
+        // shell AST contains no mutating primitive. Reuse the
+        // existing BashAnalyzer heuristics via its `is_read_only`
+        // classification helper if available; default to false.
+        crate::security::bash::BashAnalyzer::classify_read_only(&input.command)
+    }
+
+    fn is_concurrency_safe_typed(&self, input: &BashInput) -> bool {
+        // A command is parallel-safe only if it is read-only AND
+        // does not touch a shared resource outside the workspace.
+        // Conservative: same as read-only status for now; refine
+        // with per-command analysis in a follow-up.
+        crate::security::bash::BashAnalyzer::classify_read_only(&input.command)
+    }
+
+    fn is_destructive_typed(&self, input: &BashInput) -> bool {
+        // Destructive ≡ irreversible without recovery: `rm`, `dd`,
+        // `mkfs`, `git reset --hard`, `truncate`, `>file`, …
+        crate::security::bash::BashAnalyzer::classify_destructive(&input.command)
+    }
+
+    fn permission_subjects_typed(&self, input: &BashInput) -> Vec<String> {
+        // The first non-whitespace token is the command name. The
+        // permission DSL matches `Bash(rm:*)` against the prefix,
+        // so we surface the bare command name and let the engine
+        // do pattern matching.
+        input
+            .command
+            .split_whitespace()
+            .next()
+            .map(|s| s.to_string())
+            .into_iter()
+            .collect()
+    }
 
     async fn handle(&self, input: BashInput, context: &ExecutionContext) -> ToolResult {
         let bypass = self.should_bypass(&input, context);

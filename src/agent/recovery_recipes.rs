@@ -47,16 +47,17 @@
 //! let registry = RecipeRegistry::new()
 //!     .with_boxed_recipes(builtin_general_recipes());
 //!
-//! let action = registry.decide(&RecoveryDecisionInput {
-//!     category: FailureCategory::RateLimit,
-//!     attempt: 0,
-//! });
-//! assert!(matches!(action, RecoveryAction::RetryAfter { .. }));
+//! let decision = registry.decide(&RecoveryDecisionInput::new(
+//!     FailureCategory::RateLimit,
+//!     0,
+//! ));
+//! assert!(matches!(decision.action, RecoveryAction::RetryAfter { .. }));
 //! ```
 
 use std::time::Duration;
 
 use crate::FailureCategory;
+use crate::ir::RateLimitSnapshot;
 
 /// Public action a recipe can recommend.
 ///
@@ -64,6 +65,7 @@ use crate::FailureCategory;
 /// internal `Defer` (recipe-doesn't-handle-this) variant is hidden
 /// inside [`RecipeDecision`] so consumers of `RecoveryAction` only
 /// see actionable outcomes.
+#[non_exhaustive]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum RecoveryAction {
     /// Retry immediately. Use this for transient failures with no
@@ -79,6 +81,13 @@ pub enum RecoveryAction {
     CollapseToolResultsAndRetry { max_chars: usize },
     /// Run full session compaction, then retry.
     CompactAndRetry,
+    /// Phase D B-2: "prompt too long" fallback when collapse and
+    /// compaction are not enough. Archive the oldest `rounds`
+    /// complete user→assistant turns from the current branch via
+    /// [`crate::graph::SessionGraph::archive_before`], then retry.
+    /// Graph events are preserved for replay; only the projection
+    /// shrinks.
+    DrainOldestRounds { rounds: usize },
     /// Switch to the configured fallback model and retry. The
     /// budget tracker's `BudgetExceedPolicy::Fallback(model)`
     /// captures which model.
@@ -96,9 +105,50 @@ impl RecoveryAction {
     }
 }
 
+/// Full result of a recipe-registry lookup: the action plus the
+/// recipe that produced it. Callers (observability, error logs)
+/// use `recipe` as the provenance label so "why did the runtime
+/// retry?" has a stable answer beyond guessing from the error kind.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RecoveryDecision {
+    pub action: RecoveryAction,
+    /// Stable name of the recipe that returned the action. Set to
+    /// `"default_abort"` when no recipe matched and the registry
+    /// fell through to [`RecoveryAction::Abort`].
+    pub recipe: &'static str,
+}
+
+impl RecoveryDecision {
+    /// Helper for building a decision from a matched recipe.
+    pub fn from_recipe(recipe: &'static str, action: RecoveryAction) -> Self {
+        Self { action, recipe }
+    }
+
+    /// Terminal abort with no recipe match.
+    pub fn default_abort() -> Self {
+        Self {
+            action: RecoveryAction::Abort,
+            recipe: "default_abort",
+        }
+    }
+}
+
+impl crate::decision::DecisionReason for RecoveryDecision {
+    fn category(&self) -> &'static str {
+        // Category is the recipe name — cardinality is bounded by
+        // the number of registered recipes, which is typically <20.
+        self.recipe
+    }
+
+    fn summary(&self) -> String {
+        format!("recipe={} action={:?}", self.recipe, self.action)
+    }
+}
+
 /// Internal decision a single recipe returns. The registry collapses
 /// `Defer` to "try the next recipe"; the public [`RecipeRegistry::decide`]
 /// API never exposes `Defer` to callers.
+#[non_exhaustive]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum RecipeDecision {
     /// This recipe handles the input — return this action.
@@ -123,6 +173,25 @@ pub struct RecoveryDecisionInput {
     /// Zero-based attempt counter for the current request. Recipes
     /// use this to escalate (retry → compact → abort).
     pub attempt: u32,
+    /// Phase D E-2: provider-published rate-limit accounting
+    /// attached to the failing response, when available. Populated
+    /// from [`crate::Error::rate_limit_snapshot`] by the recovery
+    /// executor. `None` when the transport does not publish
+    /// rate-limit headers or the error path was not HTTP
+    /// (e.g. local hook failure, budget exceeded).
+    pub rate_limit: Option<RateLimitSnapshot>,
+}
+
+impl RecoveryDecisionInput {
+    /// Convenience constructor for callers that only have
+    /// category + attempt (tests, legacy call sites).
+    pub fn new(category: FailureCategory, attempt: u32) -> Self {
+        Self {
+            category,
+            attempt,
+            rate_limit: None,
+        }
+    }
 }
 
 /// A named recovery decision function.
@@ -172,9 +241,10 @@ impl RecipeRegistry {
     }
 
     /// Walk the recipes in priority order. Returns the first
-    /// non-`Defer` action, or [`RecoveryAction::Abort`] if no
-    /// recipe matched.
-    pub fn decide(&self, input: &RecoveryDecisionInput) -> RecoveryAction {
+    /// non-`Defer` action as a [`RecoveryDecision`] that also
+    /// records which recipe matched, or a terminal
+    /// [`RecoveryDecision::default_abort`] when no recipe matched.
+    pub fn decide(&self, input: &RecoveryDecisionInput) -> RecoveryDecision {
         for recipe in &self.recipes {
             if let RecipeDecision::Act(action) = recipe.decide(input) {
                 tracing::debug!(
@@ -185,10 +255,10 @@ impl RecipeRegistry {
                     action = ?action,
                     "Recovery recipe matched"
                 );
-                return action;
+                return RecoveryDecision::from_recipe(recipe.name(), action);
             }
         }
-        RecoveryAction::Abort
+        RecoveryDecision::default_abort()
     }
 
     /// Number of registered recipes.
@@ -217,8 +287,32 @@ pub fn builtin_general_recipes() -> Vec<Box<dyn RecoveryRecipe>> {
     ]
 }
 
-/// Exponential backoff for `RateLimit` errors. Caps at 30s and
-/// gives up after 5 attempts.
+/// Rate-limit backoff that prefers the provider's own accounting
+/// when available and falls back to capped exponential backoff.
+///
+/// # Data-driven path (Phase D E-2)
+///
+/// When `input.rate_limit` is `Some(snapshot)`, the recipe reads
+/// `seconds_until_reset(now())` and uses that as the retry delay,
+/// clamped to `[base_delay_ms, max_delay_ms]`. This closes the
+/// logical gap between Phase C-6 (RateLimitSnapshot is parsed from
+/// headers and emitted on events) and the recovery loop (which
+/// previously ignored the snapshot and slept on blind exponential
+/// backoff instead).
+///
+/// The clamp floor prevents a snapshot reporting "0s until reset"
+/// from triggering a tight retry loop against a provider that has
+/// not yet propagated its window rollover. The ceiling is the same
+/// max the exponential path uses, so a single misbehaving snapshot
+/// (e.g. clock skew reporting a 12-hour window) cannot stall the
+/// agent forever.
+///
+/// # Fallback path
+///
+/// When no snapshot is attached (Vertex/Bedrock/Foundry that don't
+/// publish rate-limit headers, or local rate-limit errors from
+/// budget guards), the classic `base * 2^attempt` exponential
+/// backoff applies, capped at `max_delay_ms`.
 #[derive(Debug, Clone, Copy)]
 pub struct RateLimitBackoffRecipe {
     pub max_attempts: u32,
@@ -236,6 +330,28 @@ impl Default for RateLimitBackoffRecipe {
     }
 }
 
+impl RateLimitBackoffRecipe {
+    /// Compute the retry delay in milliseconds for a given attempt,
+    /// preferring the provider-published snapshot when present.
+    /// Pure function — separated out so tests can inject a
+    /// deterministic `now` and avoid clock flakiness.
+    fn delay_ms(
+        &self,
+        attempt: u32,
+        snapshot: Option<&RateLimitSnapshot>,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> u64 {
+        if let Some(snap) = snapshot
+            && let Some(secs) = snap.seconds_until_reset(now)
+        {
+            let from_snapshot = secs.saturating_mul(1_000);
+            return from_snapshot.clamp(self.base_delay_ms, self.max_delay_ms);
+        }
+        let exp = self.base_delay_ms.saturating_mul(1u64 << attempt.min(10));
+        exp.min(self.max_delay_ms)
+    }
+}
+
 impl RecoveryRecipe for RateLimitBackoffRecipe {
     fn name(&self) -> &'static str {
         "rate_limit_backoff"
@@ -247,10 +363,7 @@ impl RecoveryRecipe for RateLimitBackoffRecipe {
         if input.attempt >= self.max_attempts {
             return RecipeDecision::Act(RecoveryAction::Abort);
         }
-        let exp = self
-            .base_delay_ms
-            .saturating_mul(1u64 << input.attempt.min(10));
-        let delay_ms = exp.min(self.max_delay_ms);
+        let delay_ms = self.delay_ms(input.attempt, input.rate_limit.as_ref(), chrono::Utc::now());
         RecipeDecision::Act(RecoveryAction::RetryAfter {
             delay: Duration::from_millis(delay_ms),
         })
@@ -291,16 +404,20 @@ impl RecoveryRecipe for TransportRetryRecipe {
     }
 }
 
-/// Two-stage recovery for `ContextWindow` overflows:
+/// Escalating recovery ladder for `ContextWindow` overflows:
 ///
 /// - Attempt 0: collapse oversize tool results to `collapse_max_chars`
 ///   characters (in-place mutation via the executor) and retry.
 /// - Attempt 1: trigger full session compaction and retry.
-/// - Attempt 2+: abort.
+/// - Attempt 2: Phase D B-2 PTL fallback — drop the oldest
+///   user→assistant round via `DrainOldestRounds { rounds: 1 }`.
+/// - Attempt 3: drop two more rounds (`DrainOldestRounds { rounds: 2 }`).
+/// - Attempt 4+: abort.
 ///
-/// Ports the legacy `ContextRecovery::attempt_recovery` decision
-/// table — the side-effecting steps now live in the
-/// [`super::recovery_executor::RecoveryExecutor`] consumer.
+/// The PTL ladder handles the worst case where compaction itself
+/// hit a context-window overflow (the compaction prompt is larger
+/// than the model's window). Ported from claw-code's "prompt too
+/// long" retry pattern in `services/compact/compact.ts`.
 #[derive(Debug, Clone, Copy)]
 pub struct ContextOverflowRecipe {
     pub collapse_max_chars: usize,
@@ -327,6 +444,8 @@ impl RecoveryRecipe for ContextOverflowRecipe {
                 max_chars: self.collapse_max_chars,
             }),
             1 => RecipeDecision::Act(RecoveryAction::CompactAndRetry),
+            2 => RecipeDecision::Act(RecoveryAction::DrainOldestRounds { rounds: 1 }),
+            3 => RecipeDecision::Act(RecoveryAction::DrainOldestRounds { rounds: 2 }),
             _ => RecipeDecision::Act(RecoveryAction::Abort),
         }
     }
@@ -390,16 +509,15 @@ mod tests {
     use super::*;
 
     fn input(category: FailureCategory, attempt: u32) -> RecoveryDecisionInput {
-        RecoveryDecisionInput { category, attempt }
+        RecoveryDecisionInput::new(category, attempt)
     }
 
     #[test]
     fn empty_registry_aborts() {
         let r = RecipeRegistry::new();
-        assert_eq!(
-            r.decide(&input(FailureCategory::RateLimit, 0)),
-            RecoveryAction::Abort
-        );
+        let decision = r.decide(&input(FailureCategory::RateLimit, 0));
+        assert_eq!(decision.action, RecoveryAction::Abort);
+        assert_eq!(decision.recipe, "default_abort");
     }
 
     #[test]
@@ -457,18 +575,31 @@ mod tests {
     }
 
     #[test]
-    fn context_overflow_collapses_then_compacts_then_aborts() {
+    fn context_overflow_ladder_escalates_via_collapse_compact_drain_abort() {
         let r = ContextOverflowRecipe::default();
+        // Attempt 0: collapse oversize tool results.
         assert!(matches!(
             r.decide(&input(FailureCategory::ContextWindow, 0)),
             RecipeDecision::Act(RecoveryAction::CollapseToolResultsAndRetry { .. })
         ));
+        // Attempt 1: full compaction.
         assert_eq!(
             r.decide(&input(FailureCategory::ContextWindow, 1)),
             RecipeDecision::Act(RecoveryAction::CompactAndRetry)
         );
+        // Attempt 2: PTL drain — drop one oldest round.
         assert_eq!(
             r.decide(&input(FailureCategory::ContextWindow, 2)),
+            RecipeDecision::Act(RecoveryAction::DrainOldestRounds { rounds: 1 })
+        );
+        // Attempt 3: drop two more rounds.
+        assert_eq!(
+            r.decide(&input(FailureCategory::ContextWindow, 3)),
+            RecipeDecision::Act(RecoveryAction::DrainOldestRounds { rounds: 2 })
+        );
+        // Attempt 4+: abort.
+        assert_eq!(
+            r.decide(&input(FailureCategory::ContextWindow, 4)),
             RecipeDecision::Act(RecoveryAction::Abort)
         );
     }
@@ -509,30 +640,33 @@ mod tests {
         assert_eq!(r.len(), 5);
 
         // RateLimit hits the rate-limit recipe.
-        assert!(matches!(
-            r.decide(&input(FailureCategory::RateLimit, 0)),
-            RecoveryAction::RetryAfter { .. }
-        ));
+        let d = r.decide(&input(FailureCategory::RateLimit, 0));
+        assert!(matches!(d.action, RecoveryAction::RetryAfter { .. }));
+        assert_eq!(d.recipe, "rate_limit_backoff");
+
         // ContextWindow hits the collapse recipe.
+        let d = r.decide(&input(FailureCategory::ContextWindow, 0));
         assert!(matches!(
-            r.decide(&input(FailureCategory::ContextWindow, 0)),
+            d.action,
             RecoveryAction::CollapseToolResultsAndRetry { .. }
         ));
-        // Auth hits the auth recipe (was previously Abort with no
-        // matching recipe).
-        assert_eq!(
-            r.decide(&input(FailureCategory::Auth, 0)),
-            RecoveryAction::Retry
-        );
-        // BadRequest doesn't match anything → Abort.
-        assert_eq!(
-            r.decide(&input(FailureCategory::BadRequest, 0)),
-            RecoveryAction::Abort
-        );
+        assert_eq!(d.recipe, "context_overflow_collapse_compact");
+
+        // Auth hits the auth recipe.
+        let d = r.decide(&input(FailureCategory::Auth, 0));
+        assert_eq!(d.action, RecoveryAction::Retry);
+        assert_eq!(d.recipe, "auth_retry_once");
+
+        // BadRequest doesn't match anything → default_abort.
+        let d = r.decide(&input(FailureCategory::BadRequest, 0));
+        assert_eq!(d.action, RecoveryAction::Abort);
+        assert_eq!(d.recipe, "default_abort");
     }
 
     /// User-defined recipes can be mixed with the builtin set and
-    /// shadow them when registered first.
+    /// shadow them when registered first. The `recipe` field on the
+    /// returned [`RecoveryDecision`] identifies which one matched
+    /// — the main observability win from Workstream A-3.
     #[test]
     fn user_recipe_can_shadow_builtin() {
         #[derive(Debug)]
@@ -553,10 +687,80 @@ mod tests {
         let r = RecipeRegistry::new()
             .with_recipe(AggressiveRateLimit)
             .with_boxed_recipes(builtin_general_recipes());
+        let d = r.decide(&input(FailureCategory::RateLimit, 0));
+        assert_eq!(d.action, RecoveryAction::Retry);
         assert_eq!(
-            r.decide(&input(FailureCategory::RateLimit, 0)),
-            RecoveryAction::Retry
+            d.recipe, "aggressive",
+            "custom recipe must win over builtin when registered first"
         );
+    }
+
+    /// Phase D E-2: when the failing error carries a
+    /// `RateLimitSnapshot` with `seconds_until_reset = 12s`, the
+    /// recipe returns that exact delay (clamped into its
+    /// `[base, max]` band) instead of falling through to the
+    /// exponential formula. The snapshot path is what closes the
+    /// Phase C-6 → Phase D recovery gap.
+    #[test]
+    fn rate_limit_snapshot_drives_retry_after_delay() {
+        let recipe = RateLimitBackoffRecipe::default();
+        let now = chrono::Utc::now();
+        let snap = RateLimitSnapshot {
+            requests_reset: Some(now + chrono::Duration::seconds(12)),
+            ..Default::default()
+        };
+        // 12s * 1000 = 12000ms, inside [500, 30000] band → returned verbatim.
+        assert_eq!(recipe.delay_ms(0, Some(&snap), now), 12_000);
+        // Attempt index must not influence the delay when the
+        // snapshot is present — the provider's own accounting wins.
+        assert_eq!(recipe.delay_ms(3, Some(&snap), now), 12_000);
+    }
+
+    /// A snapshot reporting "0s until reset" still clamps to
+    /// `base_delay_ms` to prevent a tight retry loop against a
+    /// provider that has not yet propagated its window rollover.
+    #[test]
+    fn rate_limit_snapshot_zero_floor_clamps_to_base() {
+        let recipe = RateLimitBackoffRecipe::default();
+        let now = chrono::Utc::now();
+        let snap = RateLimitSnapshot {
+            tokens_reset: Some(now - chrono::Duration::seconds(1)),
+            ..Default::default()
+        };
+        assert_eq!(
+            recipe.delay_ms(0, Some(&snap), now),
+            recipe.base_delay_ms,
+            "zero/negative reset must clamp up to base, not sleep for 0"
+        );
+    }
+
+    /// A snapshot reporting an absurd window (e.g. 12 hours from a
+    /// misconfigured provider or wall-clock skew) still clamps down
+    /// to `max_delay_ms` so the agent never stalls indefinitely on
+    /// a single bad value.
+    #[test]
+    fn rate_limit_snapshot_large_value_clamps_to_max() {
+        let recipe = RateLimitBackoffRecipe::default();
+        let now = chrono::Utc::now();
+        let snap = RateLimitSnapshot {
+            requests_reset: Some(now + chrono::Duration::hours(12)),
+            ..Default::default()
+        };
+        assert_eq!(recipe.delay_ms(0, Some(&snap), now), recipe.max_delay_ms);
+    }
+
+    /// Without a snapshot the recipe falls back to classic
+    /// `base * 2^attempt` exponential backoff, matching the
+    /// pre-Phase-D-E-2 behaviour. Regression guard: the fallback
+    /// path must stay identical so transports that don't publish
+    /// rate-limit headers (Vertex, Bedrock, Foundry) keep working.
+    #[test]
+    fn rate_limit_without_snapshot_falls_back_to_exponential() {
+        let recipe = RateLimitBackoffRecipe::default();
+        let now = chrono::Utc::now();
+        assert_eq!(recipe.delay_ms(0, None, now), 500);
+        assert_eq!(recipe.delay_ms(1, None, now), 1_000);
+        assert_eq!(recipe.delay_ms(2, None, now), 2_000);
     }
 
     #[test]

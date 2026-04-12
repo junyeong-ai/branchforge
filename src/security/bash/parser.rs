@@ -280,6 +280,7 @@ fn bash_language() -> Language {
     tree_sitter_bash::LANGUAGE.into()
 }
 
+#[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SecurityConcern {
     CommandSubstitution,
@@ -298,6 +299,7 @@ pub struct ReferencedPath {
     pub context: PathContext,
 }
 
+#[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PathContext {
     Argument,
@@ -403,7 +405,209 @@ pub struct BashAnalyzer {
     policy: BashPolicy,
 }
 
+/// Allowlist of commands that are safe to declare read-only.
+/// Anything not on this list is treated as potentially mutating.
+///
+/// Kept intentionally conservative — only commands whose semantics
+/// are *purely* inspection qualify. `grep` qualifies because it
+/// reads; `find` qualifies because the base form reads (a
+/// `find -delete` invocation is caught by the compound-op check).
+const READ_ONLY_COMMANDS: &[&str] = &[
+    "ls", "cat", "head", "tail", "wc", "echo", "pwd", "which", "whoami", "id", "date", "stat",
+    "file", "find", "grep", "rg", "awk", "sed", "sort", "uniq", "cut", "tr", "diff", "cmp",
+    "readlink", "basename", "dirname", "test", "[", "true", "false", "type", "command", "env",
+    "printenv", "uname", "hostname", "ps", "top", "df", "du", "free", "uptime", "history",
+    "fc-list", "locale", "tty", "tput",
+];
+
+/// Commands that are irreversible on their own input (destructive).
+/// The presence of these on the first-token position marks the
+/// invocation as destructive.
+const DESTRUCTIVE_COMMANDS: &[&str] = &[
+    "rm",
+    "rmdir",
+    "dd",
+    "shred",
+    "truncate",
+    "wipe",
+    "mkfs",
+    "mkfs.ext4",
+    "mkfs.xfs",
+    "mkfs.vfat",
+    "mke2fs",
+    "fdisk",
+    "parted",
+    "gdisk",
+    "kill",
+    "pkill",
+    "killall",
+    "reboot",
+    "shutdown",
+    "halt",
+    "poweroff",
+];
+
+/// Commands that reach the open internet or external services
+/// outside the current process sandbox.
+const OPEN_WORLD_COMMANDS: &[&str] = &[
+    "curl",
+    "wget",
+    "nc",
+    "ncat",
+    "ssh",
+    "scp",
+    "rsync",
+    "ftp",
+    "sftp",
+    "telnet",
+    "ping",
+    "traceroute",
+    "dig",
+    "nslookup",
+    "host",
+    "whois",
+];
+
+/// Commands whose *subcommand* can make them open-world or
+/// destructive. `git fetch` reaches the network; `git reset --hard`
+/// is destructive.
+const GIT_NETWORK_SUBCOMMANDS: &[&str] = &["clone", "fetch", "pull", "push", "remote"];
+const GIT_DESTRUCTIVE_SUBCOMMANDS: &[&str] = &["reset", "clean", "rebase", "filter-branch"];
+
+/// Package managers that install code from the network. The *act
+/// of installing* is both open-world and potentially destructive.
+const PACKAGE_MANAGERS: &[&str] = &[
+    "npm", "pnpm", "yarn", "pip", "pip3", "cargo", "go", "apt", "apt-get", "yum", "dnf", "brew",
+    "gem", "pacman",
+];
+
+/// Shell metacharacters that take any command out of the simple
+/// classification regime. When present, we return conservative
+/// defaults (read_only=false, concurrency_safe=false) because
+/// classifying compound commands accurately requires full AST
+/// traversal of every branch.
+fn has_compound_operators(command: &str) -> bool {
+    // Rough heuristic — check for pipes, sequencing, redirection,
+    // command substitution, process substitution, backticks.
+    let trimmed = command.trim();
+    trimmed.contains('|')
+        || trimmed.contains("&&")
+        || trimmed.contains("||")
+        || trimmed.contains(';')
+        || trimmed.contains('>')
+        || trimmed.contains('<')
+        || trimmed.contains("$(")
+        || trimmed.contains('`')
+}
+
+/// Extract the first token of a command string, stripping any
+/// leading environment assignments (`FOO=bar cmd`) and leading
+/// whitespace.
+fn first_command_token(command: &str) -> Option<&str> {
+    command.split_whitespace().find(|tok| !tok.contains('='))
+}
+
 impl BashAnalyzer {
+    /// Classify a command string as read-only for scheduling.
+    ///
+    /// Returns `true` only when:
+    /// 1. The command contains no compound operators (pipes,
+    ///    sequencing, redirection, substitution), and
+    /// 2. The first token is in the module-private read-only
+    ///    command allowlist (`ls`, `cat`, `grep`, `find`, …).
+    ///
+    /// This is intentionally conservative. A command like
+    /// `ls | wc -l` returns `false` because the pipe puts us in
+    /// compound-command territory where full analysis is needed.
+    pub fn classify_read_only(command: &str) -> bool {
+        if has_compound_operators(command) {
+            return false;
+        }
+        let Some(token) = first_command_token(command) else {
+            return false;
+        };
+        // `find` with `-delete` or `-exec` is not read-only even
+        // though the base command is. Handle the common cases
+        // here so the classification matches reality.
+        if token == "find" && (command.contains(" -delete") || command.contains(" -exec")) {
+            return false;
+        }
+        // `sed -i` rewrites files in place.
+        if token == "sed" && command.contains(" -i") {
+            return false;
+        }
+        READ_ONLY_COMMANDS.contains(&token)
+    }
+
+    /// Classify a command string as destructive. Destructive
+    /// commands require HITL approval in supervised mode and
+    /// always run serially.
+    ///
+    /// Returns `true` when the first token names an irreversible
+    /// operation or when a compound command contains any explicit
+    /// redirection-write (`>`, `>>`) to an existing file.
+    pub fn classify_destructive(command: &str) -> bool {
+        let Some(token) = first_command_token(command) else {
+            return false;
+        };
+
+        if DESTRUCTIVE_COMMANDS.contains(&token) {
+            return true;
+        }
+
+        // `git reset --hard`, `git clean -fd`, `git rebase`, ...
+        if token == "git" {
+            let rest: Vec<&str> = command.split_whitespace().skip(1).collect();
+            if let Some(subcommand) = rest.iter().find(|tok| !tok.starts_with('-')).copied()
+                && GIT_DESTRUCTIVE_SUBCOMMANDS.contains(&subcommand)
+            {
+                return true;
+            }
+            // `git push -f` / `git push --force`
+            if rest.contains(&"push")
+                && rest
+                    .iter()
+                    .any(|tok| *tok == "-f" || *tok == "--force" || *tok == "--force-with-lease")
+            {
+                return true;
+            }
+        }
+
+        // Output redirection to a file IS a write — destructive if
+        // the file already exists. We cannot know from the string
+        // alone whether the target exists, so `>` is conservatively
+        // treated as destructive.
+        command.contains(" > ") || command.contains(" >>")
+    }
+
+    /// Classify a command as touching the open internet / external
+    /// services. Used by sandbox policies and by the scheduler to
+    /// gate network access.
+    pub fn classify_open_world(command: &str) -> bool {
+        let Some(token) = first_command_token(command) else {
+            return false;
+        };
+
+        if OPEN_WORLD_COMMANDS.contains(&token) {
+            return true;
+        }
+
+        if PACKAGE_MANAGERS.contains(&token) {
+            return true;
+        }
+
+        if token == "git" {
+            let rest: Vec<&str> = command.split_whitespace().skip(1).collect();
+            if let Some(subcommand) = rest.iter().find(|tok| !tok.starts_with('-')).copied()
+                && GIT_NETWORK_SUBCOMMANDS.contains(&subcommand)
+            {
+                return true;
+            }
+        }
+
+        false
+    }
+
     pub fn new(policy: BashPolicy) -> Self {
         Self { policy }
     }

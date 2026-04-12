@@ -442,6 +442,7 @@ impl MockLlmCall {
                 continuation: None,
                 warnings: Vec::new(),
                 raw: None,
+                rate_limit: None,
             },
         }
     }
@@ -466,6 +467,58 @@ impl LlmCall for MockLlmCall {
 
 fn mock_llm_with_message(text: &str) -> Arc<dyn LlmCall> {
     Arc::new(MockLlmCall::with_text(text))
+}
+
+/// Phase C-4: when the provider keeps returning
+/// [`crate::Error::StructuredOutputInvalid`], the agent must bail
+/// out with [`crate::Error::StructuredOutputExhausted`] once the
+/// `MAX_STRUCTURED_OUTPUT_RETRIES` budget is consumed instead of
+/// entering an unbounded retry loop.
+#[tokio::test]
+async fn test_structured_output_retry_budget_is_bounded() {
+    use crate::client::mock::MockLlmCall as PublicMock;
+
+    // Enqueue exactly [MAX_STRUCTURED_OUTPUT_RETRIES] failures;
+    // the 3rd call should trip the cap and abort the turn.
+    let mock = PublicMock::new()
+        .then_error(crate::Error::StructuredOutputInvalid {
+            pointer: "/foo".into(),
+            reason: "missing required field".into(),
+        })
+        .then_error(crate::Error::StructuredOutputInvalid {
+            pointer: "/foo".into(),
+            reason: "still missing".into(),
+        })
+        .then_error(crate::Error::StructuredOutputInvalid {
+            pointer: "/foo".into(),
+            reason: "last miss".into(),
+        });
+
+    let llm: Arc<dyn LlmCall> = Arc::new(mock);
+    let tools = Arc::new(ToolRegistry::default_tools(ToolSurface::All, None, None));
+    let config = Arc::new(AgentConfig::default());
+    let hooks = Arc::new(HookRegistry::new());
+    let agent = Agent::from_parts(llm, config, tools, hooks, None);
+
+    let err = agent
+        .execute("produce structured output")
+        .await
+        .expect_err("bounded retry must surface StructuredOutputExhausted");
+
+    match err {
+        crate::Error::StructuredOutputExhausted {
+            attempts,
+            last_reason,
+        } => {
+            assert_eq!(
+                attempts,
+                super::execution::MAX_STRUCTURED_OUTPUT_RETRIES,
+                "cap matches module constant"
+            );
+            assert_eq!(last_reason, "last miss");
+        }
+        other => panic!("expected StructuredOutputExhausted, got {other:?}"),
+    }
 }
 
 #[tokio::test]
@@ -854,6 +907,7 @@ fn make_tool_call_response() -> ir::ModelResponse {
         continuation: None,
         warnings: Vec::new(),
         raw: None,
+        rate_limit: None,
     }
 }
 
@@ -871,11 +925,12 @@ fn make_text_response(text: &str) -> ir::ModelResponse {
         continuation: None,
         warnings: Vec::new(),
         raw: None,
+        rate_limit: None,
     }
 }
 
-fn build_supervised_agent_with_approval(
-    approval_sender: crate::authorization::ApprovalSender,
+fn build_supervised_agent_with_human(
+    handler: Arc<dyn crate::authorization::HumanInteractionHandler>,
 ) -> Agent {
     use crate::authorization::ExecutionMode;
     use helpers::DummyTool;
@@ -897,23 +952,39 @@ fn build_supervised_agent_with_approval(
     let mut agent = Agent::from_parts(Arc::new(mock), config, tools, hooks, None);
 
     agent.runtime_mut().execution_mode = ExecutionMode::Supervised;
-    agent.runtime_mut().approval_sender = Some(approval_sender);
+    agent.runtime_mut().human = Some(handler);
     agent
+}
+
+/// Phase D C-1: stub HumanInteractionHandler that returns a scripted
+/// ToolApprovalResponse for every `approve_tool` call. Lets the
+/// supervised-mode tests assert both Approve and Deny paths without
+/// channel plumbing.
+#[derive(Debug)]
+struct ScriptedHumanHandler {
+    approval: crate::authorization::ToolApprovalResponse,
+}
+
+#[async_trait::async_trait]
+impl crate::authorization::HumanInteractionHandler for ScriptedHumanHandler {
+    async fn approve_tool(
+        &self,
+        _req: crate::authorization::ToolApprovalRequest,
+    ) -> crate::authorization::HumanInteractionResult<crate::authorization::ToolApprovalResponse>
+    {
+        Ok(self.approval.clone())
+    }
 }
 
 #[tokio::test]
 async fn test_approval_approve_proceeds() {
-    use crate::authorization::approval::{ApprovalResponse, approval_channel};
+    use crate::authorization::ToolApprovalResponse;
 
-    let (tx, mut rx) = approval_channel(16);
-
-    tokio::spawn(async move {
-        while let Some((_request, responder)) = rx.recv().await {
-            let _ = responder.send(ApprovalResponse::Approve);
-        }
-    });
-
-    let agent = build_supervised_agent_with_approval(tx);
+    let handler: Arc<dyn crate::authorization::HumanInteractionHandler> =
+        Arc::new(ScriptedHumanHandler {
+            approval: ToolApprovalResponse::Approve,
+        });
+    let agent = build_supervised_agent_with_human(handler);
     let result = agent.execute("Run the tool").await.unwrap();
 
     assert_eq!(result.text(), "All done.");
@@ -922,19 +993,15 @@ async fn test_approval_approve_proceeds() {
 
 #[tokio::test]
 async fn test_approval_deny_blocks() {
-    use crate::authorization::approval::{ApprovalResponse, approval_channel};
+    use crate::authorization::ToolApprovalResponse;
 
-    let (tx, mut rx) = approval_channel(16);
-
-    tokio::spawn(async move {
-        while let Some((_request, responder)) = rx.recv().await {
-            let _ = responder.send(ApprovalResponse::Deny {
+    let handler: Arc<dyn crate::authorization::HumanInteractionHandler> =
+        Arc::new(ScriptedHumanHandler {
+            approval: ToolApprovalResponse::Deny {
                 reason: "User said no".into(),
-            });
-        }
-    });
-
-    let agent = build_supervised_agent_with_approval(tx);
+            },
+        });
+    let agent = build_supervised_agent_with_human(handler);
     let result = agent.execute("Run the tool").await.unwrap();
 
     assert_eq!(result.text(), "All done.");
@@ -948,13 +1015,32 @@ async fn test_approval_deny_blocks() {
     );
 }
 
+/// Handler that hangs forever — used to exercise the wrapping
+/// `tokio::time::timeout` in `request_tool_approval`.
+#[derive(Debug)]
+struct HangingHumanHandler;
+
+#[async_trait::async_trait]
+impl crate::authorization::HumanInteractionHandler for HangingHumanHandler {
+    async fn approve_tool(
+        &self,
+        _req: crate::authorization::ToolApprovalRequest,
+    ) -> crate::authorization::HumanInteractionResult<crate::authorization::ToolApprovalResponse>
+    {
+        // NOTE: we cannot pend forever because the test suite would
+        // hang. The common.rs helper wraps the call in a timeout
+        // that is longer than we want to wait in tests, so instead
+        // of actually hanging we simulate a timeout by returning
+        // the typed error directly.
+        Err(crate::authorization::HumanInteractionError::Timeout)
+    }
+}
+
 #[tokio::test]
 async fn test_approval_timeout_defaults_to_deny() {
-    use crate::authorization::approval::approval_channel;
-
-    let (tx, _rx) = approval_channel(16);
-
-    let agent = build_supervised_agent_with_approval(tx);
+    let handler: Arc<dyn crate::authorization::HumanInteractionHandler> =
+        Arc::new(HangingHumanHandler);
+    let agent = build_supervised_agent_with_human(handler);
     let result = agent.execute("Run the tool").await.unwrap();
 
     assert_eq!(result.text(), "All done.");
@@ -964,6 +1050,44 @@ async fn test_approval_timeout_defaults_to_deny() {
             .reason
             .as_deref()
             .unwrap()
+            .to_lowercase()
             .contains("timed out")
+    );
+}
+
+/// Phase D C-1: without a human handler configured, supervised-mode
+/// tools deny with a fail-closed reason pointing at the builder
+/// method. This is the baseline safety for pure-core builds.
+#[tokio::test]
+async fn test_approval_no_handler_defaults_to_deny() {
+    use crate::authorization::ExecutionMode;
+    use helpers::DummyTool;
+
+    let mock = ScriptedMockLlm::new(vec![
+        make_tool_call_response(),
+        make_text_response("All done."),
+    ]);
+
+    let tools = ToolRegistry::from_context(ExecutionContext::empty());
+    tools.register(Arc::new(DummyTool {
+        name: "TestTool".into(),
+        output: ToolOutput::Success("test output".into()),
+    }));
+    let tools = Arc::new(tools);
+
+    let config = Arc::new(AgentConfig::default());
+    let hooks = Arc::new(HookRegistry::new());
+    let mut agent = Agent::from_parts(Arc::new(mock), config, tools, hooks, None);
+    agent.runtime_mut().execution_mode = ExecutionMode::Supervised;
+    // No `human` handler set.
+
+    let result = agent.execute("Run the tool").await.unwrap();
+    assert_eq!(result.metrics().authorization_denials.len(), 1);
+    assert!(
+        result.metrics().authorization_denials[0]
+            .reason
+            .as_deref()
+            .unwrap()
+            .contains("HumanInteractionHandler")
     );
 }

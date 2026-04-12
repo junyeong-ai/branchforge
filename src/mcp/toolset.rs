@@ -1,4 +1,25 @@
 //! MCP Toolset configuration for API requests with deferred loading support.
+//!
+//! # Relationship to `McpManager`
+//!
+//! `McpToolsetRegistry` and [`super::McpManager`] live side-by-side
+//! but address orthogonal concerns and are intentionally **not**
+//! consolidated:
+//!
+//! * **`McpToolsetRegistry`** — build-time declarative policy lookup.
+//!   Answers "should this `(server, tool)` be deferred until first
+//!   use?". Populated once from agent config; never mutates at
+//!   runtime; owns no connections.
+//! * **`McpManager`** — runtime lifecycle surface. Owns live
+//!   `McpClient` instances, tracks handshake state via
+//!   [`super::McpClientState`], handles reconnects, accumulates
+//!   [`super::DegradedReport`] entries. Never consults deferred-load
+//!   policy — that is the caller's responsibility before dispatching
+//!   a tool call.
+//!
+//! Per the project's naming taxonomy (Registry = init-time keyed
+//! lookup; Manager = lifecycle ownership) these two names are
+//! already correctly applied.
 
 use std::collections::HashMap;
 

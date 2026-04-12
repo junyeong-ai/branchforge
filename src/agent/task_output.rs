@@ -7,8 +7,8 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use super::task_registry::{
-    TaskAssistantMetadata, TaskExecutionSummary, TaskRegistry, TaskResultSnapshot,
+use super::task_tracker::{
+    TaskAssistantMetadata, TaskExecutionSummary, TaskResultSnapshot, TaskTracker,
 };
 use crate::session::SessionState;
 use crate::tools::{ExecutionContext, SchemaTool};
@@ -16,11 +16,11 @@ use crate::types::ToolResult;
 
 #[derive(Clone)]
 pub struct TaskOutputTool {
-    registry: TaskRegistry,
+    registry: TaskTracker,
 }
 
 impl TaskOutputTool {
-    pub fn new(registry: TaskRegistry) -> Self {
+    pub fn new(registry: TaskTracker) -> Self {
         Self { registry }
     }
 }
@@ -47,37 +47,15 @@ fn default_timeout() -> u64 {
     30000
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum TaskStatus {
-    Running,
-    Finalizing,
-    Completed,
-    Failed,
-    Cancelled,
-    NotFound,
-}
-
-impl From<SessionState> for TaskStatus {
-    fn from(state: SessionState) -> Self {
-        match state {
-            SessionState::Created | SessionState::Active | SessionState::WaitingForTools => {
-                TaskStatus::Running
-            }
-            SessionState::Completing | SessionState::Failing | SessionState::Cancelling => {
-                TaskStatus::Finalizing
-            }
-            SessionState::Completed => TaskStatus::Completed,
-            SessionState::Failed => TaskStatus::Failed,
-            SessionState::Cancelled => TaskStatus::Cancelled,
-        }
-    }
-}
-
+/// Public projection of a task result. `status` is `None` when the task
+/// id could not be resolved — there is no separate `NotFound` sentinel.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TaskOutputResult {
     pub task_id: String,
-    pub status: TaskStatus,
+    /// Lifecycle state of the task's underlying session. `None` when the
+    /// task is not found.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub status: Option<SessionState>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub text: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -106,7 +84,7 @@ impl SchemaTool for TaskOutputTool {
 - Use block=true (default) to wait for task completion
 - Use block=false for non-blocking check of current status
 - Task IDs can be found using the Task tool response
-- Task output is sourced from the TaskRegistry-backed child session for that task
+- Task output is sourced from the TaskTracker-backed child session for that task
 - Important: task_id is the Task tool's returned session/task ID, not a process PID"#;
 
     async fn handle(&self, input: TaskOutputInput, _context: &ExecutionContext) -> ToolResult {
@@ -131,7 +109,7 @@ impl SchemaTool for TaskOutputTool {
                 error,
             }) => TaskOutputResult {
                 task_id: input.task_id,
-                status: status.into(),
+                status: Some(status),
                 text,
                 content,
                 structured_output,
@@ -141,7 +119,7 @@ impl SchemaTool for TaskOutputTool {
             },
             None => TaskOutputResult {
                 task_id: input.task_id,
-                status: TaskStatus::NotFound,
+                status: None,
                 text: None,
                 content: None,
                 structured_output: None,
@@ -174,8 +152,8 @@ mod tests {
     const TASK_2_UUID: &str = "00000000-0000-0000-0000-000000000012";
     const TASK_3_UUID: &str = "00000000-0000-0000-0000-000000000013";
 
-    fn test_registry() -> TaskRegistry {
-        TaskRegistry::new(Arc::new(MemoryPersistence::new()))
+    fn test_registry() -> TaskTracker {
+        TaskTracker::new(Arc::new(MemoryPersistence::new()))
     }
 
     fn mock_result(session_id: &str) -> AgentResult {
@@ -239,7 +217,7 @@ mod tests {
             .await;
 
         if let ToolOutput::Success(content) = &result.output {
-            assert!(content.contains("not_found"));
+            assert!(content.contains("Task not found"));
         }
     }
 

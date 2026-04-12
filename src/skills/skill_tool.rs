@@ -193,6 +193,13 @@ impl SchemaTool for SkillTool {
             .map(|runtime| Self::build_description(runtime.list_model_invocable_skills()))
     }
 
+    /// Phase D A-1: subjects for the permission DSL. A rule like
+    /// `deny Skill(internal)` matches against the skill name chosen
+    /// by the model.
+    fn permission_subjects_typed(&self, input: &SkillInput) -> Vec<String> {
+        vec![input.skill.clone()]
+    }
+
     async fn handle(&self, input: SkillInput, _context: &ExecutionContext) -> ToolResult {
         let runtime = self.runtime.read().await;
         if let Some(skill) = runtime.registry().get(&input.skill)

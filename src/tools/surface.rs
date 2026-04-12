@@ -31,6 +31,7 @@ use crate::authorization::{ToolPolicy, ToolRule};
 use crate::common::matches_tool_pattern;
 
 /// Controls which tools are available to the agent.
+#[non_exhaustive]
 #[derive(Debug, Clone, Default)]
 pub enum ToolSurface {
     /// No tools are allowed.
@@ -73,6 +74,7 @@ impl ToolSurface {
             "GraphHistory",
             "Task",
             "TaskOutput",
+            "AskUserQuestion",
         ]
     }
 

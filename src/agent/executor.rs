@@ -15,7 +15,7 @@ use crate::events::EventBus;
 use crate::hooks::HookRegistry;
 use crate::ir::Message;
 use crate::session::{SessionAccessScope, SessionManager, ToolState};
-use crate::tools::{ToolRegistry, ToolSearchEngine};
+use crate::tools::{ToolRegistry, ToolSearchManager};
 
 pub struct Agent {
     pub(crate) runtime: Arc<AgentRuntime>,
@@ -24,6 +24,13 @@ pub struct Agent {
     pub(crate) initial_messages: Option<Vec<Message>>,
     pub(crate) session_manager: Option<SessionManager>,
     pub(crate) session_scope: Option<SessionAccessScope>,
+    /// Phase C-5: serializes every `persist_session_state*` call so
+    /// that mid-turn fire-and-forget saves and turn-boundary awaited
+    /// saves never reorder under the persistence backend. A detached
+    /// save scheduled at T=0 always lands before an awaited save
+    /// scheduled at T=1, regardless of which one the scheduler polls
+    /// first, because both compete for the same mutex in FIFO order.
+    pub(crate) persist_serializer: Arc<tokio::sync::Mutex<()>>,
 }
 
 impl Agent {
@@ -97,7 +104,7 @@ impl Agent {
             tool_search_manager: None,
             event_bus: None,
             execution_mode: ExecutionMode::Auto,
-            approval_sender: None,
+            human: None,
             context_scope: None,
             _shutdown_guard: shutdown.clone().drop_guard(),
             shutdown,
@@ -110,6 +117,7 @@ impl Agent {
             initial_messages: None,
             session_manager: None,
             session_scope: None,
+            persist_serializer: Arc::new(tokio::sync::Mutex::new(())),
         }
     }
 
@@ -130,12 +138,27 @@ impl Agent {
         self
     }
 
+    /// Seed the runtime's [`crate::budget::BudgetTracker`] with cost
+    /// already spent in a prior run, captured by
+    /// [`super::AgentCheckpoint`]. Used by [`super::AgentBuilder::build`]
+    /// after `resume_from(checkpoint)` so over-budget detection
+    /// fires at the correct accumulated total, not at zero.
+    ///
+    /// Must be called **before** the agent runs its first request —
+    /// calling it after `execute()` would incorrectly double-count
+    /// the freshly-recorded usage. This method is `pub(crate)` to
+    /// enforce that builder-time-only invariant.
+    pub(crate) fn restore_budget_spent(self, cost: rust_decimal::Decimal) -> crate::Result<Self> {
+        self.runtime.budget_tracker.restore_spent(cost)?;
+        Ok(self)
+    }
+
     pub(crate) fn mcp_manager(mut self, manager: Arc<crate::mcp::McpManager>) -> Self {
         self.runtime_mut().mcp_manager = Some(manager);
         self
     }
 
-    pub(crate) fn tool_search_manager(mut self, manager: Arc<ToolSearchEngine>) -> Self {
+    pub(crate) fn tool_search_manager(mut self, manager: Arc<ToolSearchManager>) -> Self {
         self.runtime_mut().tool_search_manager = Some(manager);
         self
     }
@@ -195,28 +218,33 @@ impl Agent {
     #[must_use]
     /// Capture current runtime state as a serializable checkpoint.
     ///
-    /// The checkpoint records the session ID, approximate iteration count
-    /// (derived from the session message count), accumulated cost, and the
-    /// current execution mode. Combined with session persistence, this is
-    /// enough to resume an agent after a crash.
+    /// The checkpoint records exactly the two pieces of state that
+    /// survive across `execute()` calls:
+    ///
+    /// 1. **Session identity** (`session_id`, `session_usage`) so the
+    ///    persistence backend can reload the graph and so downstream
+    ///    metrics see usage continuity.
+    /// 2. **Budget accumulator** (`budget_spent_usd`) captured from
+    ///    the shared [`crate::budget::BudgetTracker`] so a fresh
+    ///    tracker built after process restart can be rehydrated with
+    ///    the previously-consumed cost.
+    ///
+    /// Execution mode is also recorded so a paused interactive
+    /// session resumes in the same auto / supervised / plan mode.
+    ///
+    /// See [`super::AgentCheckpoint`] for the complete contract and
+    /// [`super::AgentBuilder::resume_from`] for the restore path.
     pub async fn checkpoint(&self) -> super::checkpoint::AgentCheckpoint {
-        let (session_id, iteration, total_cost_usd) = self
+        let (session_id, session_usage) = self
             .state
-            .with_session(|s| {
-                let msg_count = s.current_branch_messages().len();
-                let approx_iterations = (msg_count / 2) as u32;
-                (s.id, approx_iterations, s.total_cost_usd())
-            })
+            .with_session(|s| (s.id, s.total_usage().clone()))
             .await;
 
         super::checkpoint::AgentCheckpoint {
             session_id,
-            iteration,
-            api_calls: 0,
-            tool_calls: 0,
-            total_cost_usd,
             execution_mode: self.runtime.execution_mode.clone(),
-            budget_remaining: None,
+            budget_spent_usd: self.runtime.budget_tracker.used_cost_usd(),
+            session_usage,
             created_at: chrono::Utc::now(),
         }
     }
@@ -265,11 +293,49 @@ impl Agent {
         let Some(manager) = self.session_manager.as_ref() else {
             return Ok(());
         };
+        // Serialize against any in-flight detached saves so the
+        // latest-wins ordering matches wall-clock ordering.
+        let _guard = self.persist_serializer.lock().await;
         let session = self.state.session().await;
         manager
             .persist_snapshot(&session, self.session_scope.as_ref())
             .await
             .map_err(crate::Error::from)
+    }
+
+    /// Phase C-5: fire-and-forget persistence for mid-turn snapshots
+    /// (assistant-message add, tool-result add) where blocking the
+    /// agent loop on remote persistence I/O would add latency to
+    /// every LLM iteration for no correctness benefit.
+    ///
+    /// Correctness contract:
+    /// - Every detached save takes [`Self::persist_serializer`] before
+    ///   calling the backend, so saves never overtake each other.
+    /// - An awaited [`Self::persist_session_state`] call that runs
+    ///   after a detached one is scheduled will **wait** for that
+    ///   detached save to land (same mutex, FIFO). Callers use this
+    ///   to build implicit barriers: spawn N detached saves, then
+    ///   call the awaited variant at a turn boundary and the two
+    ///   orderings converge.
+    /// - Errors are logged at `warn!` level; the caller has already
+    ///   returned so there is nothing to propagate. Crash-safety is
+    ///   guaranteed by the next awaited save, which either lands
+    ///   fresh data or observes the detached failure and surfaces
+    ///   it on the hot path.
+    pub(crate) fn persist_session_state_detached(&self) {
+        let Some(manager) = self.session_manager.clone() else {
+            return;
+        };
+        let scope = self.session_scope.clone();
+        let state = self.state.clone();
+        let serializer = Arc::clone(&self.persist_serializer);
+        tokio::spawn(async move {
+            let _guard = serializer.lock().await;
+            let session = state.session().await;
+            if let Err(e) = manager.persist_snapshot(&session, scope.as_ref()).await {
+                tracing::warn!(error = %e, "detached session persist failed");
+            }
+        });
     }
 
     pub fn orchestrator(&self) -> Option<&Arc<RwLock<PromptOrchestrator>>> {

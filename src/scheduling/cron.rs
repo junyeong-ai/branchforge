@@ -22,6 +22,7 @@ use uuid::Uuid;
 pub const DEFAULT_MAX_HISTORY: usize = 100;
 
 /// Outcome of a single scheduled execution.
+#[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ExecutionOutcome {
     /// The callback ran to completion.
@@ -42,6 +43,7 @@ pub struct ExecutionRecord {
 }
 
 /// Scheduling strategy for a cron entry.
+#[non_exhaustive]
 #[derive(Debug, Clone)]
 pub enum CronSchedule {
     /// Fixed-interval scheduling.

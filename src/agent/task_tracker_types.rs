@@ -1,11 +1,9 @@
-//! Data types and the in-memory runtime entry for [`TaskRegistry`].
+//! Data types and the in-memory runtime entry for [`TaskTracker`].
 //!
 //! These are the small, mostly-data structs that the registry stores
 //! and that downstream code (subagents, persistence backends, public
 //! API consumers) needs to reference. Splitting them out keeps
-//! `task_registry.rs` focused on the registry's behaviour.
-
-use std::sync::Arc;
+//! `task_tracker.rs` focused on the registry's behaviour.
 
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
@@ -103,7 +101,7 @@ pub struct TaskExecutionSummary {
 
 /// Snapshot of a task's terminal state: status, content, structured
 /// output, metadata, execution summary, and any error message. This is
-/// the public-facing payload returned by `TaskRegistry::result`.
+/// the public-facing payload returned by `TaskTracker::result`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TaskResultSnapshot {
     pub status: SessionState,
@@ -120,8 +118,3 @@ pub struct TaskResultSnapshot {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
 }
-
-// Forward declaration so the doc-comment on TaskResultSnapshot can refer
-// to the registry's `result` method without a circular import.
-#[allow(dead_code)]
-pub(super) struct _TaskRegistryDocMarker(Arc<()>);

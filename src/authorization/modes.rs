@@ -30,6 +30,7 @@ const PLAN_TOOLS: &[&str] = &["Read", "Glob", "Grep", "Plan", "TodoWrite", "Grap
 /// assert!(mode.allows_tool("Read"));
 /// assert!(!mode.allows_tool("Write"));
 /// ```
+#[non_exhaustive]
 #[derive(Clone, Debug, Default)]
 pub enum ExecutionMode {
     /// Tools execute automatically when policy allows (default).

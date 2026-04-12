@@ -33,6 +33,7 @@ pub struct SubagentFrontmatter {
     pub max_turns: Option<usize>,
 }
 
+#[non_exhaustive]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum StringList {

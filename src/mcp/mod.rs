@@ -1,11 +1,15 @@
 //! MCP (Model Context Protocol) server integration.
 
 pub mod client;
+#[cfg(feature = "mcp")]
+pub mod elicitation;
 pub mod manager;
 pub mod resources;
 pub mod toolset;
 
 pub use client::McpClient;
+#[cfg(feature = "mcp")]
+pub use elicitation::HumanElicitationRouter;
 pub use manager::McpManager;
 pub use resources::{ResourceManager, ResourceQuery};
 pub use toolset::{McpToolset, McpToolsetRegistry, ToolLoadConfig};
@@ -56,6 +60,7 @@ impl ToolCache {
 }
 
 /// MCP server configuration
+#[non_exhaustive]
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "lowercase")]
 pub enum McpServerConfig {
@@ -120,14 +125,6 @@ pub(crate) fn is_mcp_name(name: &str) -> bool {
     name.starts_with(MCP_TOOL_PREFIX)
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
-pub enum McpConnectionStatus {
-    #[default]
-    Connecting,
-    Connected,
-    Disconnected,
-}
-
 /// Phase of the MCP server lifecycle that a connection attempt was
 /// in when it succeeded or failed.
 ///
@@ -141,7 +138,7 @@ pub enum McpConnectionStatus {
 /// failure as a fatal agent-build error.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum LifecyclePhase {
+pub enum McpClientState {
     /// The server is registered but no connection attempt has started.
     #[default]
     Queued,
@@ -169,14 +166,21 @@ pub enum LifecyclePhase {
     /// tool catalogue.
     CacheWarmup,
     /// Server is fully connected, tool catalogue populated, and
-    /// ready to dispatch requests.
+    /// operational — dispatching requests. A `Ready` client can
+    /// transition to either [`Self::Closed`] (graceful shutdown)
+    /// or [`Self::Failed`] (runtime error).
     Ready,
+    /// Terminal: graceful shutdown requested and completed. This is
+    /// the success-path end state — distinct from [`Self::Failed`]
+    /// so degraded reports can tell "user closed the server" from
+    /// "the server crashed."
+    Closed,
     /// Terminal failure. The attached `DegradedReport` entry carries
     /// the specific earlier phase where the attempt broke down.
     Failed,
 }
 
-impl LifecyclePhase {
+impl McpClientState {
     /// Human-readable phase name for logs and reports. Stable so
     /// downstream OTel / metrics labels can group by phase.
     pub fn as_str(&self) -> &'static str {
@@ -191,6 +195,7 @@ impl LifecyclePhase {
             Self::ListPrompts => "list_prompts",
             Self::CacheWarmup => "cache_warmup",
             Self::Ready => "ready",
+            Self::Closed => "closed",
             Self::Failed => "failed",
         }
     }
@@ -201,9 +206,17 @@ impl LifecyclePhase {
         matches!(self, Self::Ready)
     }
 
+    /// `true` if the client has reached a terminal phase and will
+    /// not transition further. `Closed` (graceful shutdown) and
+    /// `Failed` (error) are the two terminals.
+    pub fn is_terminal(&self) -> bool {
+        matches!(self, Self::Closed | Self::Failed)
+    }
+
     /// Linear ordering used by the forward-only transition rule.
-    /// Lower number = earlier in the lifecycle. `Failed` is sentinel
-    /// reachable from any non-terminal state.
+    /// Lower number = earlier in the lifecycle. `Closed` and
+    /// `Failed` are terminal sentinels outside the linear handshake
+    /// sequence.
     fn order(&self) -> u8 {
         match self {
             Self::Queued => 0,
@@ -216,26 +229,38 @@ impl LifecyclePhase {
             Self::ListPrompts => 7,
             Self::CacheWarmup => 8,
             Self::Ready => 9,
+            Self::Closed => 254,
             Self::Failed => 255,
         }
     }
 
     /// `true` if a transition from `self` to `next` is legal.
     ///
-    /// The legal moves form a forward-only DAG: each non-terminal
-    /// phase may advance to any later non-terminal phase, OR jump
-    /// to `Failed`. Terminal phases (`Ready`, `Failed`) cannot
-    /// transition further. Self-loops are disallowed to keep
-    /// transitions observable.
-    pub fn can_transition_to(&self, next: LifecyclePhase) -> bool {
-        if matches!(self, Self::Ready | Self::Failed) {
+    /// The legal moves form a forward DAG with two terminal lanes:
+    ///
+    /// * Handshake phases (`Queued`..`CacheWarmup`) advance forward
+    ///   to any later handshake phase, or jump to `Failed`.
+    /// * `Ready` may transition to `Closed` (graceful) or `Failed`
+    ///   (runtime error) — it is **not** terminal despite being the
+    ///   "happy path" end of the handshake.
+    /// * `Closed` and `Failed` are both terminal; self-loops and
+    ///   transitions out of a terminal are rejected.
+    pub fn can_transition_to(&self, next: McpClientState) -> bool {
+        if self.is_terminal() || *self == next {
             return false;
         }
-        if *self == next {
-            return false;
+        // Ready has its own two-lane exit: Closed or Failed.
+        if matches!(self, Self::Ready) {
+            return matches!(next, Self::Closed | Self::Failed);
         }
+        // Handshake phases: Failed is reachable from anywhere,
+        // forward moves go through the linear order.
         if matches!(next, Self::Failed) {
             return true;
+        }
+        // Closed is reachable only from Ready (handled above).
+        if matches!(next, Self::Closed) {
+            return false;
         }
         next.order() > self.order()
     }
@@ -245,15 +270,15 @@ impl LifecyclePhase {
 ///
 /// Symmetric across healthy and failed servers — every server has
 /// a `phase` and an optional `error`. A server is "healthy" iff its
-/// phase is [`LifecyclePhase::Ready`] and `error` is `None`.
+/// phase is [`McpClientState::Ready`] and `error` is `None`.
 #[derive(Clone, Debug)]
 pub struct ServerHealth {
     /// The server name as it was registered with the manager.
     pub server: String,
     /// Most advanced phase the lifecycle reached. For healthy
-    /// servers this is [`LifecyclePhase::Ready`]; for failed
+    /// servers this is [`McpClientState::Ready`]; for failed
     /// servers it is the last phase that was attempted.
-    pub phase: LifecyclePhase,
+    pub phase: McpClientState,
     /// Stringified error message from the underlying [`McpError`],
     /// when the server failed to reach `Ready`. Stored as `String`
     /// so the report is `Clone + Send + Sync` even for error
@@ -274,24 +299,26 @@ mod lifecycle_phase_tests {
 
     #[test]
     fn forward_transition_succeeds() {
-        assert!(LifecyclePhase::Queued.can_transition_to(LifecyclePhase::Spawn));
-        assert!(LifecyclePhase::Spawn.can_transition_to(LifecyclePhase::Handshake));
-        assert!(LifecyclePhase::Handshake.can_transition_to(LifecyclePhase::Ready));
+        assert!(McpClientState::Queued.can_transition_to(McpClientState::Spawn));
+        assert!(McpClientState::Spawn.can_transition_to(McpClientState::Handshake));
+        assert!(McpClientState::Handshake.can_transition_to(McpClientState::Ready));
     }
 
     #[test]
     fn backward_transition_rejected() {
-        assert!(!LifecyclePhase::Ready.can_transition_to(LifecyclePhase::Spawn));
-        assert!(!LifecyclePhase::Handshake.can_transition_to(LifecyclePhase::Spawn));
+        assert!(!McpClientState::Ready.can_transition_to(McpClientState::Spawn));
+        assert!(!McpClientState::Handshake.can_transition_to(McpClientState::Spawn));
     }
 
     #[test]
     fn self_loop_rejected() {
         for p in [
-            LifecyclePhase::Queued,
-            LifecyclePhase::Spawn,
-            LifecyclePhase::Handshake,
-            LifecyclePhase::Ready,
+            McpClientState::Queued,
+            McpClientState::Spawn,
+            McpClientState::Handshake,
+            McpClientState::Ready,
+            McpClientState::Closed,
+            McpClientState::Failed,
         ] {
             assert!(!p.can_transition_to(p));
         }
@@ -300,27 +327,56 @@ mod lifecycle_phase_tests {
     #[test]
     fn failed_reachable_from_any_non_terminal() {
         for start in [
-            LifecyclePhase::Queued,
-            LifecyclePhase::Spawn,
-            LifecyclePhase::Handshake,
-            LifecyclePhase::ListTools,
+            McpClientState::Queued,
+            McpClientState::Spawn,
+            McpClientState::Handshake,
+            McpClientState::ListTools,
+            McpClientState::Ready,
         ] {
-            assert!(start.can_transition_to(LifecyclePhase::Failed));
+            assert!(start.can_transition_to(McpClientState::Failed));
+        }
+    }
+
+    #[test]
+    fn ready_exits_via_closed_or_failed_only() {
+        assert!(McpClientState::Ready.can_transition_to(McpClientState::Closed));
+        assert!(McpClientState::Ready.can_transition_to(McpClientState::Failed));
+        // Ready cannot fall back into the handshake phases.
+        assert!(!McpClientState::Ready.can_transition_to(McpClientState::ListTools));
+        assert!(!McpClientState::Ready.can_transition_to(McpClientState::Spawn));
+    }
+
+    #[test]
+    fn closed_is_only_reachable_from_ready() {
+        for start in [
+            McpClientState::Queued,
+            McpClientState::Spawn,
+            McpClientState::Handshake,
+            McpClientState::ListTools,
+        ] {
+            assert!(!start.can_transition_to(McpClientState::Closed));
         }
     }
 
     #[test]
     fn terminal_phases_reject_all() {
-        for terminal in [LifecyclePhase::Ready, LifecyclePhase::Failed] {
+        for terminal in [McpClientState::Closed, McpClientState::Failed] {
             for target in [
-                LifecyclePhase::Queued,
-                LifecyclePhase::Spawn,
-                LifecyclePhase::Ready,
-                LifecyclePhase::Failed,
+                McpClientState::Queued,
+                McpClientState::Spawn,
+                McpClientState::Ready,
+                McpClientState::Closed,
+                McpClientState::Failed,
             ] {
-                assert!(!terminal.can_transition_to(target));
+                assert!(
+                    !terminal.can_transition_to(target),
+                    "terminal {terminal:?} must reject {target:?}"
+                );
             }
         }
+        assert!(McpClientState::Closed.is_terminal());
+        assert!(McpClientState::Failed.is_terminal());
+        assert!(!McpClientState::Ready.is_terminal());
     }
 }
 
@@ -376,7 +432,7 @@ impl DegradedReport {
             name.clone(),
             ServerHealth {
                 server: name,
-                phase: LifecyclePhase::Ready,
+                phase: McpClientState::Ready,
                 error: None,
             },
         );
@@ -386,7 +442,7 @@ impl DegradedReport {
     pub fn record_failure(
         &mut self,
         name: impl Into<String>,
-        phase: LifecyclePhase,
+        phase: McpClientState,
         error: impl std::fmt::Display,
     ) {
         let name = name.into();
@@ -432,33 +488,47 @@ pub struct McpResourceDefinition {
     pub mime_type: Option<String>,
 }
 
+/// Point-in-time snapshot of an MCP server's runtime state.
+///
+/// Carries the connection `state` (the canonical handshake FSM), any
+/// negotiated `server_info`, and the discovered tool / resource
+/// catalogues. Returned by [`McpManager::server_snapshot`] and held
+/// internally by [`client::McpClient`].
+///
+/// This is a **data container**, not a state machine — mutation goes
+/// through the owning [`client::McpClient`], which drives the
+/// [`McpClientState`] FSM via [`McpClientState::can_transition_to`].
 #[derive(Clone, Debug)]
-pub struct McpServerState {
+pub struct McpServerSnapshot {
     pub name: String,
     pub config: McpServerConfig,
-    pub status: McpConnectionStatus,
+    pub state: McpClientState,
     pub server_info: Option<McpServerInfo>,
     pub tools: Vec<McpToolDefinition>,
     pub resources: Vec<McpResourceDefinition>,
 }
 
-impl McpServerState {
+impl McpServerSnapshot {
     pub fn new(name: impl Into<String>, config: McpServerConfig) -> Self {
         Self {
             name: name.into(),
             config,
-            status: McpConnectionStatus::Connecting,
+            state: McpClientState::Queued,
             server_info: None,
             tools: Vec::new(),
             resources: Vec::new(),
         }
     }
 
-    pub fn is_connected(&self) -> bool {
-        self.status == McpConnectionStatus::Connected
+    /// `true` if the handshake FSM has reached the `Ready` terminal.
+    /// This is the canonical "connection is live" check — there is no
+    /// separate connection-status enum.
+    pub fn is_ready(&self) -> bool {
+        self.state == McpClientState::Ready
     }
 }
 
+#[non_exhaustive]
 #[derive(Debug, thiserror::Error)]
 pub enum McpError {
     #[error("Connection failed: {message}")]
@@ -498,6 +568,7 @@ pub struct McpToolResult {
     pub is_error: bool,
 }
 
+#[non_exhaustive]
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "lowercase")]
 pub enum McpContent {
@@ -636,8 +707,8 @@ mod tests {
     }
 
     #[test]
-    fn test_mcp_server_state_new() {
-        let state = McpServerState::new(
+    fn test_mcp_server_snapshot_new() {
+        let snapshot = McpServerSnapshot::new(
             "test",
             McpServerConfig::Stdio {
                 command: "test".to_string(),
@@ -647,9 +718,10 @@ mod tests {
             },
         );
 
-        assert_eq!(state.name, "test");
-        assert_eq!(state.status, McpConnectionStatus::Connecting);
-        assert!(!state.is_connected());
+        assert_eq!(snapshot.name, "test");
+        // Fresh snapshot starts at the beginning of the FSM, not Ready.
+        assert_eq!(snapshot.state, McpClientState::Queued);
+        assert!(!snapshot.is_ready());
     }
 
     #[test]

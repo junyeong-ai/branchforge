@@ -90,10 +90,18 @@ pub struct AgentBuilder {
     // ── Hooks, policies, and execution control ───────────────────────
     pub(super) hooks: HookRegistry,
     pub(super) execution_mode: ExecutionMode,
-    pub(super) approval_sender: Option<crate::authorization::ApprovalSender>,
+    pub(super) human: Option<Arc<dyn crate::authorization::HumanInteractionHandler>>,
     pub(super) custom_tools: Vec<Arc<dyn Tool>>,
     pub(super) sandbox_settings: Option<crate::config::SandboxConfig>,
     pub(super) authorization_policy_explicit: bool,
+    /// Phase D E-3: errors captured during `apply_settings_mut` that
+    /// can't be surfaced inline because the settings-apply path is
+    /// infallible by design (chainable from tests, called from async
+    /// loaders). `build()` inspects this field first and bails with
+    /// the captured error — malformed permission rules in a
+    /// `settings.local.json` become a fatal `build()` failure
+    /// instead of either a silent miss or a panic.
+    pub(super) deferred_build_error: Option<crate::Error>,
     pub(super) tenant_budget_manager: Option<TenantBudgetManager>,
 
     // ── MCP configuration ────────────────────────────────────────────
@@ -103,7 +111,7 @@ pub struct AgentBuilder {
 
     // ── Tool search ──────────────────────────────────────────────────
     pub(super) tool_search_config: Option<crate::tools::ToolSearchConfig>,
-    pub(super) tool_search_manager: Option<std::sync::Arc<crate::tools::ToolSearchEngine>>,
+    pub(super) tool_search_manager: Option<std::sync::Arc<crate::tools::ToolSearchManager>>,
 
     // ── Session & orchestration ──────────────────────────────────────
     pub(super) session_manager: Option<crate::session::SessionManager>,
@@ -116,6 +124,11 @@ pub struct AgentBuilder {
     pub(super) initial_messages: Option<Vec<crate::ir::Message>>,
     pub(super) resume_session_id: Option<String>,
     pub(super) resumed_session: Option<crate::session::Session>,
+    /// Cost already spent in a prior run, captured by
+    /// [`crate::agent::AgentCheckpoint`] and rehydrated into the
+    /// built agent's `BudgetTracker` so over-budget detection fires
+    /// at the correct accumulated total, not at zero.
+    pub(super) resume_budget_spent: Option<rust_decimal::Decimal>,
 
     // ── Resource-level loading flags ─────────────────────────────────
     // Order of precedence inside `build()`:
@@ -643,17 +656,23 @@ impl AgentBuilder {
         self
     }
 
-    /// Sets the approval channel sender for human-in-the-loop review.
+    /// Attach the unified human-in-the-loop handler.
     ///
     /// When the execution mode is [`ExecutionMode::Supervised`] or
-    /// [`ExecutionMode::SupervisedFor`], tools that require review will
-    /// send an `ApprovalRequest` through this channel and wait for a
-    /// response. If no channel is configured, supervised tools are
-    /// blocked with an error message.
+    /// [`ExecutionMode::SupervisedFor`], tools that require review
+    /// call [`crate::authorization::HumanInteractionHandler::approve_tool`]
+    /// through this handler. The same handler is also used by the
+    /// `AskUserQuestion` tool (Phase D C-2) and MCP elicitation
+    /// (Phase D C-3) — one handler, one channel, three kinds of
+    /// interaction.
     ///
-    /// Create a channel with [`approval_channel`](crate::authorization::approval_channel).
-    pub fn approval_channel(mut self, sender: crate::authorization::ApprovalSender) -> Self {
-        self.approval_sender = Some(sender);
+    /// If no handler is configured, supervised tools deny with a
+    /// fail-closed reason pointing at this builder method.
+    pub fn human_handler(
+        mut self,
+        handler: Arc<dyn crate::authorization::HumanInteractionHandler>,
+    ) -> Self {
+        self.human = Some(handler);
         self
     }
 
@@ -875,16 +894,27 @@ impl AgentBuilder {
         Ok(self)
     }
 
-    /// Resume from a previously captured AgentCheckpoint.
+    /// Resume from a previously captured [`crate::AgentCheckpoint`].
     ///
-    /// This sets the session ID from the checkpoint and restores the
-    /// execution mode. The session persistence backend is responsible for
-    /// loading the full session graph; the checkpoint only carries the
-    /// lightweight runtime metadata (iteration count, cost, budget) that
-    /// would otherwise be lost on restart.
+    /// Restores the three pieces of state that survive process
+    /// boundaries:
+    ///
+    /// 1. `session_id` — the persistence backend reloads the graph,
+    ///    todos, plan, usage, and cached context from this id.
+    /// 2. `execution_mode` — the resumed agent runs in the same
+    ///    auto / supervised / plan mode as before.
+    /// 3. `budget_spent_usd` — the built agent's `BudgetTracker` is
+    ///    seeded with the previously-consumed cost so over-budget
+    ///    detection fires at the correct accumulated total, not
+    ///    zero.
+    ///
+    /// The `session_usage` field on the checkpoint is not applied
+    /// here — the session's own usage accumulator is reloaded by
+    /// the persistence backend when the graph is materialized.
     pub fn resume_from(mut self, checkpoint: crate::agent::AgentCheckpoint) -> Self {
         self.resume_session_id = Some(checkpoint.session_id.to_string());
         self.execution_mode = checkpoint.execution_mode;
+        self.resume_budget_spent = Some(checkpoint.budget_spent_usd);
         self
     }
 
@@ -993,7 +1023,7 @@ impl AgentBuilder {
     /// Sets a shared tool search manager.
     pub fn shared_tool_search_manager(
         mut self,
-        manager: std::sync::Arc<crate::tools::ToolSearchEngine>,
+        manager: std::sync::Arc<crate::tools::ToolSearchManager>,
     ) -> Self {
         self.tool_search_manager = Some(manager);
         self

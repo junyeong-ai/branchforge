@@ -195,6 +195,7 @@ impl WebFetchTool {
     }
 }
 
+#[non_exhaustive]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum ToolSearchTool {
@@ -238,6 +239,7 @@ impl Default for ToolSearchTool {
     }
 }
 
+#[non_exhaustive]
 #[derive(Debug, Clone, Serialize)]
 #[serde(untagged)]
 pub enum ServerTool {

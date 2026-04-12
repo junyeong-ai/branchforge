@@ -48,6 +48,7 @@ impl SchemaTool for GrepTool {
 
     const NAME: &'static str = "Grep";
     const READ_ONLY: bool = true;
+    const SEARCH_HINT: Option<&'static str> = Some("search file contents by regex");
     const DESCRIPTION: &'static str = r#"A powerful search tool built on ripgrep
 
   Usage:
@@ -58,6 +59,14 @@ impl SchemaTool for GrepTool {
   - Prefer a delegated workflow only when it is explicitly enabled for open-ended searches requiring multiple rounds
   - Pattern syntax: Uses ripgrep (not grep) - literal braces need escaping (use `interface\{\}` to find `interface{}` in Go code)
   - Multiline matching: By default patterns match within single lines only. For cross-line patterns like `struct \{[\s\S]*?field`, use `multiline: true`"#;
+
+    fn is_concurrency_safe_typed(&self, _input: &GrepInput) -> bool {
+        true
+    }
+
+    fn permission_subjects_typed(&self, input: &GrepInput) -> Vec<String> {
+        input.path.clone().into_iter().collect()
+    }
 
     async fn handle(&self, input: GrepInput, context: &ExecutionContext) -> ToolResult {
         let search_path = match context.try_resolve_or_root_for(Self::NAME, input.path.as_deref()) {

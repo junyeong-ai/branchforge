@@ -39,6 +39,7 @@
 // -- Agent runtime — primary user surface --
 pub use crate::Agent;
 pub use crate::AgentBuilder;
+pub use crate::AgentCheckpoint;
 pub use crate::AgentEvent;
 pub use crate::AgentResult;
 pub use crate::AgentRuntime;
@@ -47,6 +48,28 @@ pub use crate::ExecutionMode;
 pub use crate::Result;
 pub use crate::RunConfig;
 pub use crate::agent::{DEFAULT_MAX_TOKENS, RequestMetadata};
+
+// -- Streaming aggregator — canonical consumer for `AgentEvent`
+//    streams returned by `Agent::execute_stream()`. UIs and CLIs
+//    should consume via `apply()` / `drain()` instead of re-
+//    implementing tool-call state tracking.
+pub use crate::{StreamAggregator, ToolCallState, ToolCallStatus};
+
+// -- Observability event bus and the typed payloads emitted by
+//    the agent runtime. `subscribe_typed::<D>(cb)` + `emit_typed(d)`
+//    replace the untyped JSON dispatch for the built-in event
+//    kinds. Custom events keep the raw `subscribe` / `emit_simple`
+//    path.
+pub use crate::{
+    BudgetAlertPayload, Event, EventBus, EventKind, EventPayload, StreamChunkKind,
+    StreamChunkPayload, TokensConsumedPayload, ToolExecutedPayload, ToolProgressPayload,
+};
+
+// -- Mock LLM for deterministic agent testing. Surfaces the
+//    scripted-conversation helpers (`then_text`, `then_tool_call`,
+//    `then_stream_text`, `then_stream_tool_call`) without forcing
+//    consumers to reach into `crate::client::mock`.
+pub use crate::{MockLlmCall, MockResponse};
 
 // -- LLM call surface — IR-native trait + decorators --
 pub use crate::client::codec::ModelCodec;

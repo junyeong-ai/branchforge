@@ -39,6 +39,7 @@ pub const FOUNDRY_SMALL_MODEL: &str = "claude-haiku-4-5";
 #[cfg(feature = "azure")]
 pub const FOUNDRY_REASONING_MODEL: &str = "claude-opus-4-6";
 
+#[non_exhaustive]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ModelType {
@@ -157,6 +158,7 @@ impl Default for ModelConfig {
     }
 }
 
+#[non_exhaustive]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum BetaFeature {
     InterleavedThinking,
@@ -509,6 +511,7 @@ mod tests {
 /// [`ModelConfig`] defaults. Provider routing for the actual HTTP call
 /// is now handled by [`crate::ProfileRegistry`] / [`crate::ProviderClient`]; this
 /// enum only exists for *model-id defaulting* in the agent layer.
+#[non_exhaustive]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum CloudProvider {
     #[default]

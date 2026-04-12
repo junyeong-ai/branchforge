@@ -194,6 +194,11 @@ impl SchemaTool for ReadTool {
 
     const NAME: &'static str = "Read";
     const READ_ONLY: bool = true;
+    const SEARCH_HINT: Option<&'static str> = Some("read file contents by path");
+    // Binary/PDF/image reads can be larger than the default 200 KB;
+    // raise the inline cap so whole-file reads don't spill unless
+    // the consumer specifically wants overflow storage.
+    const MAX_RESULT_SIZE_BYTES: usize = 1_000_000;
 
     const DESCRIPTION: &'static str = r#"Reads a file from the local filesystem. You can access any file directly by using this tool.
 Assume this tool is able to read all files on the machine. If a path to a file is provided assume that path is valid. It is okay to read a file that does not exist; an error will be returned.
@@ -210,6 +215,16 @@ Usage:
 - This tool can only read files, not directories. To read a directory, use an ls command via the Bash tool.
 - You can call multiple tools in a single response. It is always better to speculatively read multiple potentially useful files in parallel.
 - If you read a file that exists but has empty contents you will receive a system reminder warning in place of file contents."#;
+
+    fn is_concurrency_safe_typed(&self, _input: &ReadInput) -> bool {
+        // Reads touch no shared mutable state beyond the readahead
+        // cache, which is an Arc<RwLock<_>>. Safe to parallelise.
+        true
+    }
+
+    fn permission_subjects_typed(&self, input: &ReadInput) -> Vec<String> {
+        vec![input.file_path.clone()]
+    }
 
     async fn handle(&self, input: ReadInput, context: &ExecutionContext) -> ToolResult {
         let path = match context.try_resolve_for(Self::NAME, &input.file_path) {

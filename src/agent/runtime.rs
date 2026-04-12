@@ -6,7 +6,7 @@ use tokio::sync::RwLock;
 use tokio_util::sync::CancellationToken;
 
 use super::recovery_recipes::RecipeRegistry;
-use crate::authorization::{ApprovalSender, ExecutionMode};
+use crate::authorization::{ExecutionMode, HumanInteractionHandler};
 use crate::budget::{BudgetTracker, TenantBudget};
 use crate::client::LlmCall;
 use crate::context::PromptOrchestrator;
@@ -15,7 +15,7 @@ use crate::events::EventBus;
 use crate::hooks::HookRegistry;
 use crate::orchestration::{AgentDirectory, Coordination};
 use crate::session::compact::CompactionChain;
-use crate::tools::{ToolRegistry, ToolSearchEngine};
+use crate::tools::{ToolRegistry, ToolSearchManager};
 
 use super::config::AgentConfig;
 
@@ -53,7 +53,13 @@ pub struct AgentRuntime {
     // ── Operations ───────────────────────────────────────────────────
     pub(crate) event_bus: Option<Arc<EventBus>>,
     pub(crate) execution_mode: ExecutionMode,
-    pub(crate) approval_sender: Option<ApprovalSender>,
+    /// Phase D C-1: unified human-in-the-loop channel. `None` means
+    /// no host is listening; supervised tool calls fail closed at
+    /// the call site. Previously `approval_sender: Option<ApprovalSender>`,
+    /// replaced by the `HumanInteractionHandler` trait so
+    /// AskUserQuestion, MCP elicitation, and tool approval all share
+    /// one channel instead of three parallel mpsc registries.
+    pub(crate) human: Option<Arc<dyn HumanInteractionHandler>>,
     pub(crate) context_scope: Option<SharedContextScope>,
     pub(crate) shutdown: CancellationToken,
     pub(crate) _shutdown_guard: tokio_util::sync::DropGuard,
@@ -62,7 +68,7 @@ pub struct AgentRuntime {
     pub(crate) budget_tracker: Arc<BudgetTracker>,
     pub(crate) tenant_budget: Option<Arc<TenantBudget>>,
     pub(crate) mcp_manager: Option<Arc<crate::mcp::McpManager>>,
-    pub(crate) tool_search_manager: Option<Arc<ToolSearchEngine>>,
+    pub(crate) tool_search_manager: Option<Arc<ToolSearchManager>>,
 
     // ── Session lifecycle ────────────────────────────────────────────
     pub(crate) compaction_chain: Option<Arc<CompactionChain>>,
@@ -139,5 +145,21 @@ impl AgentRuntime {
     #[must_use]
     pub fn shutdown_token(&self) -> CancellationToken {
         self.shutdown.clone()
+    }
+
+    /// Build a `BudgetContext` view over this runtime's budget tracker,
+    /// tenant budget, and budget config.
+    ///
+    /// This is the single construction point for `BudgetContext` across
+    /// the execution and streaming loops — prior versions materialised
+    /// it inline in ten different places, which made adding a new
+    /// budget field a cross-cutting edit.
+    #[must_use]
+    pub(crate) fn budget_context(&self) -> super::common::BudgetContext<'_> {
+        super::common::BudgetContext {
+            tracker: &self.budget_tracker,
+            tenant: self.tenant_budget.as_deref(),
+            config: &self.config.budget,
+        }
     }
 }

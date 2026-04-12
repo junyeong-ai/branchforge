@@ -19,6 +19,7 @@ use std::path::Path;
 
 /// Detected container runtime, or `None` if the process is running
 /// directly on the host.
+#[non_exhaustive]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ContainerRuntime {
     Docker,

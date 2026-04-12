@@ -31,7 +31,7 @@ use std::collections::HashMap;
 use std::path::Path;
 #[cfg(test)]
 use std::path::PathBuf;
-use tracing::warn;
+use tracing::{info, warn};
 
 pub trait SandboxRuntime: Send + Sync {
     fn is_available(&self) -> bool;
@@ -43,19 +43,57 @@ pub trait SandboxRuntime: Send + Sync {
 pub struct Sandbox {
     config: SandboxConfig,
     runtime: Option<Box<dyn SandboxRuntime>>,
+    /// Set to the detected container runtime when sandbox construction
+    /// short-circuits because the host already provides isolation
+    /// (Docker, Podman, LXC, Kubernetes). `apply()` then becomes a
+    /// no-op instead of erroring out on missing runtime.
+    skipped_for_container: Option<ContainerRuntime>,
 }
 
 impl Sandbox {
     pub fn new(config: SandboxConfig) -> Self {
-        let runtime = Self::create_runtime(&config);
-        Self { config, runtime }
+        let skipped_for_container = Self::detect_container_skip(&config);
+        let runtime = if skipped_for_container.is_some() {
+            None
+        } else {
+            Self::create_runtime(&config)
+        };
+        Self {
+            config,
+            runtime,
+            skipped_for_container,
+        }
     }
 
     pub fn disabled() -> Self {
         Self {
             config: SandboxConfig::disabled(),
             runtime: None,
+            skipped_for_container: None,
         }
+    }
+
+    /// If sandbox is requested but the process is already running
+    /// inside a container, return the detected runtime so `Sandbox::new`
+    /// can skip nested namespace isolation.
+    ///
+    /// Container runtimes (Docker, Podman, LXC, Kubernetes) already
+    /// apply their own seccomp + capability + namespace isolation.
+    /// Stacking another Linux-namespace sandbox on top is both
+    /// redundant and likely to fail — most container seccomp profiles
+    /// deny nested `unshare()`.
+    fn detect_container_skip(config: &SandboxConfig) -> Option<ContainerRuntime> {
+        if !config.enabled {
+            return None;
+        }
+        let runtime = detect::detect_container()?;
+        info!(
+            target: "branchforge::security::sandbox",
+            container_runtime = runtime.as_str(),
+            "Running inside a container — skipping nested namespace sandbox; \
+             host isolation already applies"
+        );
+        Some(runtime)
     }
 
     fn create_runtime(config: &SandboxConfig) -> Option<Box<dyn SandboxRuntime>> {
@@ -108,9 +146,20 @@ impl Sandbox {
         &self.config
     }
 
+    /// Returns the container runtime detected at construction time, if
+    /// any. Callers that need to branch on "host-managed isolation"
+    /// semantics read this.
+    pub fn skipped_for_container(&self) -> Option<ContainerRuntime> {
+        self.skipped_for_container
+    }
+
     pub fn apply(&self) -> SandboxResult<()> {
         match &self.runtime {
             Some(runtime) => runtime.apply(),
+            None if self.skipped_for_container.is_some() => {
+                // Host container runtime provides isolation — no-op.
+                Ok(())
+            }
             None if self.config.enabled => Err(SandboxError::NotAvailable(
                 "no sandbox runtime available".into(),
             )),
@@ -255,5 +304,42 @@ mod tests {
 
         assert!(sandbox.can_bypass(true));
         assert!(!sandbox.can_bypass(false));
+    }
+
+    /// W-26: when running inside a container, `create_runtime` must
+    /// bail out before attempting to build a nested namespace sandbox.
+    /// We force detection by setting `KUBERNETES_SERVICE_HOST`, which
+    /// [`detect::detect_container`] recognises unconditionally.
+    #[test]
+    fn nested_sandbox_skipped_inside_container() {
+        // Save and restore so we do not leak state into parallel
+        // tests running in the same process.
+        let prior = std::env::var("KUBERNETES_SERVICE_HOST").ok();
+        unsafe {
+            std::env::set_var("KUBERNETES_SERVICE_HOST", "10.0.0.1");
+        }
+
+        let config = SandboxConfig::new(PathBuf::from("/tmp"));
+        let sandbox = Sandbox::new(config);
+
+        // Detection short-circuits `create_runtime` → no runtime is
+        // attached, so `is_enabled()` is false even though the
+        // original config was `enabled: true`.
+        assert!(!sandbox.is_enabled());
+        assert!(sandbox.runtime.is_none());
+        assert!(
+            sandbox.skipped_for_container().is_some(),
+            "skipped_for_container must record the detection reason"
+        );
+        // `apply()` must be a successful no-op when host isolation
+        // already applies — not an error.
+        assert!(sandbox.apply().is_ok());
+
+        unsafe {
+            match prior {
+                Some(v) => std::env::set_var("KUBERNETES_SERVICE_HOST", v),
+                None => std::env::remove_var("KUBERNETES_SERVICE_HOST"),
+            }
+        }
     }
 }

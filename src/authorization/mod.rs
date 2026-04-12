@@ -1,70 +1,40 @@
 //! Authorization system for controlling tool execution.
+//!
+//! # Design
+//!
+//! This module owns **policy evaluation** (rule DSL, permission decisions,
+//! execution modes, approval channels). It does NOT own **subject
+//! extraction** — that is the responsibility of each tool via
+//! [`crate::tools::Tool::permission_subjects`]. Keeping extraction next
+//! to the tool definition makes the "what string does `Bash(rm:*)`
+//! match against?" question answerable by reading the tool's own
+//! file, and prevents the parallel-registry anti-pattern flagged in
+//! `.claude/rules/naming.md`.
+//!
+//! The previous `InputExtractor`/`FieldExtractor`/`default_extractors`
+//! module was deleted in Phase D Workstream A-1 as a dual-system
+//! violation.
 
 pub mod approval;
 mod denied;
 pub mod dsl;
-pub mod extractors;
+pub mod human;
 mod modes;
 mod rules;
 
-pub use approval::{
-    ApprovalReceiver, ApprovalRequest, ApprovalResponse, ApprovalSender, approval_channel,
-};
+pub use approval::DEFAULT_APPROVAL_TIMEOUT_SECS;
 pub use denied::AuthorizationDenied;
 pub use dsl::{
-    PermissionRuleParseError, PermissionRuleSyntax, RuleDecisionKeyword, SubjectPattern,
+    PermissionDslError, PermissionRuleSyntax, RuleDecisionKeyword, SubjectPattern,
     parse_permission_rule, parse_to_tool_rule,
 };
-pub use extractors::{FieldExtractor, InputExtractor};
+pub use human::{
+    ElicitationRequest, ElicitationResponse, HumanInteractionError, HumanInteractionExtension,
+    HumanInteractionHandler, HumanInteractionResult, Question, QuestionRequest, QuestionResponse,
+    ToolApprovalRequest, ToolApprovalResponse,
+};
 pub use modes::ExecutionMode;
 pub use rules::{
     PermissionDecision, PermissionDeniedReason, ToolLimits, ToolPolicy, ToolPolicyBuilder,
     ToolRule, ToolRuleDecision,
 };
-
-pub const READ_ONLY_TOOLS: &[&str] = &["Read", "Glob", "Grep", "WebSearch", "WebFetch"];
-pub const FILE_TOOLS: &[&str] = &["Read", "Write", "Edit", "Glob", "Grep"];
-pub const SHELL_TOOLS: &[&str] = &["Bash", "KillShell"];
-
-pub fn is_read_only_tool(tool_name: &str) -> bool {
-    READ_ONLY_TOOLS.contains(&tool_name)
-}
-
-pub fn is_file_tool(tool_name: &str) -> bool {
-    FILE_TOOLS.contains(&tool_name)
-}
-
-pub fn is_shell_tool(tool_name: &str) -> bool {
-    SHELL_TOOLS.contains(&tool_name)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_is_read_only_tool() {
-        assert!(is_read_only_tool("Read"));
-        assert!(is_read_only_tool("Glob"));
-        assert!(is_read_only_tool("Grep"));
-        assert!(!is_read_only_tool("Write"));
-        assert!(!is_read_only_tool("Bash"));
-    }
-
-    #[test]
-    fn test_is_file_tool() {
-        assert!(is_file_tool("Read"));
-        assert!(is_file_tool("Write"));
-        assert!(is_file_tool("Edit"));
-        assert!(!is_file_tool("Bash"));
-        assert!(!is_file_tool("WebSearch"));
-    }
-
-    #[test]
-    fn test_is_shell_tool() {
-        assert!(is_shell_tool("Bash"));
-        assert!(is_shell_tool("KillShell"));
-        assert!(!is_shell_tool("Read"));
-        assert!(!is_shell_tool("Write"));
-    }
-}

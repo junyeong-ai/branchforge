@@ -6,35 +6,69 @@ use serde::{Deserialize, Serialize};
 use tokio::select;
 use tracing::debug;
 
-use super::task_output::TaskStatus;
-use super::task_registry::{TaskAssistantMetadata, TaskExecutionSummary, TaskRegistry};
+use std::collections::HashMap;
+
+use super::contract::{AgentContract, TypedContractEntry};
+use super::task_tracker::{TaskAssistantMetadata, TaskExecutionSummary, TaskTracker};
 use crate::common::{Index, IndexRegistry};
 use crate::hooks::{HookEvent, HookInput};
 use crate::ir::{ContentPart, Message};
-use crate::session::{SessionId, SessionManager};
+use crate::session::{SessionId, SessionManager, SessionState};
 use crate::subagents::{SubagentIndex, builtin_subagents};
 use crate::tools::{ExecutionContext, SchemaTool};
 use crate::types::ToolResult;
 
 pub struct TaskTool {
-    registry: TaskRegistry,
+    registry: TaskTracker,
     subagent_registry: IndexRegistry<SubagentIndex>,
+    typed_contracts: HashMap<&'static str, TypedContractEntry>,
     max_background_tasks: usize,
     session_manager: Option<SessionManager>,
     delegation_runtime: Option<crate::agent::DelegationRuntime>,
 }
 
 impl TaskTool {
-    pub fn new(registry: TaskRegistry) -> Self {
+    pub fn new(registry: TaskTracker) -> Self {
         let mut subagent_registry = IndexRegistry::new();
         subagent_registry.register_all(builtin_subagents());
         Self {
             registry,
             subagent_registry,
+            typed_contracts: HashMap::new(),
             max_background_tasks: 10,
             session_manager: None,
             delegation_runtime: None,
         }
+    }
+
+    /// Register a typed [`AgentContract`] against this tool. Typed
+    /// registration is an **open registry** — callers add their own
+    /// contracts without modifying the runtime. Once registered, any
+    /// `TaskInput` whose `subagent_type` matches `C::SUBAGENT_TYPE`
+    /// will be preflight-validated so its JSON prompt parses as
+    /// `C::Input` before the subagent is dispatched.
+    ///
+    /// The untyped legacy path (`subagent_type` with no registered
+    /// contract) is left untouched — typed registration is purely
+    /// additive, following OCP.
+    #[must_use]
+    pub fn register_typed<C: AgentContract>(mut self) -> Self {
+        self.typed_contracts
+            .insert(C::SUBAGENT_TYPE, TypedContractEntry::for_contract::<C>());
+        self
+    }
+
+    /// View the currently-registered typed contracts. Keyed by
+    /// `C::SUBAGENT_TYPE`. Used by the `Task` tool catalogue and by
+    /// tests that want to verify a contract was registered.
+    pub fn typed_contracts(&self) -> &HashMap<&'static str, TypedContractEntry> {
+        &self.typed_contracts
+    }
+
+    /// Look up the typed contract entry registered for this subagent
+    /// type, if any. Used by preflight and by typed invokers.
+    pub fn typed_contract(&self, subagent_type: &str) -> Option<&TypedContractEntry> {
+        self.typed_contracts.get(subagent_type)
     }
 
     pub fn session_manager(mut self, session_manager: SessionManager) -> Self {
@@ -223,6 +257,7 @@ impl Clone for TaskTool {
         Self {
             registry: self.registry.clone(),
             subagent_registry: self.subagent_registry.clone(),
+            typed_contracts: self.typed_contracts.clone(),
             max_background_tasks: self.max_background_tasks,
             session_manager: self.session_manager.clone(),
             delegation_runtime: self.delegation_runtime.clone(),
@@ -259,7 +294,7 @@ pub struct TaskInput {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TaskOutput {
     pub agent_id: String,
-    pub status: TaskStatus,
+    pub status: SessionState,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub text: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -299,7 +334,7 @@ fn completed_task_output(agent_id: String, result: &super::AgentResult) -> TaskO
 
     TaskOutput {
         agent_id,
-        status: TaskStatus::Completed,
+        status: SessionState::Completed,
         text,
         content,
         structured_output: result.structured_output.clone(),
@@ -321,10 +356,10 @@ fn completed_task_output(agent_id: String, result: &super::AgentResult) -> TaskO
 }
 
 impl TaskOutput {
-    fn from_snapshot(agent_id: String, snapshot: super::task_registry::TaskResultSnapshot) -> Self {
+    fn from_snapshot(agent_id: String, snapshot: super::task_tracker::TaskResultSnapshot) -> Self {
         Self {
             agent_id,
-            status: snapshot.status.into(),
+            status: snapshot.status,
             text: snapshot.text,
             content: snapshot.content,
             structured_output: snapshot.structured_output,
@@ -363,6 +398,16 @@ impl SchemaTool for TaskTool {
             {
                 return ToolResult::error("Nested subagents are not supported");
             }
+        }
+
+        // Typed-contract preflight: if the caller targets a subagent
+        // that has a registered `AgentContract`, the prompt must be
+        // valid JSON for `C::Input`. This catches schema mismatches
+        // before the subagent is even spawned.
+        if let Some(entry) = self.typed_contracts.get(input.subagent_type.as_str())
+            && let Err(error) = (entry.validate_prompt)(&input.prompt)
+        {
+            return ToolResult::error(error.to_string());
         }
 
         let replay_messages = match self.replay_messages(&input, context).await {
@@ -471,7 +516,7 @@ impl SchemaTool for TaskTool {
 
             let output = TaskOutput {
                 agent_id: agent_id.clone(),
-                status: TaskStatus::Running,
+                status: SessionState::Running,
                 text: None,
                 content: None,
                 structured_output: None,
@@ -567,7 +612,7 @@ impl SchemaTool for TaskTool {
 
                     let output = TaskOutput {
                         agent_id,
-                        status: TaskStatus::Failed,
+                        status: SessionState::Failed,
                         text: None,
                         content: None,
                         structured_output: None,
@@ -585,7 +630,7 @@ impl SchemaTool for TaskTool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::agent::{AgentMetrics, AgentResult, AgentState};
+    use crate::agent::{AgentMetrics, AgentResult, AgentState, TypedAgentInvoker};
     use crate::ir::ContentPart;
     use crate::ir::FinishReason;
     use crate::session::{MemoryPersistence, SessionConfig, SessionManager};
@@ -610,7 +655,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_max_background_limit() {
-        let registry = TaskRegistry::new(std::sync::Arc::new(MemoryPersistence::new()));
+        let registry = TaskTracker::new(std::sync::Arc::new(MemoryPersistence::new()));
         let tool = TaskTool::new(registry.clone()).max_background_tasks(1);
         let context = test_context();
 
@@ -650,9 +695,84 @@ mod tests {
             .await;
     }
 
+    /// W-9 end-to-end: register a typed `ResearchContract`, run the
+    /// untyped `TaskTool::handle` path against both a valid and an
+    /// invalid JSON prompt, and verify the preflight catches the
+    /// schema mismatch before the subagent runs.
+    #[tokio::test]
+    async fn test_typed_contract_preflight_rejects_schema_mismatch() {
+        use serde::{Deserialize, Serialize};
+
+        #[derive(Serialize, Deserialize, schemars::JsonSchema)]
+        struct ResearchInput {
+            topic: String,
+            max_sources: u32,
+        }
+
+        #[derive(Serialize, Deserialize)]
+        struct ResearchOutput {
+            summary: String,
+        }
+
+        struct ResearchContract;
+        impl AgentContract for ResearchContract {
+            type Input = ResearchInput;
+            type Output = ResearchOutput;
+            const SUBAGENT_TYPE: &'static str = "general";
+            fn description() -> &'static str {
+                "Structured research subagent"
+            }
+        }
+
+        let registry = TaskTracker::new(std::sync::Arc::new(MemoryPersistence::new()));
+        let tool = TaskTool::new(registry).register_typed::<ResearchContract>();
+
+        // The open registry actually records the contract.
+        assert_eq!(tool.typed_contracts().len(), 1);
+        let entry = tool.typed_contract("general").expect("contract present");
+        assert_eq!(entry.subagent_type, "general");
+        assert_eq!(entry.description, "Structured research subagent");
+
+        // A valid typed input round-trips through `build_task_input`.
+        let invoker = TypedAgentInvoker::<ResearchContract>::new();
+        let typed = invoker
+            .build_task_input(
+                &ResearchInput {
+                    topic: "rust async".into(),
+                    max_sources: 5,
+                },
+                "do research",
+            )
+            .unwrap();
+        let decoded: ResearchInput = serde_json::from_str(&typed.prompt).unwrap();
+        assert_eq!(decoded.topic, "rust async");
+        assert_eq!(decoded.max_sources, 5);
+        // Validator accepts the well-formed prompt.
+        assert!((entry.validate_prompt)(&typed.prompt).is_ok());
+
+        // Validator rejects a malformed prompt.
+        let bad = (entry.validate_prompt)("not-json").unwrap_err();
+        assert!(bad.to_string().contains("general"));
+
+        // Preflight surfaces as a tool error through the public
+        // `TaskTool::execute` path — no subagent is ever dispatched.
+        let context = test_context();
+        let result = tool
+            .execute(
+                serde_json::json!({
+                    "description": "research",
+                    "prompt": "this is not valid json",
+                    "subagent_type": "general",
+                }),
+                &context,
+            )
+            .await;
+        assert!(result.is_error(), "preflight must reject malformed prompt");
+    }
+
     #[test]
     fn test_subagent_registry_integration() {
-        let registry = TaskRegistry::new(std::sync::Arc::new(MemoryPersistence::new()));
+        let registry = TaskTracker::new(std::sync::Arc::new(MemoryPersistence::new()));
         let mut subagent_registry = IndexRegistry::new();
         subagent_registry.register_all(builtin_subagents());
 
@@ -708,7 +828,7 @@ mod tests {
         };
 
         let output = completed_task_output("task-id".to_string(), &result);
-        assert_eq!(output.status, TaskStatus::Completed);
+        assert_eq!(output.status, SessionState::Completed);
         assert_eq!(output.text.as_deref(), Some("first second"));
         assert_eq!(output.content.as_ref().map(Vec::len), Some(2));
         assert_eq!(
@@ -733,7 +853,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_replay_requires_bound_session_manager() {
-        let registry = TaskRegistry::new(std::sync::Arc::new(MemoryPersistence::new()));
+        let registry = TaskTracker::new(std::sync::Arc::new(MemoryPersistence::new()));
         let tool = TaskTool::new(registry);
         let context = test_context();
 
@@ -755,7 +875,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_replay_respects_session_scope() {
-        let registry = TaskRegistry::new(std::sync::Arc::new(MemoryPersistence::new()));
+        let registry = TaskTracker::new(std::sync::Arc::new(MemoryPersistence::new()));
         let manager = SessionManager::in_memory();
         let session = manager
             .create_with_identity(SessionConfig::default(), "tenant-a", "user-1")
@@ -798,7 +918,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_replay_rejects_invalid_node_uuid() {
-        let registry = TaskRegistry::new(std::sync::Arc::new(MemoryPersistence::new()));
+        let registry = TaskTracker::new(std::sync::Arc::new(MemoryPersistence::new()));
         let manager = SessionManager::in_memory();
         let session = manager.create(SessionConfig::default()).await.unwrap();
         let tool = TaskTool::new(registry).session_manager(manager);
@@ -827,7 +947,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_replay_rejects_invalid_session_uuid() {
-        let registry = TaskRegistry::new(std::sync::Arc::new(MemoryPersistence::new()));
+        let registry = TaskTracker::new(std::sync::Arc::new(MemoryPersistence::new()));
         let tool = TaskTool::new(registry).session_manager(SessionManager::in_memory());
         let context = test_context();
 

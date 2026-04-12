@@ -30,7 +30,7 @@ pub(crate) struct DelegationRuntime {
     sandbox_settings: Option<SandboxConfig>,
     session_manager: Option<SessionManager>,
     mcp_manager: Option<Arc<crate::mcp::McpManager>>,
-    tool_search_manager: Option<Arc<crate::tools::ToolSearchEngine>>,
+    tool_search_manager: Option<Arc<crate::tools::ToolSearchManager>>,
 }
 
 /// Configuration bundle for delegation runtime construction.
@@ -46,7 +46,7 @@ pub(crate) struct DelegationRuntimeConfig {
     pub sandbox_settings: Option<SandboxConfig>,
     pub session_manager: Option<SessionManager>,
     pub mcp_manager: Option<Arc<crate::mcp::McpManager>>,
-    pub tool_search_manager: Option<Arc<crate::tools::ToolSearchEngine>>,
+    pub tool_search_manager: Option<Arc<crate::tools::ToolSearchManager>>,
 }
 
 impl DelegationRuntime {

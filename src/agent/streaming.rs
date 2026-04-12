@@ -9,18 +9,17 @@ use tracing::{debug, warn};
 
 use super::AgentMetrics;
 use super::common::{
-    BudgetContext, accumulate_inner_usage, accumulate_response_usage, emit_cost_report,
-    emit_tokens_consumed, emit_tool_executed, emit_tool_progress, handle_compaction,
-    maybe_emit_budget_alert, maybe_invoke_explicit_skill_command, run_post_tool_hooks,
-    run_stop_hooks, try_activate_dynamic_rules,
+    accumulate_inner_usage, emit_cost_report, emit_tool_executed, emit_tool_progress,
+    handle_compaction, maybe_invoke_explicit_skill_command, run_post_tool_hooks, run_stop_hooks,
+    try_activate_dynamic_rules,
 };
 use super::events::{AgentEvent, AgentResult};
 use super::executor::Agent;
 use super::request::RequestBuilder;
+use super::request_pipeline::RequestPipeline;
 use super::run_config::RunConfig;
 use super::runtime::AgentRuntime;
-use crate::authorization::approval::DEFAULT_APPROVAL_TIMEOUT_SECS;
-use crate::authorization::{ApprovalRequest, ApprovalResponse, AuthorizationDenied};
+use crate::authorization::{AuthorizationDenied, ToolApprovalResponse};
 use crate::client::provider_client::ChunkStream;
 use crate::hooks::{HookContext, HookEvent, HookInput};
 use crate::ir::ContentPart;
@@ -45,6 +44,27 @@ impl Agent {
     ) -> crate::Result<impl Stream<Item = crate::Result<AgentEvent>> + Send> {
         self.execute_stream_inner(prompt.into(), Some(run_config))
             .await
+    }
+
+    /// Phase D D-1: stream `execute_stream` into a host-neutral
+    /// [`super::AgentEventSink`]. This is the canonical path for
+    /// CLI hosts (pipe into `NdjsonSink::new(stdout)`) and API
+    /// servers (pipe into `SseSink::new(response_body)`) — the
+    /// underlying stream is identical to `execute_stream`, but the
+    /// caller does not have to hand-roll the drain loop for each
+    /// transport.
+    ///
+    /// Returns `Ok(())` when the stream ends normally (including
+    /// when the sink reports `SinkError::Closed` — a graceful
+    /// consumer disconnect). Returns the propagated error when
+    /// the stream itself errors mid-flight.
+    pub async fn execute_stream_into(
+        &self,
+        prompt: &str,
+        sink: &(impl super::AgentEventSink + ?Sized),
+    ) -> crate::Result<()> {
+        let stream = self.execute_stream(prompt).await?;
+        super::event_sink::drive_stream_into_sink(stream, sink).await
     }
 
     async fn execute_stream_inner(
@@ -118,6 +138,7 @@ impl Agent {
                 session_id: Arc::clone(&self.session_id),
                 session_manager: self.session_manager.clone(),
                 session_scope: self.session_scope.clone(),
+                persist_serializer: Arc::clone(&self.persist_serializer),
             },
             timeout,
             prompt,
@@ -138,6 +159,10 @@ struct StreamStateConfig {
     session_id: Arc<str>,
     session_manager: Option<SessionManager>,
     session_scope: Option<SessionAccessScope>,
+    /// Phase C-5: FIFO serializer shared with the owning `Agent` so
+    /// streaming-path saves interleave correctly with non-streaming
+    /// saves on the same session.
+    persist_serializer: Arc<tokio::sync::Mutex<()>>,
 }
 
 enum StreamPollResult {
@@ -223,6 +248,12 @@ struct StreamState {
     pending_tool_results: Vec<ContentPart>,
     pending_tool_uses: Vec<PendingToolCall>,
     recovery_attempts: u32,
+    /// Phase C-4: bounded retry budget for structured-output
+    /// schema validation failures within a single stream run.
+    /// Caps at [`super::execution::MAX_STRUCTURED_OUTPUT_RETRIES`]
+    /// before the state machine aborts with
+    /// [`crate::Error::StructuredOutputExhausted`].
+    structured_output_attempts: u32,
     /// Accumulators for tool_use content blocks being streamed, keyed by
     /// the codec's `index`. Codecs (esp. OpenAI Chat Completions) can
     /// interleave deltas for multiple tool calls in a single stream, so
@@ -239,9 +270,32 @@ struct StreamState {
     /// `accumulated_usage` when the response completes. Reset per
     /// iteration in `do_start_request`.
     last_request_estimate: Option<crate::budget::RequestTokenEstimate>,
+    /// Phase D E-1: rolling prompt-cache baseline carried across
+    /// iterations inside a single stream run. Updated in
+    /// `do_start_request` with the outgoing IR request, read at
+    /// stream-end to classify cache breaks.
+    cache_break_baseline: Option<crate::observability::CacheBreakBaseline>,
+    /// Phase D E-1: the baseline built for the CURRENT in-flight
+    /// request. Moved into `cache_break_baseline` once the
+    /// response finishes and a cause (or None) is classified.
+    pending_cache_break_baseline: Option<crate::observability::CacheBreakBaseline>,
+    /// Phase D E-1: did the current request declare any cache
+    /// markers? Stashed per iteration so the stream-end
+    /// classifier has the `request_had_cache_markers` input
+    /// without keeping the whole `ir_request` around.
+    pending_cache_markers: bool,
+    /// Phase D E-1: the model id from the in-flight request.
+    /// Used as the `model` field in
+    /// `CacheBreakObservedPayload` when the classifier fires.
+    pending_request_model: Option<String>,
     phase: Phase,
     all_non_retryable: bool,
     session_started: bool,
+    /// Guard that makes [`AgentEvent::Init`] fire exactly once,
+    /// as the first event of the stream. Flipped on emission so
+    /// subsequent iterations of the next_event loop skip the
+    /// init branch.
+    init_emitted: bool,
     prompt_submitted: bool,
     initial_prompt: Option<String>,
     max_iterations_override: Option<usize>,
@@ -267,6 +321,7 @@ impl StreamState {
             pending_tool_results: Vec::new(),
             pending_tool_uses: Vec::new(),
             recovery_attempts: 0,
+            structured_output_attempts: 0,
             accumulating_tool_calls: std::collections::HashMap::new(),
             final_text: String::new(),
             final_thinking: String::new(),
@@ -274,13 +329,36 @@ impl StreamState {
             finish_reason: None,
             total_usage: crate::ir::Usage::default(),
             last_request_estimate: None,
+            cache_break_baseline: None,
+            pending_cache_break_baseline: None,
+            pending_cache_markers: false,
+            pending_request_model: None,
             phase: Phase::StartRequest,
             all_non_retryable: false,
             session_started: false,
+            init_emitted: false,
             prompt_submitted: false,
             initial_prompt: Some(prompt),
             max_iterations_override,
         }
+    }
+
+    /// Phase C-4: if `e` is a [`crate::Error::StructuredOutputInvalid`]
+    /// and the per-run retry budget is already exhausted, translate it
+    /// into the terminal [`crate::Error::StructuredOutputExhausted`].
+    /// Otherwise increment the counter and return `None` so the caller
+    /// continues with its normal retry/recovery logic.
+    fn check_structured_output_budget(&mut self, e: &crate::Error) -> Option<crate::Error> {
+        if let crate::Error::StructuredOutputInvalid { reason, .. } = e {
+            self.structured_output_attempts += 1;
+            if self.structured_output_attempts >= super::execution::MAX_STRUCTURED_OUTPUT_RETRIES {
+                return Some(crate::Error::StructuredOutputExhausted {
+                    attempts: self.structured_output_attempts,
+                    last_reason: reason.clone(),
+                });
+            }
+        }
+        None
     }
 
     fn extract_structured_output(&self, text: &str) -> Option<serde_json::Value> {
@@ -288,6 +366,38 @@ impl StreamState {
             self.cfg.runtime.config.prompt.output_schema.as_ref(),
             text,
         )
+    }
+
+    /// Build the stream prologue [`AgentEvent::Init`] describing
+    /// the agent's capability set at the moment streaming starts.
+    /// All fields are point-in-time snapshots; downstream mutation
+    /// (lazy MCP tool loading, model fallback) surfaces through
+    /// its own events rather than re-emitting `Init`.
+    fn build_init_event(&self) -> AgentEvent {
+        let mut tools: Vec<super::AgentInitTool> = Vec::new();
+        self.cfg.runtime.tools.for_each(|tool| {
+            tools.push(super::AgentInitTool {
+                name: tool.name().to_string(),
+                description: tool.description().to_string(),
+                search_hint: tool.search_hint().map(|s| s.to_string()),
+                aliases: tool.aliases().iter().map(|s| s.to_string()).collect(),
+            });
+        });
+
+        AgentEvent::Init {
+            model: self.cfg.runtime.config.model.primary.clone(),
+            execution_mode: format!("{:?}", self.cfg.runtime.execution_mode).to_lowercase(),
+            tools,
+            // Subagent / skill / MCP catalogues are intentionally
+            // empty at this layer — the streaming loop does not
+            // hold direct references to those registries. When a
+            // consumer needs a richer prologue, they can construct
+            // the `Init` themselves from the parent runtime and
+            // prepend it to the stream.
+            subagents: Vec::new(),
+            skills: Vec::new(),
+            mcp_servers: Vec::new(),
+        }
     }
 
     fn build_result(
@@ -315,6 +425,15 @@ impl StreamState {
     }
 
     async fn next_event(&mut self) -> Option<crate::Result<AgentEvent>> {
+        // Emit the Init event exactly once, as the first thing the
+        // consumer sees. Building it on demand here (rather than in
+        // the StreamState constructor) keeps the snapshot tied to
+        // the moment the stream actually starts polling.
+        if !self.init_emitted {
+            self.init_emitted = true;
+            return Some(Ok(self.build_init_event()));
+        }
+
         loop {
             if matches!(self.phase, Phase::Done) {
                 return None;
@@ -467,18 +586,10 @@ impl StreamState {
     }
 
     fn check_budget_exceeded(&mut self) -> Option<crate::Result<AgentEvent>> {
-        let result = BudgetContext {
-            tracker: &self.cfg.runtime.budget_tracker,
-            tenant: self.cfg.runtime.tenant_budget.as_deref(),
-            config: &self.cfg.runtime.config.budget,
-        }
-        .check();
-
-        if let Err(e) = result {
+        if let Err(e) = self.cfg.runtime.budget_context().check() {
             self.phase = Phase::Done;
             return Some(Err(e));
         }
-
         None
     }
 
@@ -551,6 +662,7 @@ impl StreamState {
                     self.cfg.session_manager.clone(),
                     self.cfg.session_scope.clone(),
                     self.cfg.tool_state.clone(),
+                    Arc::clone(&self.cfg.persist_serializer),
                 )
                 .await
                 {
@@ -574,6 +686,7 @@ impl StreamState {
                             self.cfg.session_manager.clone(),
                             self.cfg.session_scope.clone(),
                             self.cfg.tool_state.clone(),
+                            Arc::clone(&self.cfg.persist_serializer),
                         )
                         .await
                         {
@@ -596,6 +709,7 @@ impl StreamState {
                 self.cfg.session_manager.clone(),
                 self.cfg.session_scope.clone(),
                 self.cfg.tool_state.clone(),
+                Arc::clone(&self.cfg.persist_serializer),
             )
             .await
             {
@@ -653,14 +767,8 @@ impl StreamState {
             return Some(Ok(AgentEvent::Complete(Box::new(result))));
         }
 
-        let budget_ctx = BudgetContext {
-            tracker: &self.cfg.runtime.budget_tracker,
-            tenant: self.cfg.runtime.tenant_budget.as_deref(),
-            config: &self.cfg.runtime.config.budget,
-        };
-        if let Some(fallback) = budget_ctx.fallback_model() {
-            self.cfg.request_builder.set_model(fallback);
-        }
+        let pipeline = RequestPipeline::new(&self.cfg.runtime);
+        pipeline.apply_budget_fallback(&mut self.cfg.request_builder);
 
         let messages = self
             .cfg
@@ -739,25 +847,33 @@ impl StreamState {
             .request_builder
             .build(messages, &self.dynamic_rules);
 
-        // Preflight budget check: estimate the cost of the pending
-        // request against the session / tenant budgets and bail out
-        // before hitting the wire if it would overrun. Prevents
-        // bursting where a single large call blows past a limit that
-        // historical spend alone had not yet tripped.
-        let preflight_ctx = BudgetContext {
-            tracker: &self.cfg.runtime.budget_tracker,
-            tenant: self.cfg.runtime.tenant_budget.as_deref(),
-            config: &self.cfg.runtime.config.budget,
-        };
-        if let Err(e) = preflight_ctx.preflight(&ir_request) {
-            self.phase = Phase::Done;
-            return Some(Err(e));
-        }
+        // Phase D E-1: snapshot cache baseline BEFORE the request
+        // goes on the wire. Compared against the previous turn's
+        // baseline (on `self.cache_break_baseline`) once the stream
+        // finish chunk arrives with actual usage.
+        let prev_cache_read = self
+            .cache_break_baseline
+            .as_ref()
+            .map(|b| b.last_cache_read_tokens)
+            .unwrap_or(0);
+        self.pending_cache_break_baseline = Some(
+            crate::observability::CacheBreakBaseline::from_request(&ir_request, prev_cache_read),
+        );
+        self.pending_cache_markers = ir_request.has_cache_markers();
+        self.pending_request_model = Some(ir_request.model.clone());
 
-        // Stash the token estimate so the finish-chunk path can
-        // reconcile it against the provider's reported usage. See
-        // [`crate::budget::EstimateReconciler::observe`].
-        self.last_request_estimate = Some(crate::budget::estimate_request_tokens(&ir_request));
+        // Preflight budget check + token estimate stash. Rejects
+        // over-budget requests before hitting the wire and carries
+        // the estimate forward so the finish-chunk path can reconcile
+        // it against actual provider usage.
+        let prepared = match pipeline.prepare(&ir_request) {
+            Ok(prepared) => prepared,
+            Err(e) => {
+                self.phase = Phase::Done;
+                return Some(Err(e));
+            }
+        };
+        self.last_request_estimate = Some(prepared.estimate);
 
         let chunk_stream = match self
             .cfg
@@ -768,6 +884,18 @@ impl StreamState {
         {
             Ok(s) => s,
             Err(e) => {
+                if let Some(terminal) = self.check_structured_output_budget(&e) {
+                    self.phase = Phase::Done;
+                    return Some(Err(terminal));
+                }
+                if matches!(e, crate::Error::StructuredOutputInvalid { .. }) {
+                    // Below the cap — retry the turn with a fresh
+                    // request. Reset recovery_attempts so provider-level
+                    // recovery keeps its own independent budget.
+                    self.recovery_attempts = 0;
+                    self.phase = Phase::StartRequest;
+                    return None;
+                }
                 let executor = super::recovery_executor::RecoveryExecutor {
                     registry: &self.cfg.runtime.recovery_recipes,
                     tool_state: &self.cfg.tool_state,
@@ -826,6 +954,10 @@ impl StreamState {
                 self.handle_stream_chunk(chunk, accumulated_usage)
             }
             Ok(Some(Err(e))) => {
+                if let Some(terminal) = self.check_structured_output_budget(&e) {
+                    self.phase = Phase::Done;
+                    return StreamPollResult::Event(Err(terminal));
+                }
                 self.phase = Phase::Done;
                 StreamPollResult::Event(Err(e))
             }
@@ -851,13 +983,9 @@ impl StreamState {
                 self.final_text.push_str(&text);
                 self.fire_post_stream_chunk_sync(&text, "text");
                 if let Some(ref bus) = self.cfg.runtime.event_bus {
-                    bus.emit_simple(
-                        crate::events::EventKind::StreamChunk,
-                        serde_json::json!({
-                            "chunk_type": "text",
-                            "length": text.len(),
-                        }),
-                    );
+                    bus.emit_typed(crate::events::StreamChunkPayload {
+                        chunk: crate::events::StreamChunkKind::Text { length: text.len() },
+                    });
                 }
                 StreamPollResult::Event(Ok(AgentEvent::Text { delta: text }))
             }
@@ -865,13 +993,9 @@ impl StreamState {
                 self.final_thinking.push_str(&text);
                 self.fire_post_stream_chunk_sync(&text, "thinking");
                 if let Some(ref bus) = self.cfg.runtime.event_bus {
-                    bus.emit_simple(
-                        crate::events::EventKind::StreamChunk,
-                        serde_json::json!({
-                            "chunk_type": "thinking",
-                            "length": text.len(),
-                        }),
-                    );
+                    bus.emit_typed(crate::events::StreamChunkPayload {
+                        chunk: crate::events::StreamChunkKind::Thinking { length: text.len() },
+                    });
                 }
                 StreamPollResult::Event(Ok(AgentEvent::Thinking { content: text }))
             }
@@ -917,13 +1041,11 @@ impl StreamState {
                     };
                     self.fire_post_stream_chunk_sync(&name, "tool_use");
                     if let Some(ref bus) = self.cfg.runtime.event_bus {
-                        bus.emit_simple(
-                            crate::events::EventKind::StreamChunk,
-                            serde_json::json!({
-                                "chunk_type": "tool_use",
-                                "tool_name": &tool_call.name,
-                            }),
-                        );
+                        bus.emit_typed(crate::events::StreamChunkPayload {
+                            chunk: crate::events::StreamChunkKind::ToolUse {
+                                tool_name: tool_call.name.clone(),
+                            },
+                        });
                     }
                     self.pending_tool_uses.push(tool_call);
                 } else {
@@ -949,6 +1071,23 @@ impl StreamState {
             }
             ModelStreamChunk::ReasoningSignature { signature, .. } => {
                 self.thinking_signature = Some(signature);
+                StreamPollResult::Continue
+            }
+            ModelStreamChunk::RateLimit(snap) => {
+                // Phase C-6: surface rate-limit accounting to the event
+                // bus immediately. `RateLimitApproachingPayload` fires
+                // when any axis is at ≤10% of its window, so dashboards
+                // can warn before a 429 actually lands.
+                if let Some(ref bus) = self.cfg.runtime.event_bus {
+                    bus.emit_typed(crate::events::RateLimitObservedPayload {
+                        snapshot: snap.clone(),
+                    });
+                    if snap.is_approaching_limit(crate::ir::APPROACHING_THRESHOLD) {
+                        bus.emit_typed(crate::events::RateLimitApproachingPayload {
+                            snapshot: snap,
+                        });
+                    }
+                }
                 StreamPollResult::Continue
             }
             ModelStreamChunk::Heartbeat
@@ -999,49 +1138,55 @@ impl StreamState {
             )
             .await;
 
-        if let Err(e) = accumulate_response_usage(
+        let stashed_estimate = self.last_request_estimate.take();
+        if let Err(e) = RequestPipeline::new(&self.cfg.runtime).record_usage(
             &mut self.total_usage,
             &mut self.metrics,
-            &self.cfg.runtime.budget_tracker,
-            self.cfg.runtime.tenant_budget.as_deref(),
             &self.cfg.runtime.config.model.primary,
             &accumulated_usage,
+            stashed_estimate,
         ) {
             return Some(Err(e));
         }
 
-        // Reconcile preflight estimate against actual usage. The
-        // estimate was stashed in `last_request_estimate` before the
-        // request was sent; comparing here lets operators calibrate
-        // the 4-chars-per-token heuristic over time via structured
-        // tracing events.
-        if let Some(estimate) = self.last_request_estimate.take() {
-            let drift = crate::budget::EstimateReconciler::compute(estimate, &accumulated_usage);
-            tracing::debug!(
-                target: "branchforge::budget::estimate_drift",
-                model = %self.cfg.runtime.config.model.primary,
-                estimated_input = drift.estimated_input,
-                actual_input = drift.actual_input,
-                estimated_output = drift.estimated_output,
-                actual_output = drift.actual_output,
-                input_ratio = drift.input_ratio.unwrap_or(f64::NAN),
-                output_ratio = drift.output_ratio.unwrap_or(f64::NAN),
-                is_close = drift.is_close(),
-                "Token estimate drift recorded"
-            );
+        // Phase D E-1: classify prompt cache break using the
+        // baseline stashed by `do_start_request` and the
+        // accumulated usage reported by the finish chunk.
+        if let Some(mut pending) = self.pending_cache_break_baseline.take() {
+            // Build a synthetic ModelResponse carrying only the
+            // accumulated usage so the classifier's signature
+            // stays shared with the non-streaming path. The
+            // classifier only reads `usage.cached_input_tokens`.
+            let mut synthetic = crate::ir::ModelResponse::from_text("");
+            synthetic.usage = accumulated_usage.clone();
+            if let Some(cause) = crate::observability::classify_cache_break(
+                self.cache_break_baseline.as_ref(),
+                &pending,
+                &synthetic,
+                self.pending_cache_markers,
+            ) {
+                tracing::warn!(
+                    target: "branchforge::cache::break",
+                    category = cause.category(),
+                    model = self.pending_request_model.as_deref().unwrap_or(""),
+                    "prompt cache break classified (streaming)"
+                );
+                if let Some(bus) = self.cfg.runtime.event_bus.as_ref() {
+                    use crate::decision::DecisionReason;
+                    bus.emit_typed(crate::events::CacheBreakObservedPayload {
+                        category: cause.category().to_string(),
+                        summary: cause.summary(),
+                        model: self.pending_request_model.clone().unwrap_or_default(),
+                    });
+                }
+            }
+            // Advance the rolling baseline with this turn's cache
+            // read so the next iteration's compare can detect TTL.
+            pending.last_cache_read_tokens = accumulated_usage.cached_input_tokens.unwrap_or(0);
+            self.cache_break_baseline = Some(pending);
+            self.pending_cache_markers = false;
+            self.pending_request_model = None;
         }
-
-        emit_tokens_consumed(
-            self.cfg.runtime.event_bus.as_deref(),
-            &accumulated_usage,
-            &self.cfg.runtime.config.model.primary,
-        );
-
-        maybe_emit_budget_alert(
-            &self.cfg.runtime.budget_tracker,
-            self.cfg.runtime.event_bus.as_deref(),
-            self.cfg.runtime.config.budget.alert_threshold_pct,
-        );
 
         let structured_output = self.extract_structured_output(&self.final_text);
 
@@ -1091,16 +1236,16 @@ impl StreamState {
             self.phase = Phase::Done;
             return Some(Err(e.into()));
         }
-        if let Err(e) = persist_stream_session_state(
+        // Mid-stream: assistant message + usage flushed to session.
+        // Detached — the next awaited flush (tool results below or
+        // cancellation barrier above) will wait on this via the
+        // persist serializer.
+        persist_stream_session_state_detached(
             self.cfg.session_manager.clone(),
             self.cfg.session_scope.clone(),
             self.cfg.tool_state.clone(),
-        )
-        .await
-        {
-            self.phase = Phase::Done;
-            return Some(Err(e));
-        }
+            Arc::clone(&self.cfg.persist_serializer),
+        );
 
         if self.pending_tool_uses.is_empty() {
             self.phase = Phase::Done;
@@ -1112,6 +1257,21 @@ impl StreamState {
                 &self.cfg.session_id,
             )
             .await;
+
+            // Final flush: re-entering the persist serializer waits
+            // for the detached assistant-message save above to land,
+            // so the stream's terminal `Complete` event fires only
+            // after the session is durable.
+            if let Err(e) = persist_stream_session_state(
+                self.cfg.session_manager.clone(),
+                self.cfg.session_scope.clone(),
+                self.cfg.tool_state.clone(),
+                Arc::clone(&self.cfg.persist_serializer),
+            )
+            .await
+            {
+                return Some(Err(e));
+            }
 
             let messages = self
                 .cfg
@@ -1188,6 +1348,12 @@ impl StreamState {
                     reason,
                 });
             } else {
+                // Phase D B-3: preserve the original input for audit
+                // when a PreToolUse hook rewrites it.
+                let original_input_for_audit = pre_output
+                    .updated_input
+                    .as_ref()
+                    .map(|_| tool_use.arguments.clone());
                 let actual_input = pre_output
                     .updated_input
                     .unwrap_or(tool_use.arguments.clone());
@@ -1212,7 +1378,8 @@ impl StreamState {
                     continue;
                 }
 
-                // ExecutionMode: Supervised mode requires review via approval channel
+                // ExecutionMode: Supervised mode requires review via
+                // the unified HumanInteractionHandler (Phase D C-1).
                 if self
                     .cfg
                     .runtime
@@ -1225,52 +1392,20 @@ impl StreamState {
                         input: actual_input.clone(),
                     });
 
-                    let approval_result = if let Some(ref sender) = self.cfg.runtime.approval_sender
-                    {
-                        let request = ApprovalRequest {
-                            tool_name: tool_use.name.clone(),
-                            tool_call_id: tool_use.id.clone(),
-                            tool_input: actual_input.clone(),
-                            reason: format!(
-                                "Tool '{}' requires approval in {} mode",
-                                tool_use.name, self.cfg.runtime.execution_mode
-                            ),
-                        };
-                        let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
-                        if sender.send((request, resp_tx)).await.is_err() {
-                            ApprovalResponse::Deny {
-                                reason: "Approval channel closed".into(),
-                            }
-                        } else {
-                            match tokio::time::timeout(
-                                std::time::Duration::from_secs(DEFAULT_APPROVAL_TIMEOUT_SECS),
-                                resp_rx,
-                            )
-                            .await
-                            {
-                                Ok(Ok(response)) => response,
-                                Ok(Err(_)) => ApprovalResponse::Deny {
-                                    reason: "Approval responder dropped".into(),
-                                },
-                                Err(_) => ApprovalResponse::Deny {
-                                    reason: "Approval timed out".into(),
-                                },
-                            }
-                        }
-                    } else {
-                        ApprovalResponse::Deny {
-                            reason: format!(
-                                "Tool '{}' requires review but no approval channel is configured.                                  Use AgentBuilder::approval_channel() to enable human-in-the-loop.",
-                                tool_use.name
-                            ),
-                        }
-                    };
+                    let approval_result = super::common::request_tool_approval(
+                        self.cfg.runtime.human.as_deref(),
+                        &tool_use.name,
+                        &tool_use.id,
+                        &actual_input,
+                        &self.cfg.runtime.execution_mode.to_string(),
+                    )
+                    .await;
 
                     match approval_result {
-                        ApprovalResponse::Approve => {
+                        ToolApprovalResponse::Approve => {
                             debug!(tool = %tool_use.name, "Tool approved by human");
                         }
-                        ApprovalResponse::Deny { reason } => {
+                        ToolApprovalResponse::Deny { reason } => {
                             debug!(tool = %tool_use.name, %reason, "Tool denied by human");
                             all_tool_results.push(
                                 ContentPart::tool_error(&tool_use.id, reason.clone())
@@ -1299,19 +1434,75 @@ impl StreamState {
                     name: tool_use.name.clone(),
                     input: actual_input.clone(),
                 });
+                let mut node_data = serde_json::json!({
+                    "tool_call_id": tool_use.id.clone(),
+                    "tool_name": tool_use.name.clone(),
+                    "tool_input": actual_input.clone(),
+                });
+                if let Some(original) = original_input_for_audit
+                    && let Some(obj) = node_data.as_object_mut()
+                {
+                    obj.insert("original_input".to_string(), original);
+                }
                 self.cfg
                     .tool_state
-                    .append_graph_node(
-                        crate::graph::NodeKind::ToolCall,
-                        serde_json::json!({
-                            "tool_call_id": tool_use.id.clone(),
-                            "tool_name": tool_use.name.clone(),
-                            "tool_input": actual_input.clone(),
-                        }),
-                    )
+                    .append_graph_node(crate::graph::NodeKind::ToolCall, node_data)
                     .await?;
                 prepared.push((tool_use.id.clone(), tool_use.name.clone(), actual_input));
             }
+        }
+
+        // Phase D B-1: parallel side-effect-free preflight validation.
+        // Run `Tool::validate_input` concurrently across every prepared
+        // tool call. Invalid inputs are rejected BEFORE the safety
+        // partition / spawn loop touches them, so the streaming event
+        // sequence sees `ToolStart` → `ToolBlocked` → … in order and
+        // consumers never observe a validation error racing a sibling
+        // into a mutated state.
+        {
+            let ctx = self.cfg.runtime.tools.context().clone();
+            let validation_futures = prepared.iter().map(|(_, name, input)| {
+                let tools = Arc::clone(&self.cfg.runtime.tools);
+                let name = name.clone();
+                let input = input.clone();
+                let ctx = ctx.clone();
+                async move {
+                    let Some(tool) = tools.get(&name) else {
+                        return Ok(());
+                    };
+                    tool.validate_input(&input, &ctx).await
+                }
+            });
+            let results: Vec<_> = futures::future::join_all(validation_futures).await;
+
+            let mut still_valid = Vec::with_capacity(prepared.len());
+            for ((id, name, input), result) in
+                std::mem::take(&mut prepared).into_iter().zip(results)
+            {
+                match result {
+                    Ok(()) => still_valid.push((id, name, input)),
+                    Err(err) => {
+                        debug!(
+                            tool = %name,
+                            code = ?err.code,
+                            message = %err.message,
+                            "Tool input rejected by preflight validation"
+                        );
+                        all_tool_results.push(
+                            ContentPart::tool_error(&id, err.message.clone()).with_tool_name(&name),
+                        );
+                        self.metrics.record_authorization_denial(
+                            AuthorizationDenied::new(&name, &id, input).reason(err.message.clone()),
+                        );
+                        events.push(AgentEvent::ToolBlocked {
+                            id,
+                            name,
+                            reason: err.message,
+                        });
+                    }
+                }
+            }
+            prepared = still_valid;
         }
 
         // Phase 2: Spawn first batch and transition to ExecutingTools phase.
@@ -1556,12 +1747,14 @@ impl StreamState {
             .tool_state
             .with_session_mut(|session| session.add_tool_results(results))
             .await?;
-        persist_stream_session_state(
+        // Mid-turn: tool results detached. The compaction-boundary
+        // flush below waits on this via the persist serializer.
+        persist_stream_session_state_detached(
             self.cfg.session_manager.clone(),
             self.cfg.session_scope.clone(),
             self.cfg.tool_state.clone(),
-        )
-        .await?;
+            Arc::clone(&self.cfg.persist_serializer),
+        );
 
         handle_compaction(
             &self.cfg.tool_state,
@@ -1572,10 +1765,12 @@ impl StreamState {
             &mut self.metrics,
         )
         .await;
+        // Compaction boundary — always awaited.
         persist_stream_session_state(
             self.cfg.session_manager.clone(),
             self.cfg.session_scope.clone(),
             self.cfg.tool_state.clone(),
+            Arc::clone(&self.cfg.persist_serializer),
         )
         .await?;
         Ok(())
@@ -1584,38 +1779,63 @@ impl StreamState {
 
 /// Partition tools into batches for safe concurrent execution.
 ///
-/// Consecutive read-only tools are grouped into a single parallel batch.
-/// Mutating tools get their own sequential batch (size 1).
+/// A tool call is **parallelizable** when:
+/// - `is_read_only(input)` — pure read, never writes; OR
+/// - `is_concurrency_safe(input)` — explicitly safe to run alongside
+///   other tool calls (no shared mutable state like tempfiles, caches,
+///   or singleton resources).
+///
+/// A tool call is **never parallelizable** (always flushed alone) when:
+/// - it is not read-only and not concurrency-safe (default assumption), OR
+/// - `requires_user_interaction(input)` — needs exclusive TTY / HITL
+///   attention; batching would interleave prompts.
+///
+/// This is the single consumer for the Phase C-2 capability metadata.
+/// Unknown tools fall through the default fail-closed path (treated
+/// as serial).
 fn partition_tools_by_safety(
     registry: &crate::tools::ToolRegistry,
     prepared: &[(String, String, serde_json::Value)],
 ) -> Vec<Vec<(String, String, serde_json::Value)>> {
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum Parallelism {
+        Safe,   // read-only or concurrency-safe
+        Serial, // everything else
+    }
+
+    let classify = |name: &str, input: &serde_json::Value| -> Parallelism {
+        let Some(tool) = registry.get(name) else {
+            return Parallelism::Serial;
+        };
+        if tool.requires_user_interaction(input) {
+            return Parallelism::Serial;
+        }
+        if tool.is_read_only(input) || tool.is_concurrency_safe(input) {
+            Parallelism::Safe
+        } else {
+            Parallelism::Serial
+        }
+    };
+
     let mut batches: Vec<Vec<(String, String, serde_json::Value)>> = Vec::new();
     let mut current_batch: Vec<(String, String, serde_json::Value)> = Vec::new();
-    let mut current_is_read_only = true;
+    let mut current_mode = Parallelism::Safe;
 
     for (id, name, input) in prepared {
-        let tool_read_only = registry
-            .get(name)
-            .map(|t| t.is_read_only())
-            .unwrap_or(false);
+        let mode = classify(name, input);
 
-        if tool_read_only && current_is_read_only {
-            // Accumulate consecutive read-only tools
+        if mode == Parallelism::Safe && current_mode == Parallelism::Safe {
             current_batch.push((id.clone(), name.clone(), input.clone()));
         } else {
-            // Flush current batch if non-empty
             if !current_batch.is_empty() {
                 batches.push(std::mem::take(&mut current_batch));
             }
-            // Start new batch with this tool
             current_batch.push((id.clone(), name.clone(), input.clone()));
-            current_is_read_only = tool_read_only;
+            current_mode = mode;
 
-            // If mutating tool, flush immediately (run alone)
-            if !tool_read_only {
+            if mode == Parallelism::Serial {
                 batches.push(std::mem::take(&mut current_batch));
-                current_is_read_only = true; // reset for next
+                current_mode = Parallelism::Safe;
             }
         }
     }
@@ -1631,15 +1851,41 @@ async fn persist_stream_session_state(
     manager: Option<SessionManager>,
     scope: Option<SessionAccessScope>,
     tool_state: ToolState,
+    serializer: Arc<tokio::sync::Mutex<()>>,
 ) -> crate::Result<()> {
     let Some(manager) = manager else {
         return Ok(());
     };
+    // FIFO ordering across detached and awaited saves — see the
+    // doc comment on `Agent::persist_session_state_detached`.
+    let _guard = serializer.lock().await;
     let session = tool_state.session().await;
     manager
         .persist_snapshot(&session, scope.as_ref())
         .await
         .map_err(crate::Error::from)
+}
+
+/// Phase C-5: fire-and-forget streaming counterpart to
+/// [`Agent::persist_session_state_detached`]. Mid-stream saves
+/// (assistant chunk flush, tool result append) use this so the
+/// hot stream loop never blocks on remote persistence I/O.
+fn persist_stream_session_state_detached(
+    manager: Option<SessionManager>,
+    scope: Option<SessionAccessScope>,
+    tool_state: ToolState,
+    serializer: Arc<tokio::sync::Mutex<()>>,
+) {
+    let Some(manager) = manager else {
+        return;
+    };
+    tokio::spawn(async move {
+        let _guard = serializer.lock().await;
+        let session = tool_state.session().await;
+        if let Err(e) = manager.persist_snapshot(&session, scope.as_ref()).await {
+            tracing::warn!(error = %e, "detached stream session persist failed");
+        }
+    });
 }
 
 #[cfg(test)]

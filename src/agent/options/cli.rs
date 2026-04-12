@@ -250,10 +250,36 @@ impl AgentBuilder {
 
         if !settings.authorization.is_empty() {
             self.authorization_policy_explicit = true;
-            let loaded_policy = settings.authorization.to_policy();
-            let existing_policy = std::mem::take(&mut self.config.security.authorization_policy);
-            self.config.security.authorization_policy =
-                Self::merge_permission_policies(existing_policy, loaded_policy);
+            match settings.authorization.try_into_policy() {
+                Ok(loaded_policy) => {
+                    let existing_policy =
+                        std::mem::take(&mut self.config.security.authorization_policy);
+                    self.config.security.authorization_policy =
+                        Self::merge_permission_policies(existing_policy, loaded_policy);
+                }
+                Err(err) if self.deferred_build_error.is_none() => {
+                    // Phase D E-3: surface a typed
+                    // `PermissionDslError` as a fatal config-load
+                    // failure. `AgentBuilder::build()` inspects
+                    // `deferred_build_error` first and returns it
+                    // before any I/O runs, so a bad rule in
+                    // `settings.local.json` aborts the agent's
+                    // start-up loudly instead of silently matching
+                    // nothing at runtime.
+                    tracing::error!(
+                        error = %err,
+                        "malformed permission rule in settings — agent build will fail"
+                    );
+                    self.deferred_build_error = Some(crate::Error::Config(format!(
+                        "malformed permission rule in settings: {err}"
+                    )));
+                }
+                Err(_) => {
+                    // Already captured a prior settings error —
+                    // first failure wins so the user sees the
+                    // earliest cause.
+                }
+            }
         }
 
         if settings.sandbox.is_enabled() || settings.sandbox.has_network_settings() {

@@ -58,7 +58,7 @@ impl ToolSearchConfig {
     }
 }
 
-pub struct ToolSearchEngine {
+pub struct ToolSearchManager {
     config: ToolSearchConfig,
     index: Arc<RwLock<ToolIndex>>,
     definitions: Arc<RwLock<HashMap<String, McpToolDefinition>>>,
@@ -66,7 +66,7 @@ pub struct ToolSearchEngine {
     toolset_registry: Arc<RwLock<McpToolsetRegistry>>,
 }
 
-impl ToolSearchEngine {
+impl ToolSearchManager {
     pub fn new(config: ToolSearchConfig) -> Self {
         let engine = SearchEngine::new(config.search_mode);
         Self {
@@ -215,7 +215,7 @@ impl ToolSearchEngine {
     }
 }
 
-impl Default for ToolSearchEngine {
+impl Default for ToolSearchManager {
     fn default() -> Self {
         Self::new(ToolSearchConfig::default())
     }
@@ -281,7 +281,7 @@ impl PreparedTools {
     }
 }
 
-impl ToolSearchEngine {
+impl ToolSearchManager {
     pub async fn prepare_tools_for_access(
         &self,
         access: &crate::tools::ToolSurface,
@@ -316,7 +316,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_manager_creation() {
-        let manager = ToolSearchEngine::default();
+        let manager = ToolSearchManager::default();
         assert!(!manager.should_use_search().await);
         assert_eq!(manager.total_tokens().await, TokenCount::ZERO);
     }

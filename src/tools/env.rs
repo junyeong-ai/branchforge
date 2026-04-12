@@ -6,7 +6,7 @@ use std::sync::Arc;
 #[cfg(feature = "coding-tools")]
 use super::ProcessScheduler;
 use super::context::ExecutionContext;
-use crate::session::session_state::ToolState;
+use crate::session::tool_state::ToolState;
 
 #[derive(Clone)]
 pub struct ToolExecutionEnv {

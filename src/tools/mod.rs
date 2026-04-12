@@ -1,5 +1,6 @@
 //! Built-in tools for the agent.
 
+mod ask_user;
 #[cfg(feature = "coding-tools")]
 mod bash;
 mod builder;
@@ -31,6 +32,7 @@ mod traits;
 mod write;
 
 pub use crate::common::{is_tool_allowed, matches_tool_pattern};
+pub use ask_user::{AskUserQuestionInput, AskUserQuestionItem, AskUserQuestionTool};
 #[cfg(feature = "coding-tools")]
 pub use bash::BashTool;
 pub use builder::ToolRegistryBuilder;
@@ -53,12 +55,13 @@ pub use process::{ProcessId, ProcessInfo, ProcessScheduler};
 #[cfg(feature = "coding-tools")]
 pub use read::ReadTool;
 pub use registry::ToolRegistry;
-pub use search::{PreparedTools, SearchMode, ToolSearchConfig, ToolSearchEngine};
+pub use search::{PreparedTools, SearchMode, ToolSearchConfig, ToolSearchManager};
 pub use surface::ToolSurface;
 pub use todo::TodoWriteTool;
-pub use traits::{SchemaTool, Tool};
+pub use traits::{SchemaTool, Tool, ValidationError, ValidationResult};
 #[cfg(feature = "coding-tools")]
 pub use write::WriteTool;
 
 pub use crate::network_sandbox::{DomainCheck, NetworkSandbox};
+pub use crate::types::tool::{MemoryOverflowStore, OverflowRef, OverflowStore, preview_of};
 pub use crate::types::{ToolOutput, ToolResult};

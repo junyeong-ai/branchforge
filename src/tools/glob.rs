@@ -29,12 +29,21 @@ impl SchemaTool for GlobTool {
 
     const NAME: &'static str = "Glob";
     const READ_ONLY: bool = true;
+    const SEARCH_HINT: Option<&'static str> = Some("find files by glob pattern");
     const DESCRIPTION: &'static str = r#"- Fast file pattern matching tool that works with any codebase size
 - Supports glob patterns like "**/*.js" or "src/**/*.ts"
 - Returns matching file paths sorted by modification time
 - Use this tool when you need to find files by name patterns
 - When you are doing an open ended search that may require multiple rounds of globbing and grepping, prefer a delegated workflow only if it is explicitly enabled
 - You can call multiple tools in a single response. It is always better to speculatively perform multiple searches in parallel if they are potentially useful."#;
+
+    fn is_concurrency_safe_typed(&self, _input: &GlobInput) -> bool {
+        true
+    }
+
+    fn permission_subjects_typed(&self, input: &GlobInput) -> Vec<String> {
+        input.path.clone().into_iter().collect()
+    }
 
     async fn handle(&self, input: GlobInput, context: &ExecutionContext) -> ToolResult {
         let base_path = match context.try_resolve_or_root_for(Self::NAME, input.path.as_deref()) {

@@ -1,4 +1,53 @@
 //! MCP Manager for multiple server connections.
+//!
+//! # Lock ordering
+//!
+//! `McpManager` holds three `Arc<RwLock<…>>` fields that can be
+//! acquired in the same call path:
+//!
+//! 1. `servers: RwLock<HashMap<String, McpClient>>`
+//! 2. `tool_cache: RwLock<HashMap<String, ToolCache>>`
+//! 3. `degraded: RwLock<DegradedReport>`
+//!
+//! **Canonical acquisition order** when two or more of these locks
+//! must be held at the same time:
+//!
+//! > `servers` > `tool_cache` > `degraded`
+//!
+//! Rationale:
+//!
+//! - `servers` is the authoritative server map. All write-side
+//!   operations on the other two locks are triggered by a state
+//!   transition on `servers` (insert / remove / replace).
+//! - `tool_cache` is a projection of `servers`. Holding `servers`
+//!   first guarantees the cache write reflects a stable server map.
+//! - `degraded` is a pure observation sink. It is always acquired
+//!   last because `record_failure` / `record_healthy` has no data
+//!   dependency on the other two locks.
+//!
+//! # Current audit (2026-04)
+//!
+//! `add_server_tracked` (the only method that touches more than one
+//! of these locks inside a single call) follows the canonical order:
+//!
+//! ```text
+//! servers.read()    → duplicate check, released immediately
+//! degraded.write()  → record_failure on connect error (servers not held)
+//! tool_cache.write() → populate cache (servers not held)
+//! servers.write()   → race recheck + insert
+//!   ├── degraded.write()  → race-loss record_failure (servers held)
+//!   └── degraded.write()  → record_healthy on success (servers dropped first)
+//! ```
+//!
+//! The only path where `degraded` is acquired **while `servers` is
+//! still held** is the race-loss branch inside the `servers.write()`
+//! scope — that respects `servers > degraded` and is the reason the
+//! ordering rule is written in that direction.
+//!
+//! **Rule**: any future method that needs both `servers` and
+//! `degraded` must acquire `servers` first. Violations should be
+//! caught in code review, since a deadlock only manifests under
+//! concurrent load and may be hard to reproduce.
 
 #[cfg(feature = "mcp")]
 use std::collections::HashMap;
@@ -10,8 +59,8 @@ use std::time::Duration;
 use tokio::sync::RwLock;
 
 use super::{
-    DegradedReport, LifecyclePhase, McpContent, McpError, McpResourceDefinition, McpResult,
-    McpServerConfig, McpServerState, McpToolDefinition, McpToolResult,
+    DegradedReport, McpClientState, McpContent, McpError, McpResourceDefinition, McpResult,
+    McpServerConfig, McpServerSnapshot, McpToolDefinition, McpToolResult,
 };
 #[cfg(feature = "mcp")]
 use super::{McpTimeouts, ReconnectPolicy, ToolCache, make_mcp_name, parse_mcp_name};
@@ -34,6 +83,12 @@ pub struct McpManager {
     cache_ttl: Duration,
     #[cfg(feature = "mcp")]
     timeouts: McpTimeouts,
+    /// Phase D C-3: unified HITL handler forwarded to every MCP
+    /// client constructed through this manager. See
+    /// [`super::HumanElicitationRouter`] for how server-initiated
+    /// elicitation is routed.
+    #[cfg(feature = "mcp")]
+    human: Option<Arc<dyn crate::authorization::HumanInteractionHandler>>,
     /// Per-manager health snapshot accumulated across `add_server`
     /// / `add_server_tracked` calls. Readable via
     /// [`degraded_report_snapshot`][Self::degraded_report_snapshot]
@@ -60,8 +115,25 @@ impl McpManager {
             tool_cache: Arc::new(RwLock::new(HashMap::new())),
             cache_ttl: DEFAULT_CACHE_TTL,
             timeouts: McpTimeouts::default(),
+            human: None,
             degraded: Arc::new(RwLock::new(DegradedReport::default())),
         }
+    }
+
+    /// Phase D C-3: attach the unified
+    /// [`crate::authorization::HumanInteractionHandler`] so every
+    /// MCP client constructed through this manager forwards
+    /// server-initiated elicitation requests to it. Normally
+    /// called by the agent builder when
+    /// `AgentBuilder::human_handler` is set.
+    #[cfg(feature = "mcp")]
+    #[must_use]
+    pub fn with_human_handler(
+        mut self,
+        handler: Option<Arc<dyn crate::authorization::HumanInteractionHandler>>,
+    ) -> Self {
+        self.human = handler;
+        self
     }
 
     /// Snapshot the current [`DegradedReport`] for this manager.
@@ -83,18 +155,18 @@ impl McpManager {
     /// configured servers: a broken server gets quarantined in the
     /// report instead of aborting the whole agent construction.
     ///
-    /// The attached [`LifecyclePhase`] on failure is the exact
+    /// The attached [`McpClientState`] on failure is the exact
     /// phase the client last reached before bailing out — the same
     /// information that would be observable from
-    /// [`super::client::McpClient::current_phase`] on a retained
-    /// client — so callers can distinguish "process never spawned"
-    /// from "tools-list failed" without parsing error messages.
+    /// [`super::client::McpClient::state`] on a retained client — so
+    /// callers can distinguish "process never spawned" from
+    /// "tools-list failed" without parsing error messages.
     #[cfg(feature = "mcp")]
     pub async fn add_server_tracked(
         &self,
         name: impl Into<String>,
         config: McpServerConfig,
-    ) -> std::result::Result<LifecyclePhase, (LifecyclePhase, McpError)> {
+    ) -> std::result::Result<McpClientState, (McpClientState, McpError)> {
         let name = name.into();
 
         {
@@ -103,13 +175,15 @@ impl McpManager {
                 let err = McpError::Protocol {
                     message: format!("Server '{}' already exists", name),
                 };
-                return Err((LifecyclePhase::Queued, err));
+                return Err((McpClientState::Queued, err));
             }
         }
 
-        let mut client = McpClient::new(name.clone(), config).with_timeouts(self.timeouts.clone());
+        let mut client = McpClient::new(name.clone(), config)
+            .with_timeouts(self.timeouts.clone())
+            .with_human_handler(self.human.clone());
         if let Err(err) = client.connect().await {
-            let phase = client.current_phase();
+            let phase = client.state();
             tracing::warn!(
                 server = %name,
                 phase = phase.as_str(),
@@ -145,14 +219,14 @@ impl McpManager {
             self.degraded
                 .write()
                 .await
-                .record_failure(&name, LifecyclePhase::Queued, &err);
-            return Err((LifecyclePhase::Queued, err));
+                .record_failure(&name, McpClientState::Queued, &err);
+            return Err((McpClientState::Queued, err));
         }
         servers.insert(name.clone(), client);
         drop(servers);
 
         self.degraded.write().await.record_healthy(name);
-        Ok(LifecyclePhase::Ready)
+        Ok(McpClientState::Ready)
     }
 
     #[cfg(not(feature = "mcp"))]
@@ -160,6 +234,19 @@ impl McpManager {
         Self {
             _phantom: std::marker::PhantomData,
         }
+    }
+
+    /// Phase D C-3 pure-core stub. The `mcp` feature is off so
+    /// there are no clients to forward the handler to; the call
+    /// is a no-op that preserves the builder chain shape so the
+    /// agent builder does not need a feature branch.
+    #[cfg(not(feature = "mcp"))]
+    #[must_use]
+    pub fn with_human_handler(
+        self,
+        _handler: Option<std::sync::Arc<dyn crate::authorization::HumanInteractionHandler>>,
+    ) -> Self {
+        self
     }
 
     #[cfg(feature = "mcp")]
@@ -199,7 +286,9 @@ impl McpManager {
             }
         }
 
-        let mut client = McpClient::new(name.clone(), config).with_timeouts(self.timeouts.clone());
+        let mut client = McpClient::new(name.clone(), config)
+            .with_timeouts(self.timeouts.clone())
+            .with_human_handler(self.human.clone());
         client.connect().await?;
 
         // Populate tool cache from the freshly-connected client
@@ -245,9 +334,9 @@ impl McpManager {
         &self,
         _name: impl Into<String>,
         _config: McpServerConfig,
-    ) -> std::result::Result<LifecyclePhase, (LifecyclePhase, McpError)> {
+    ) -> std::result::Result<McpClientState, (McpClientState, McpError)> {
         Err((
-            LifecyclePhase::Queued,
+            McpClientState::Queued,
             McpError::Protocol {
                 message: "MCP feature not enabled".to_string(),
             },
@@ -294,14 +383,16 @@ impl McpManager {
         Vec::new()
     }
 
+    /// Snapshot the runtime state of one registered server. Returns
+    /// `None` if no server is registered under `name`.
     #[cfg(feature = "mcp")]
-    pub async fn server_state(&self, name: &str) -> Option<McpServerState> {
+    pub async fn server_snapshot(&self, name: &str) -> Option<McpServerSnapshot> {
         let servers = self.servers.read().await;
-        servers.get(name).map(|c| c.state().clone())
+        servers.get(name).map(|c| c.snapshot())
     }
 
     #[cfg(not(feature = "mcp"))]
-    pub async fn server_state(&self, _name: &str) -> Option<McpServerState> {
+    pub async fn server_snapshot(&self, _name: &str) -> Option<McpServerSnapshot> {
         None
     }
 
@@ -389,7 +480,7 @@ impl McpManager {
                         name: server_name.to_string(),
                     });
                 }
-                Some(client) if client.is_connected() => return Ok(()),
+                Some(client) if client.is_ready() => return Ok(()),
                 _ => {}
             }
         }
@@ -403,7 +494,7 @@ impl McpManager {
             })?;
 
         // Double-check after acquiring write lock
-        if client.is_connected() {
+        if client.is_ready() {
             return Ok(());
         }
 
@@ -652,7 +743,7 @@ mod tests {
         assert!(
             matches!(
                 entry.phase,
-                LifecyclePhase::Spawn | LifecyclePhase::Handshake
+                McpClientState::Spawn | McpClientState::Handshake
             ),
             "expected Spawn or Handshake, got {:?}",
             entry.phase
@@ -666,7 +757,7 @@ mod tests {
         let mut report = DegradedReport::default();
         assert!(report.is_healthy()); // empty == healthy
 
-        report.record_failure("bad", LifecyclePhase::ListTools, "tools/list timed out");
+        report.record_failure("bad", McpClientState::ListTools, "tools/list timed out");
         assert!(!report.is_healthy());
         assert_eq!(report.failed_ids().count(), 1);
         assert_eq!(report.healthy_ids().count(), 0);
@@ -719,10 +810,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_server_state_not_found() {
+    async fn test_server_snapshot_not_found() {
         let manager = McpManager::new();
-        let state = manager.server_state("nonexistent").await;
-        assert!(state.is_none());
+        let snapshot = manager.server_snapshot("nonexistent").await;
+        assert!(snapshot.is_none());
     }
 
     #[cfg(feature = "mcp")]

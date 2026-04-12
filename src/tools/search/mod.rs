@@ -6,4 +6,4 @@ mod manager;
 
 pub use engine::{SearchEngine, SearchHit, SearchMode};
 pub use index::{ToolIndex, ToolIndexEntry};
-pub use manager::{PreparedTools, ToolSearchConfig, ToolSearchEngine};
+pub use manager::{PreparedTools, ToolSearchConfig, ToolSearchManager};

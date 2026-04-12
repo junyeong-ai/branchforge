@@ -6,6 +6,7 @@ use crate::session::{Session, SessionId};
 use crate::tools::{ExecutionContext, SchemaTool};
 use crate::types::ToolResult;
 
+#[non_exhaustive]
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum GraphTreeMode {
@@ -13,6 +14,7 @@ pub enum GraphTreeMode {
     Verbose,
 }
 
+#[non_exhaustive]
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum GraphHistoryAction {

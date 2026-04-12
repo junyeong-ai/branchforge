@@ -47,6 +47,7 @@ pub struct PermissionRuleSyntax {
 /// The optional `allow` / `deny` / `ask` keyword. `Default` means
 /// "no keyword present" — callers decide how to interpret this
 /// (typically allow).
+#[non_exhaustive]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum RuleDecisionKeyword {
     #[default]
@@ -59,6 +60,7 @@ pub enum RuleDecisionKeyword {
 /// Structured subject pattern carved out of the parenthesised
 /// argument. Each variant corresponds to a distinct matcher
 /// strategy in the existing rule engine.
+#[non_exhaustive]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SubjectPattern {
     /// Exact string or path prefix.
@@ -85,72 +87,162 @@ impl SubjectPattern {
     }
 }
 
-/// Errors returned by [`parse_permission_rule`].
+/// Typed parse / lowering errors returned by
+/// [`parse_permission_rule`] and [`parse_to_tool_rule`].
+///
+/// Each variant carries enough context to pinpoint the failure in
+/// the original rule string. `col` is the **byte offset** (not
+/// character index) into the raw input at which the parser first
+/// detected the problem; callers that want to render a caret
+/// underline can map that directly to a column in single-line
+/// rule strings, which is the only shape the DSL supports.
+///
+/// Phase D E-3 hardening: new variants close long-standing silent
+/// failure modes that previously either panicked or produced a
+/// rule that matched nothing at runtime.
+#[non_exhaustive]
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
-pub enum PermissionRuleParseError {
+pub enum PermissionDslError {
+    /// Whitespace-only or empty input. Nothing to parse.
     #[error("rule string is empty")]
     Empty,
-    #[error("rule has unbalanced parentheses: {0}")]
-    UnbalancedParens(String),
-    #[error("tool name is missing or invalid: {0}")]
-    InvalidTool(String),
-    #[error("unknown decision keyword `{0}`; expected allow / deny / ask")]
-    UnknownKeyword(String),
+
+    /// Opening `(` had no matching `)` by end of string.
+    #[error("rule has unbalanced parentheses at col {col}: `{rule}`")]
+    UnbalancedParens { rule: String, col: usize },
+
+    /// Closing `)` was followed by more text. The DSL does not
+    /// accept any trailing input after the subject.
+    #[error(
+        "unexpected trailing input after `)` at col {col}: `{trailing}` — only one rule per string"
+    )]
+    TrailingInput { trailing: String, col: usize },
+
+    /// Tool identifier was empty or contained DSL-reserved
+    /// characters (parentheses, whitespace, quotes).
+    #[error("tool name is missing or invalid at col {col}: `{tool}`")]
+    InvalidTool { tool: String, col: usize },
+
+    /// `Tool()` — the subject parentheses were present but empty.
+    /// Reject because it's almost always a typo for `Tool` (no
+    /// subject) or `Tool(*)` (match-anything).
+    #[error("subject for `{tool}` is empty at col {col}; drop the parentheses or use `{tool}(*)`")]
+    EmptySubject { tool: String, col: usize },
+
+    /// First token looked like a keyword but was not one of
+    /// `allow` / `deny` / `ask`. Reject so users notice typos
+    /// (`permit Bash(ls)` would otherwise be silently treated as
+    /// the tool name `permit` with a trailing `Bash(ls)`).
+    #[error(
+        "unknown decision keyword `{keyword}` at col {col}; expected one of allow / deny / ask"
+    )]
+    UnknownKeyword { keyword: String, col: usize },
+
+    /// Tool pattern failed to compile as a regex. The DSL lets
+    /// users write `Read|Write` or `.*` as tool patterns; previously
+    /// a malformed pattern such as `Re[ad` was silently stored,
+    /// matched nothing at runtime, and left the user mystified
+    /// about why their allow rule never fired.
+    #[error("tool pattern `{pattern}` is not a valid regex: {details}")]
+    InvalidToolPattern { pattern: String, details: String },
 }
 
 /// Parse a single rule string into a [`PermissionRuleSyntax`].
-pub fn parse_permission_rule(
-    input: &str,
-) -> Result<PermissionRuleSyntax, PermissionRuleParseError> {
+///
+/// Byte offsets in returned [`PermissionDslError`]s are relative to
+/// the **original** `input`, not the internally trimmed view, so
+/// callers that render a caret underline can index straight into
+/// the user-facing string.
+pub fn parse_permission_rule(input: &str) -> Result<PermissionRuleSyntax, PermissionDslError> {
+    // Leading whitespace width — used so every col offset we hand
+    // back points into the original string, not the trimmed copy.
+    let lead = input.len() - input.trim_start().len();
     let trimmed = input.trim();
     if trimmed.is_empty() {
-        return Err(PermissionRuleParseError::Empty);
+        return Err(PermissionDslError::Empty);
     }
 
     // Optional decision keyword: allow / deny / ask, separated from
     // the tool by whitespace. Anything else means there's no
     // keyword and the first token is the tool.
-    let (decision, rest) = if let Some(rest) = strip_keyword(trimmed, "allow") {
-        (RuleDecisionKeyword::Allow, rest)
+    let (decision, rest_offset, rest) = if let Some(rest) = strip_keyword(trimmed, "allow") {
+        (RuleDecisionKeyword::Allow, lead + "allow".len(), rest)
     } else if let Some(rest) = strip_keyword(trimmed, "deny") {
-        (RuleDecisionKeyword::Deny, rest)
+        (RuleDecisionKeyword::Deny, lead + "deny".len(), rest)
     } else if let Some(rest) = strip_keyword(trimmed, "ask") {
-        (RuleDecisionKeyword::Ask, rest)
+        (RuleDecisionKeyword::Ask, lead + "ask".len(), rest)
     } else if let Some(idx) = trimmed.find(char::is_whitespace) {
         // First token isn't a known keyword but the string has
-        // whitespace — reject so users notice typos.
+        // whitespace — reject so users notice typos. We only fire
+        // on purely-lowercase-alnum tokens so patterns like
+        // `Read Bash` (two tools, impossible) still surface as
+        // InvalidTool via the main path.
         let first = &trimmed[..idx];
         if first
             .chars()
             .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit())
         {
-            return Err(PermissionRuleParseError::UnknownKeyword(first.into()));
+            return Err(PermissionDslError::UnknownKeyword {
+                keyword: first.into(),
+                col: lead,
+            });
         }
-        (RuleDecisionKeyword::Default, trimmed)
+        (RuleDecisionKeyword::Default, lead, trimmed)
     } else {
-        (RuleDecisionKeyword::Default, trimmed)
+        (RuleDecisionKeyword::Default, lead, trimmed)
     };
 
+    // Skip whitespace between the decision keyword and the tool.
+    let after_kw_trim = rest.len() - rest.trim_start().len();
+    let tool_start = rest_offset + after_kw_trim;
     let rest = rest.trim();
 
     // Split tool from optional `(subject)`.
-    let (tool, subject_text) = match rest.find('(') {
+    let (tool, subject_info) = match rest.find('(') {
         Some(open) => {
-            if !rest.ends_with(')') {
-                return Err(PermissionRuleParseError::UnbalancedParens(rest.into()));
+            let close = match rest.rfind(')') {
+                Some(i) if i > open => i,
+                _ => {
+                    return Err(PermissionDslError::UnbalancedParens {
+                        rule: rest.into(),
+                        col: tool_start + open,
+                    });
+                }
+            };
+            // Nothing is allowed after the closing paren.
+            if close + 1 != rest.len() {
+                let trailing = &rest[close + 1..];
+                return Err(PermissionDslError::TrailingInput {
+                    trailing: trailing.into(),
+                    col: tool_start + close + 1,
+                });
             }
-            let tool = rest[..open].trim();
-            let subject = &rest[open + 1..rest.len() - 1];
-            (tool, Some(subject))
+            let tool = rest[..open].trim_end();
+            let subject = &rest[open + 1..close];
+            (tool, Some((subject, tool_start + open + 1)))
         }
         None => (rest, None),
     };
 
     if tool.is_empty() || !is_valid_tool_name(tool) {
-        return Err(PermissionRuleParseError::InvalidTool(tool.into()));
+        return Err(PermissionDslError::InvalidTool {
+            tool: tool.into(),
+            col: tool_start,
+        });
     }
 
-    let subject = subject_text.map(classify_subject);
+    let subject = match subject_info {
+        Some((raw, col)) => {
+            if raw.trim().is_empty() {
+                return Err(PermissionDslError::EmptySubject {
+                    tool: tool.into(),
+                    col,
+                });
+            }
+            Some(classify_subject(raw))
+        }
+        None => None,
+    };
 
     Ok(PermissionRuleSyntax {
         decision,
@@ -161,10 +253,17 @@ pub fn parse_permission_rule(
 
 /// Convenience: parse a rule string and lower it into a [`ToolRule`]
 /// using the supplied default decision when no keyword was given.
+///
+/// Phase D E-3: this also validates that the tool name compiles as a
+/// regex before constructing the rule. Previously, a malformed
+/// pattern such as `Re[ad` was silently stored — `ToolRule::matches`
+/// fell back to exact-string comparison and the user's rule never
+/// fired. Now the caller gets a typed `InvalidToolPattern` error
+/// they can surface as a fatal config-load failure.
 pub fn parse_to_tool_rule(
     input: &str,
     default_decision: ToolRuleDecision,
-) -> Result<ToolRule, PermissionRuleParseError> {
+) -> Result<ToolRule, PermissionDslError> {
     let parsed = parse_permission_rule(input)?;
     let decision = match parsed.decision {
         RuleDecisionKeyword::Allow => ToolRuleDecision::Allow,
@@ -178,7 +277,7 @@ pub fn parse_to_tool_rule(
     };
 
     let input_pattern = parsed.subject.map(SubjectPattern::into_input_pattern);
-    Ok(ToolRule::new_internal(parsed.tool, input_pattern, decision))
+    ToolRule::try_new_from_dsl(parsed.tool, input_pattern, decision)
 }
 
 fn strip_keyword<'a>(s: &'a str, keyword: &str) -> Option<&'a str> {
@@ -318,7 +417,7 @@ mod tests {
     fn errors_on_empty_input() {
         assert!(matches!(
             parse_permission_rule("   ").unwrap_err(),
-            PermissionRuleParseError::Empty
+            PermissionDslError::Empty
         ));
     }
 
@@ -326,7 +425,7 @@ mod tests {
     fn errors_on_unbalanced_parens() {
         assert!(matches!(
             parse_permission_rule("Read(/etc/").unwrap_err(),
-            PermissionRuleParseError::UnbalancedParens(_)
+            PermissionDslError::UnbalancedParens { .. }
         ));
     }
 
@@ -334,7 +433,7 @@ mod tests {
     fn errors_on_unknown_keyword() {
         assert!(matches!(
             parse_permission_rule("permit Bash(ls)").unwrap_err(),
-            PermissionRuleParseError::UnknownKeyword(_)
+            PermissionDslError::UnknownKeyword { .. }
         ));
     }
 
@@ -345,7 +444,7 @@ mod tests {
         // a decision keyword.
         assert!(matches!(
             parse_permission_rule("\"Bash\"(ls)").unwrap_err(),
-            PermissionRuleParseError::InvalidTool(_)
+            PermissionDslError::InvalidTool { .. }
         ));
     }
 
@@ -381,5 +480,165 @@ mod tests {
         assert_eq!(rule.decision, ToolRuleDecision::Allow);
         let rule = parse_to_tool_rule("Read", ToolRuleDecision::Deny).unwrap();
         assert_eq!(rule.decision, ToolRuleDecision::Deny);
+    }
+
+    // ── Phase D E-3: grammar coverage matrix ───────────────────────
+
+    /// `Tool()` — empty subject parens are almost always a typo.
+    /// Reject with a dedicated variant so the error message can
+    /// suggest either dropping the parens or using `Tool(*)`.
+    #[test]
+    fn e3_rejects_empty_subject_parens() {
+        match parse_permission_rule("Bash()").unwrap_err() {
+            PermissionDslError::EmptySubject { tool, col } => {
+                assert_eq!(tool, "Bash");
+                assert_eq!(col, 5); // byte after the `(`
+            }
+            other => panic!("expected EmptySubject, got {other:?}"),
+        }
+    }
+
+    /// `Tool(arg)trailing` — anything after the closing `)` is
+    /// rejected. The DSL is one-rule-per-string.
+    #[test]
+    fn e3_rejects_trailing_input_after_closing_paren() {
+        match parse_permission_rule("Bash(git:*)extra").unwrap_err() {
+            PermissionDslError::TrailingInput { trailing, col } => {
+                assert_eq!(trailing, "extra");
+                assert_eq!(col, 11);
+            }
+            other => panic!("expected TrailingInput, got {other:?}"),
+        }
+    }
+
+    /// Column offsets for `UnbalancedParens` point at the opening
+    /// `(`, not the end of the string, so error renderers can draw
+    /// a caret at the actual problem site.
+    #[test]
+    fn e3_unbalanced_parens_points_at_opening() {
+        match parse_permission_rule("Read(/etc/passwd").unwrap_err() {
+            PermissionDslError::UnbalancedParens { col, .. } => {
+                assert_eq!(col, 4);
+            }
+            other => panic!("expected UnbalancedParens, got {other:?}"),
+        }
+    }
+
+    /// `UnknownKeyword` preserves the offending token and points at
+    /// the start of the input (after any leading whitespace).
+    #[test]
+    fn e3_unknown_keyword_preserves_offset_past_leading_whitespace() {
+        match parse_permission_rule("  permit Bash(ls)").unwrap_err() {
+            PermissionDslError::UnknownKeyword { keyword, col } => {
+                assert_eq!(keyword, "permit");
+                assert_eq!(col, 2);
+            }
+            other => panic!("expected UnknownKeyword, got {other:?}"),
+        }
+    }
+
+    /// Malformed tool regex patterns like `Re[ad` previously
+    /// silently stored a rule that matched nothing at runtime.
+    /// Phase D E-3 catches them during lowering via
+    /// [`ToolRule::try_new_from_dsl`] and surfaces them as
+    /// `InvalidToolPattern` so config loaders can reject the file.
+    #[test]
+    fn e3_rejects_invalid_tool_regex_at_lowering() {
+        match parse_to_tool_rule("Re[ad", ToolRuleDecision::Allow).unwrap_err() {
+            PermissionDslError::InvalidToolPattern { pattern, details } => {
+                assert_eq!(pattern, "Re[ad");
+                assert!(
+                    !details.is_empty(),
+                    "details should carry regex diagnostics"
+                );
+            }
+            other => panic!("expected InvalidToolPattern, got {other:?}"),
+        }
+    }
+
+    /// The full happy-path matrix: one row per accepted shape. Any
+    /// regression in the parser that drops one of these rows shows
+    /// up as a failure with a clear row label.
+    #[test]
+    fn e3_grammar_matrix_accepts_every_canonical_shape() {
+        let cases: &[(&str, RuleDecisionKeyword, &str, Option<SubjectPattern>)] = &[
+            ("Read", RuleDecisionKeyword::Default, "Read", None),
+            ("allow Read", RuleDecisionKeyword::Allow, "Read", None),
+            (
+                "deny Bash(rm:*)",
+                RuleDecisionKeyword::Deny,
+                "Bash",
+                Some(SubjectPattern::PrefixWild("rm".into())),
+            ),
+            (
+                "ask WebFetch(domain:github.com)",
+                RuleDecisionKeyword::Ask,
+                "WebFetch",
+                Some(SubjectPattern::Domain("github.com".into())),
+            ),
+            (
+                "Read(/etc/*)",
+                RuleDecisionKeyword::Default,
+                "Read",
+                Some(SubjectPattern::Glob("/etc/*".into())),
+            ),
+            (
+                "Read(/etc/passwd)",
+                RuleDecisionKeyword::Default,
+                "Read",
+                Some(SubjectPattern::Bare("/etc/passwd".into())),
+            ),
+            (
+                "Read|Write",
+                RuleDecisionKeyword::Default,
+                "Read|Write",
+                None,
+            ),
+            (".*", RuleDecisionKeyword::Default, ".*", None),
+        ];
+        for (input, decision, tool, subject) in cases {
+            let parsed = parse_permission_rule(input)
+                .unwrap_or_else(|e| panic!("row `{input}` failed to parse: {e}"));
+            assert_eq!(&parsed.decision, decision, "row `{input}` wrong decision");
+            assert_eq!(&parsed.tool, tool, "row `{input}` wrong tool");
+            assert_eq!(&parsed.subject, subject, "row `{input}` wrong subject");
+        }
+    }
+
+    /// The rejection matrix: every row must fail with the expected
+    /// variant.
+    #[test]
+    fn e3_grammar_matrix_rejects_every_malformed_shape() {
+        use PermissionDslError as E;
+        let empty_err = |e: &E| matches!(e, E::Empty);
+        let unbalanced = |e: &E| matches!(e, E::UnbalancedParens { .. });
+        let trailing = |e: &E| matches!(e, E::TrailingInput { .. });
+        let bad_tool = |e: &E| matches!(e, E::InvalidTool { .. });
+        let empty_subject = |e: &E| matches!(e, E::EmptySubject { .. });
+        let unknown_kw = |e: &E| matches!(e, E::UnknownKeyword { .. });
+
+        let cases: &[(&str, fn(&E) -> bool, &str)] = &[
+            ("", empty_err, "Empty"),
+            ("   ", empty_err, "Empty"),
+            ("Read(", unbalanced, "UnbalancedParens"),
+            ("Read(/etc/", unbalanced, "UnbalancedParens"),
+            ("Read()extra", trailing, "TrailingInput"),
+            ("Read(/etc/)tail", trailing, "TrailingInput"),
+            ("\"Bash\"(ls)", bad_tool, "InvalidTool"),
+            ("Bash ls", bad_tool, "InvalidTool"), // Bash space ls — not a keyword either
+            ("Bash()", empty_subject, "EmptySubject"),
+            ("Bash(   )", empty_subject, "EmptySubject"),
+            ("permit Bash(ls)", unknown_kw, "UnknownKeyword"),
+            ("grant Read", unknown_kw, "UnknownKeyword"),
+        ];
+        for (input, predicate, label) in cases {
+            let err = parse_permission_rule(input)
+                .err()
+                .unwrap_or_else(|| panic!("row `{input}` should have failed with {label}"));
+            assert!(
+                predicate(&err),
+                "row `{input}` expected {label}, got {err:?}"
+            );
+        }
     }
 }

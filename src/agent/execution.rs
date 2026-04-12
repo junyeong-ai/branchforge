@@ -5,19 +5,31 @@ use std::time::Instant;
 
 use tracing::{debug, info, instrument, warn};
 
+/// Maximum number of times, within a single user turn, the agent
+/// will retry after receiving a [`crate::Error::StructuredOutputInvalid`]
+/// from the provider. Once exceeded, the agent bails out with
+/// [`crate::Error::StructuredOutputExhausted`] instead of entering
+/// an unbounded retry loop.
+///
+/// **3** is deliberate: structured-output failures are almost
+/// always a schema-model mismatch rather than a transient glitch.
+/// One model attempt is the baseline; two retries cover
+/// stream-truncation / unlucky decoding; a fourth attempt would
+/// not be meaningfully more likely to succeed.
+pub(super) const MAX_STRUCTURED_OUTPUT_RETRIES: u32 = 3;
+
 use super::AgentMetrics;
 use super::common::{
-    self, BudgetContext, accumulate_inner_usage, accumulate_response_usage, emit_cost_report,
-    emit_tokens_consumed, emit_tool_executed, handle_compaction, maybe_emit_budget_alert,
-    maybe_invoke_explicit_skill_command, run_post_tool_hooks, run_stop_hooks,
-    try_activate_dynamic_rules,
+    self, accumulate_inner_usage, emit_cost_report, emit_tool_executed, handle_compaction,
+    maybe_invoke_explicit_skill_command, request_tool_approval, run_post_tool_hooks,
+    run_stop_hooks, try_activate_dynamic_rules,
 };
 use super::events::AgentResult;
 use super::executor::Agent;
 use super::request::RequestBuilder;
+use super::request_pipeline::RequestPipeline;
 use super::run_config::RunConfig;
-use crate::authorization::approval::DEFAULT_APPROVAL_TIMEOUT_SECS;
-use crate::authorization::{ApprovalRequest, ApprovalResponse, AuthorizationDenied};
+use crate::authorization::{AuthorizationDenied, ToolApprovalResponse};
 use crate::graph::ReplayInput;
 use crate::hooks::{HookContext, HookEvent, HookInput};
 use crate::ir::FinishReason;
@@ -27,12 +39,7 @@ use crate::types::context_window;
 
 impl Agent {
     fn check_budget(&self) -> crate::Result<()> {
-        BudgetContext {
-            tracker: &self.runtime.budget_tracker,
-            tenant: self.runtime.tenant_budget.as_deref(),
-            config: &self.runtime.config.budget,
-        }
-        .check()
+        self.runtime.budget_context().check()
     }
 
     pub async fn execute(&self, prompt: &str) -> crate::Result<AgentResult> {
@@ -265,6 +272,20 @@ impl Agent {
 
         let max_tokens = context_window::for_model(&self.runtime.config.model.primary);
         let mut recovery_attempts = 0u32;
+        // Phase C-4: bounded retry budget for structured-output
+        // schema validation failures within a single user turn.
+        // Reset when a new user turn starts (new `execute` call);
+        // within this call we allow at most [`MAX_STRUCTURED_OUTPUT_RETRIES`]
+        // attempts before giving up with
+        // [`crate::Error::StructuredOutputExhausted`].
+        let mut structured_output_attempts: u32 = 0;
+
+        // Phase D E-1: rolling cache-break baseline. Snapshotted
+        // before each request and compared against the previous
+        // turn's baseline after the response arrives. Detects
+        // model / system-prompt / tool-schema / TTL cache breaks
+        // and emits `CacheBreakObservedPayload` on the event bus.
+        let mut cache_break_baseline: Option<crate::observability::CacheBreakBaseline> = None;
 
         info!(prompt_len = final_prompt.len(), "Starting agent execution");
 
@@ -282,14 +303,8 @@ impl Agent {
 
             self.check_budget()?;
 
-            let budget_ctx = BudgetContext {
-                tracker: &self.runtime.budget_tracker,
-                tenant: self.runtime.tenant_budget.as_deref(),
-                config: &self.runtime.config.budget,
-            };
-            if let Some(fallback) = budget_ctx.fallback_model() {
-                request_builder.set_model(fallback);
-            }
+            let pipeline = RequestPipeline::new(&self.runtime);
+            pipeline.apply_budget_fallback(&mut request_builder);
 
             debug!(iteration = metrics.iterations, "Starting iteration");
 
@@ -351,19 +366,38 @@ impl Agent {
             let api_start = Instant::now();
             let ir_request = request_builder.build(messages, &dynamic_rules_context);
 
-            // Preflight budget check — reject before sending when the
-            // estimated cost would push the session or tenant over
-            // the limit.
-            let preflight_ctx = BudgetContext {
-                tracker: &self.runtime.budget_tracker,
-                tenant: self.runtime.tenant_budget.as_deref(),
-                config: &self.runtime.config.budget,
-            };
-            preflight_ctx.preflight(&ir_request)?;
+            // Preflight budget check + token estimate stash. Reject
+            // before sending when the estimated cost would push the
+            // session or tenant over the limit. The returned estimate
+            // is reconciled against actual provider usage after the
+            // response comes back.
+            let prepared = pipeline.prepare(&ir_request)?;
 
             let response = match self.runtime.llm.send(&ir_request).await {
                 Ok(resp) => resp,
                 Err(e) => {
+                    // Bounded structured-output retry lane: every
+                    // `StructuredOutputInvalid` increments the
+                    // per-turn counter; once we hit the cap we
+                    // translate the error into the terminal
+                    // `StructuredOutputExhausted` and abort. This
+                    // keeps schema-mismatch from turning into an
+                    // infinite model-spin.
+                    if let crate::Error::StructuredOutputInvalid { reason, .. } = &e {
+                        structured_output_attempts += 1;
+                        if structured_output_attempts >= MAX_STRUCTURED_OUTPUT_RETRIES {
+                            return Err(crate::Error::StructuredOutputExhausted {
+                                attempts: structured_output_attempts,
+                                last_reason: reason.clone(),
+                            });
+                        }
+                        // Below the cap — retry the same turn with
+                        // a fresh request. Reset recovery_attempts
+                        // so provider-level recovery still gets its
+                        // own budget.
+                        recovery_attempts = 0;
+                        continue;
+                    }
                     let executor = super::recovery_executor::RecoveryExecutor {
                         registry: &self.runtime.recovery_recipes,
                         tool_state: &self.state,
@@ -396,32 +430,78 @@ impl Agent {
                 .execute(HookEvent::PostMessage, post_msg_input, &hook_ctx)
                 .await;
 
-            accumulate_response_usage(
+            pipeline.record_usage(
                 &mut total_usage,
                 &mut metrics,
-                &self.runtime.budget_tracker,
-                self.runtime.tenant_budget.as_deref(),
                 &self.runtime.config.model.primary,
                 &response.usage,
+                Some(prepared.estimate),
             )?;
 
-            // Reconcile preflight estimate against actual usage —
-            // emits a structured debug event so OTel pipelines can
-            // calibrate the estimator over time. Stateless; no agent
-            // state is mutated.
-            let _drift = crate::budget::EstimateReconciler::observe(&ir_request, &response.usage);
+            // Phase D E-1: classify prompt cache break. Builds a
+            // fresh baseline from `ir_request` and compares it
+            // against the rolling baseline retained across loop
+            // iterations. When a break is classified, emits a
+            // `CacheBreakObservedPayload` typed event so
+            // observability dashboards can surface the root
+            // cause (model/system_prompt/tool_schema/TTL).
+            {
+                let prev_cache_read = cache_break_baseline
+                    .as_ref()
+                    .map(|b| b.last_cache_read_tokens)
+                    .unwrap_or(0);
+                let current = crate::observability::CacheBreakBaseline::from_request(
+                    &ir_request,
+                    prev_cache_read,
+                );
+                let had_markers = ir_request.has_cache_markers();
+                if let Some(cause) = crate::observability::classify_cache_break(
+                    cache_break_baseline.as_ref(),
+                    &current,
+                    &response,
+                    had_markers,
+                ) {
+                    tracing::warn!(
+                        target: "branchforge::cache::break",
+                        category = cause.category(),
+                        model = %ir_request.model,
+                        "prompt cache break classified"
+                    );
+                    if let Some(bus) = self.runtime.event_bus.as_ref() {
+                        use crate::decision::DecisionReason;
+                        bus.emit_typed(crate::events::CacheBreakObservedPayload {
+                            category: cause.category().to_string(),
+                            summary: cause.summary(),
+                            model: ir_request.model.clone(),
+                        });
+                    }
+                }
+                // Advance the rolling baseline with this turn's
+                // cache_read count so the next iteration's compare
+                // can detect TTL expiry.
+                let new_read = response.usage.cached_input_tokens.unwrap_or(0);
+                let mut next = current;
+                next.last_cache_read_tokens = new_read;
+                cache_break_baseline = Some(next);
+            }
 
-            emit_tokens_consumed(
-                self.runtime.event_bus.as_deref(),
-                &response.usage,
-                &self.runtime.config.model.primary,
-            );
-
-            maybe_emit_budget_alert(
-                &self.runtime.budget_tracker,
-                self.runtime.event_bus.as_deref(),
-                self.runtime.config.budget.alert_threshold_pct,
-            );
+            // Phase C-6: surface the rate-limit snapshot parsed from
+            // response headers. Non-streaming path emits the typed
+            // events here; the streaming path emits them inline from
+            // `handle_stream_chunk` when a `RateLimit` chunk arrives.
+            if let (Some(bus), Some(snap)) = (
+                self.runtime.event_bus.as_ref(),
+                response.rate_limit.as_ref(),
+            ) {
+                bus.emit_typed(crate::events::RateLimitObservedPayload {
+                    snapshot: snap.clone(),
+                });
+                if snap.is_approaching_limit(crate::ir::APPROACHING_THRESHOLD) {
+                    bus.emit_typed(crate::events::RateLimitApproachingPayload {
+                        snapshot: snap.clone(),
+                    });
+                }
+            }
 
             final_text = response.text();
             final_stop_reason = response.finish_reason.clone();
@@ -441,7 +521,11 @@ impl Agent {
                     )
                 })
                 .await?;
-            self.persist_session_state().await?;
+            // Mid-turn save: detached through the persist serializer.
+            // A crash here replays the turn from the prior boundary,
+            // which is strictly better than blocking every LLM iteration
+            // on a remote backend round-trip.
+            self.persist_session_state_detached();
 
             if !response.finish_reason.should_continue() {
                 debug!("Model finished, ending loop");
@@ -491,57 +575,33 @@ impl Agent {
                             .reason(reason),
                     );
                 } else {
+                    // Phase D B-3: preserve the original input for
+                    // audit when a PreToolUse hook rewrites it. The
+                    // transcript then shows both "what the model
+                    // asked for" and "what actually ran", which is
+                    // load-bearing for forensic compliance.
+                    let original_input_for_audit = pre_output
+                        .updated_input
+                        .as_ref()
+                        .map(|_| tool_input.clone());
                     let input = pre_output.updated_input.unwrap_or(tool_input.clone());
 
                     // Human-in-the-loop: check if supervised mode requires approval
                     if self.runtime.execution_mode.requires_review(tool_name) {
-                        let approval_result = if let Some(ref sender) = self.runtime.approval_sender
-                        {
-                            let request = ApprovalRequest {
-                                tool_name: tool_name.clone(),
-                                tool_call_id: tool_id.clone(),
-                                tool_input: input.clone(),
-                                reason: format!(
-                                    "Tool '{}' requires approval in {} mode",
-                                    tool_name, self.runtime.execution_mode
-                                ),
-                            };
-                            let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
-                            if sender.send((request, resp_tx)).await.is_err() {
-                                Some(ApprovalResponse::Deny {
-                                    reason: "Approval channel closed".into(),
-                                })
-                            } else {
-                                match tokio::time::timeout(
-                                    std::time::Duration::from_secs(DEFAULT_APPROVAL_TIMEOUT_SECS),
-                                    resp_rx,
-                                )
-                                .await
-                                {
-                                    Ok(Ok(response)) => Some(response),
-                                    Ok(Err(_)) => Some(ApprovalResponse::Deny {
-                                        reason: "Approval responder dropped".into(),
-                                    }),
-                                    Err(_) => Some(ApprovalResponse::Deny {
-                                        reason: "Approval timed out".into(),
-                                    }),
-                                }
-                            }
-                        } else {
-                            // No approval channel configured - deny with guidance
-                            Some(ApprovalResponse::Deny {
-                                reason: format!(
-                                    "Tool '{}' requires review but no approval channel is configured.                                      Use AgentBuilder::approval_channel() to enable human-in-the-loop.",
-                                    tool_name
-                                ),
-                            })
-                        };
+                        let approval_result = request_tool_approval(
+                            self.runtime.human.as_deref(),
+                            tool_name,
+                            tool_id,
+                            &input,
+                            &self.runtime.execution_mode.to_string(),
+                        )
+                        .await;
 
                         match approval_result {
-                            Some(ApprovalResponse::Approve) => {
+                            ToolApprovalResponse::Approve => {
                                 debug!(tool = %tool_name, "Tool approved by human");
                             }
-                            Some(ApprovalResponse::Deny { reason }) => {
+                            ToolApprovalResponse::Deny { reason } => {
                                 debug!(tool = %tool_name, %reason, "Tool denied by human");
                                 blocked.push(
                                     crate::ir::ContentPart::tool_error(tool_id, reason.clone())
@@ -553,22 +613,82 @@ impl Agent {
                                 );
                                 continue;
                             }
-                            None => unreachable!("approval_result is always Some"),
                         }
                     }
 
+                    let mut node_data = serde_json::json!({
+                        "tool_call_id": tool_id.clone(),
+                        "tool_name": tool_name.clone(),
+                        "tool_input": input.clone(),
+                    });
+                    if let Some(original) = original_input_for_audit
+                        && let Some(obj) = node_data.as_object_mut()
+                    {
+                        obj.insert("original_input".to_string(), original);
+                    }
                     self.state
-                        .append_graph_node(
-                            crate::graph::NodeKind::ToolCall,
-                            serde_json::json!({
-                                "tool_call_id": tool_id.clone(),
-                                "tool_name": tool_name.clone(),
-                                "tool_input": input.clone(),
-                            }),
-                        )
+                        .append_graph_node(crate::graph::NodeKind::ToolCall, node_data)
                         .await?;
                     prepared.push((tool_id.clone(), tool_name.clone(), input));
                 }
+            }
+
+            // Phase D B-1: parallel side-effect-free preflight validation.
+            //
+            // `SchemaTool::validate_input_typed` is contractually
+            // side-effect-free (see Phase C-2). Calling it in parallel
+            // across every pending tool call in the turn gives us:
+            //   1. Free perf — validation overhead is masked by the
+            //      slowest validator instead of summed sequentially.
+            //   2. Fail-closed hardening — invalid inputs are rejected
+            //      before the serial dispatch loop ever touches them,
+            //      so a broken input can't race a sibling into a
+            //      partially-mutated state.
+            //
+            // Rejected tool calls are moved to `blocked` with a
+            // `ToolError` content part and logged as authorization
+            // denials. The valid subset continues to the parallel
+            // dispatch below.
+            {
+                let ctx = self.runtime.tools.context().clone();
+                let validation_futures = prepared.iter().map(|(_, name, input)| {
+                    let tools = Arc::clone(&self.runtime.tools);
+                    let name = name.clone();
+                    let input = input.clone();
+                    let ctx = ctx.clone();
+                    async move {
+                        let Some(tool) = tools.get(&name) else {
+                            return Ok(());
+                        };
+                        tool.validate_input(&input, &ctx).await
+                    }
+                });
+                let results: Vec<_> = futures::future::join_all(validation_futures).await;
+
+                let mut still_valid = Vec::with_capacity(prepared.len());
+                for ((id, name, input), result) in
+                    std::mem::take(&mut prepared).into_iter().zip(results)
+                {
+                    match result {
+                        Ok(()) => still_valid.push((id, name, input)),
+                        Err(err) => {
+                            debug!(
+                                tool = %name,
+                                code = ?err.code,
+                                message = %err.message,
+                                "Tool input rejected by preflight validation"
+                            );
+                            blocked.push(
+                                crate::ir::ContentPart::tool_error(&id, err.message.clone())
+                                    .with_tool_name(&name),
+                            );
+                            metrics.record_authorization_denial(
+                                AuthorizationDenied::new(&name, &id, input).reason(err.message),
+                            );
+                        }
+                    }
+                }
+                prepared = still_valid;
             }
 
             let context_scope = self.runtime.context_scope.clone();
@@ -661,7 +781,10 @@ impl Agent {
             self.state
                 .with_session_mut(|session| session.add_tool_results(results))
                 .await?;
-            self.persist_session_state().await?;
+            // Mid-turn save: detached. The next awaited save
+            // (compaction boundary below, or the final flush at
+            // loop exit) waits on this one via the persist serializer.
+            self.persist_session_state_detached();
 
             if all_non_retryable {
                 warn!("All tool calls failed with non-retryable errors, ending execution");
@@ -689,6 +812,14 @@ impl Agent {
         );
 
         run_stop_hooks(&self.runtime.hooks, &hook_ctx, &self.session_id).await;
+
+        // Final flush: take the persist serializer once more so any
+        // in-flight detached save (assistant message, tool results)
+        // is guaranteed to have landed before `execute` returns.
+        // This makes the post-condition "when execute returns, every
+        // mutation on this session has been durably persisted" hold
+        // regardless of how many mid-turn saves were detached.
+        self.persist_session_state().await?;
 
         info!(
             iterations = metrics.iterations,

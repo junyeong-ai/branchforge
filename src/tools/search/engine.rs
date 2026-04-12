@@ -2,6 +2,7 @@
 
 use super::index::{ToolIndex, ToolIndexEntry};
 
+#[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum SearchMode {
     #[default]

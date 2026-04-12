@@ -7,7 +7,7 @@ use crate::common::Index;
 use crate::common::IndexRegistry;
 use crate::context::{MemoryProvider, PromptOrchestrator, RuleIndex, StaticContext};
 use crate::skills::{SkillRuntime, build_model_invocable_summary};
-use crate::tools::{ToolRegistry, ToolSearchConfig, ToolSearchEngine};
+use crate::tools::{ToolRegistry, ToolSearchConfig, ToolSearchManager};
 
 use super::builder::AgentBuilder;
 
@@ -16,6 +16,17 @@ impl AgentBuilder {
         // Load resources in fixed order (regardless of chaining order)
         // Order: Enterprise → User → Project → Local (later overrides earlier)
         self.load_resources_by_level().await;
+
+        // Phase D E-3: if a settings load (or any other chainable
+        // path) captured a fatal error — most importantly a
+        // malformed permission DSL rule in `settings.local.json`
+        // — surface it now before any I/O runs. First failure
+        // wins: the captured `deferred_build_error` is taken so
+        // subsequent `build()` calls on a cloned builder don't
+        // double-fire the same error.
+        if let Some(err) = self.deferred_build_error.take() {
+            return Err(err);
+        }
 
         #[cfg(feature = "plugins")]
         self.load_plugins().await;
@@ -52,7 +63,7 @@ impl AgentBuilder {
         );
 
         agent.runtime_mut().execution_mode = self.execution_mode;
-        agent.runtime_mut().approval_sender = self.approval_sender;
+        agent.runtime_mut().human = self.human;
 
         if let Some(messages) = self.initial_messages {
             agent = agent.initial_messages(messages);
@@ -118,6 +129,16 @@ impl AgentBuilder {
         agent.persist_session_state().await?;
         if let Some(tsm) = self.tool_search_manager {
             agent = agent.tool_search_manager(tsm);
+        }
+
+        // Restore prior-run cost into the freshly-constructed
+        // `BudgetTracker`. This must happen **after** the runtime
+        // is fully assembled (so the tracker exists) and **before**
+        // the caller can invoke `execute()` (so new usage is not
+        // double-counted). `resume_from(checkpoint)` is the only
+        // way this field becomes populated.
+        if let Some(spent) = self.resume_budget_spent {
+            agent = agent.restore_budget_spent(spent)?;
         }
 
         Ok(agent)
@@ -209,10 +230,14 @@ impl AgentBuilder {
             return Ok(());
         }
 
-        let manager = self
-            .mcp_manager
-            .take()
-            .unwrap_or_else(|| std::sync::Arc::new(crate::mcp::McpManager::new()));
+        // Phase D C-3: when the agent has a unified HITL handler
+        // wired, forward it into the MCP manager so server-initiated
+        // elicitation requests surface through the same channel as
+        // tool approval and AskUserQuestion.
+        let manager = self.mcp_manager.take().unwrap_or_else(|| {
+            let m = crate::mcp::McpManager::new().with_human_handler(self.human.clone());
+            std::sync::Arc::new(m)
+        });
 
         // Use the tracked variant so one broken server does not abort
         // the whole agent build — its failure is recorded in the
@@ -243,7 +268,7 @@ impl AgentBuilder {
                     crate::types::context_window::for_model(&self.config.model.primary);
                 ToolSearchConfig::default().context_window(context_window)
             });
-            Arc::new(ToolSearchEngine::new(config))
+            Arc::new(ToolSearchManager::new(config))
         };
 
         // Set toolset registry if available
@@ -463,6 +488,14 @@ impl AgentBuilder {
                 tenant_id: self.config.identity.tenant_id.clone(),
                 principal_id: self.config.identity.principal_id.clone(),
             });
+
+        // Phase D C-2: propagate the unified HITL handler into the
+        // tool registry's execution context so `AskUserQuestion`
+        // (and any future tool that needs human interaction) can
+        // read it via `ctx.extensions().get::<HumanInteractionExtension>()`.
+        if let Some(ref handler) = self.human {
+            builder = builder.human_handler(Arc::clone(handler));
+        }
 
         if self.authorization_policy_explicit
             || AgentBuilder::tool_policy_is_custom(&self.config.security.authorization_policy)

@@ -41,6 +41,46 @@ pub struct SecurityContext {
     pub sandbox: Arc<Sandbox>,
 }
 
+/// Phase G-4: [`crate::common::Extensions`]-friendly wrapper around
+/// [`SecurityContext`].
+///
+/// Before G-4 the filesystem/shell security state was carried on
+/// `ExecutionContext` as a feature-gated field
+/// (`#[cfg(feature = "local-fs")] security: Arc<SecurityContext>`). That
+/// made the `ExecutionContext` struct's byte layout dependent on which
+/// features were compiled in — subtly breaking the "pure Layer 1 types
+/// have stable shape" invariant. G-4 moves the handle into the type-map
+/// [`crate::common::Extensions`] bag, so `ExecutionContext` is now
+/// feature-invariant and adding new optional context concerns no longer
+/// requires editing the core struct.
+///
+/// `SecurityExtension` is registered automatically by every Layer 2a
+/// constructor (`ExecutionContext::new`, `from_path`, `try_permissive`),
+/// and accessed internally by the `#[cfg(feature = "local-fs")]`
+/// dispatcher methods on `ExecutionContext`. Tool authors typically do
+/// not interact with it directly — they keep calling `ctx.open_read`,
+/// `ctx.analyze_bash`, etc. — but authors wiring up custom security
+/// contexts in tests or embedding scenarios register one via
+/// [`Extensions::insert`][`crate::common::Extensions::insert`].
+#[cfg(feature = "local-fs")]
+#[derive(Clone)]
+pub struct SecurityExtension(pub Arc<SecurityContext>);
+
+#[cfg(feature = "local-fs")]
+impl SecurityExtension {
+    /// Build an extension from a [`SecurityContext`]. Takes ownership so
+    /// the `Arc` allocation happens exactly once; subsequent
+    /// `ExecutionContext` clones share the same inner handle.
+    pub fn new(context: SecurityContext) -> Self {
+        Self(Arc::new(context))
+    }
+
+    /// Shared reference to the underlying security context.
+    pub fn context(&self) -> &SecurityContext {
+        &self.0
+    }
+}
+
 impl SecurityContext {
     pub fn new(root: impl AsRef<Path>) -> Result<Self, SecurityError> {
         Self::builder().root(root).build()

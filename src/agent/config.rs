@@ -258,6 +258,7 @@ pub struct PromptConfig {
     pub output_schema: Option<serde_json::Value>,
 }
 
+#[non_exhaustive]
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum SystemPromptMode {
     /// Replace default system prompt
@@ -299,6 +300,7 @@ impl PromptConfig {
 ///
 /// Anthropic best practices recommend caching static content (system prompts,
 /// tools) with longer TTLs and dynamic content (messages) with shorter TTLs.
+#[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum CacheStrategy {
     /// No caching - all content sent without cache_control

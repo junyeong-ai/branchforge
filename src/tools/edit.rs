@@ -6,6 +6,7 @@ use serde::Deserialize;
 
 use super::SchemaTool;
 use super::context::ExecutionContext;
+use super::traits::{ValidationError, ValidationResult};
 use crate::security::fs::SecureFileHandle;
 use crate::types::ToolResult;
 
@@ -31,7 +32,31 @@ impl SchemaTool for EditTool {
     type Input = EditInput;
 
     const NAME: &'static str = "Edit";
+    const SEARCH_HINT: Option<&'static str> = Some("edit file in place with string replacement");
     const DESCRIPTION: &'static str = "Perform exact string replacement in a file. The `old_string` must be unique in the file (or use `replace_all: true` to replace every occurrence).";
+
+    fn is_destructive_typed(&self, _input: &EditInput) -> bool {
+        // Edit mutates an existing file. Revertible via VCS if the
+        // caller tracks it, but the tool itself does not undo.
+        true
+    }
+
+    fn permission_subjects_typed(&self, input: &EditInput) -> Vec<String> {
+        vec![input.file_path.clone()]
+    }
+
+    async fn validate_input_typed(
+        &self,
+        input: &EditInput,
+        _context: &ExecutionContext,
+    ) -> ValidationResult {
+        if input.old_string == input.new_string {
+            return Err(
+                ValidationError::new("old_string and new_string must be different").with_code(2),
+            );
+        }
+        Ok(())
+    }
 
     async fn handle(&self, input: EditInput, context: &ExecutionContext) -> ToolResult {
         if input.old_string == input.new_string {

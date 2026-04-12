@@ -2,7 +2,7 @@
 //!
 //! Data types ([`TaskAssistantMetadata`], [`TaskExecutionSummary`],
 //! [`TaskResultSnapshot`], `PendingTaskTransition`, `TaskRuntime`) live in
-//! the sibling [`task_registry_types`] module. This file is the registry's
+//! the sibling [`task_tracker_types`] module. This file is the registry's
 //! behaviour: spawning background tasks, reconciling persisted state,
 //! handling cancellation, and producing terminal snapshots.
 
@@ -21,13 +21,13 @@ use crate::session::{
 };
 
 use super::AgentResult;
-use super::task_registry_types::{PendingTaskTransition, TaskRuntime};
-pub use super::task_registry_types::{
+use super::task_tracker_types::{PendingTaskTransition, TaskRuntime};
+pub use super::task_tracker_types::{
     TaskAssistantMetadata, TaskExecutionSummary, TaskResultSnapshot,
 };
 
 #[derive(Clone)]
-pub struct TaskRegistry {
+pub struct TaskTracker {
     runtime: Arc<RwLock<HashMap<String, TaskRuntime>>>,
     reconciled: Arc<OnceCell<()>>,
     persistence: Arc<dyn Persistence>,
@@ -35,7 +35,7 @@ pub struct TaskRegistry {
     default_ttl: Option<Duration>,
 }
 
-impl TaskRegistry {
+impl TaskTracker {
     fn orphaned_task_error() -> String {
         "Task runtime no longer exists; marked failed during registry recovery".to_string()
     }
@@ -216,7 +216,15 @@ impl TaskRegistry {
             return Some(session);
         }
 
-        session.state = SessionState::Failed;
+        // Orphaned reconciliation: force terminal Failed via the FSM walker.
+        if let Err(e) = session.finalize(SessionState::Failed) {
+            warn!(
+                session_id = %session.id,
+                error = %e,
+                "Failed to transition orphaned task session to Failed"
+            );
+            return Some(session);
+        }
         if session.error.is_none() {
             session.error = Some(Self::orphaned_task_error());
         }
@@ -242,7 +250,15 @@ impl TaskRegistry {
         let Some(target_state) = session.state.terminal_from_finalizing() else {
             return Some(session);
         };
-        session.set_state(target_state);
+        if let Err(e) = session.transition(target_state) {
+            warn!(
+                task_id = %id,
+                session_id = %session.id,
+                error = %e,
+                "Illegal transition while finalizing persisted task"
+            );
+            return Some(original_session);
+        }
 
         if let Err(e) = self.persistence.save(&session).await {
             warn!(
@@ -371,18 +387,30 @@ impl TaskRegistry {
                         });
                     }
 
-                    session.set_state(SessionState::Completing);
+                    session.transition(SessionState::Completing).map_err(|e| {
+                        SessionError::InvalidTransition {
+                            message: e.to_string(),
+                        }
+                    })?;
                     session.error = None;
                     let _ = session.update_latest_assistant_metadata(Self::merge_result_metadata(
                         &session, result,
                     ));
                 }
                 PendingTaskTransition::Failed(error) => {
-                    session.set_state(SessionState::Failing);
+                    session.transition(SessionState::Failing).map_err(|e| {
+                        SessionError::InvalidTransition {
+                            message: e.to_string(),
+                        }
+                    })?;
                     session.error = Some(error.clone());
                 }
                 PendingTaskTransition::Cancelled => {
-                    session.set_state(SessionState::Cancelling);
+                    session.transition(SessionState::Cancelling).map_err(|e| {
+                        SessionError::InvalidTransition {
+                            message: e.to_string(),
+                        }
+                    })?;
                     session.error = None;
                 }
             }
@@ -390,7 +418,11 @@ impl TaskRegistry {
             self.persistence.save(&session).await?;
         }
 
-        session.set_state(transition.terminal_state());
+        session
+            .transition(transition.terminal_state())
+            .map_err(|e| SessionError::InvalidTransition {
+                message: e.to_string(),
+            })?;
         match transition {
             PendingTaskTransition::Completed(result) => {
                 if result.session_id != session_id.to_string() {
@@ -528,7 +560,26 @@ impl TaskRegistry {
                         ),
                     });
                 }
-                session.set_state(SessionState::Active);
+                // Resuming an existing task. Three cases:
+                //   1. Created     → drive forward to Running.
+                //   2. Running     → already live, no-op.
+                //   3. Terminal    → reset through the documented escape
+                //                    hatch and drive to Running fresh.
+                // Finalizing was already rejected above.
+                if session.state.is_terminal() {
+                    session
+                        .reset_for_resume()
+                        .map_err(|e| SessionError::InvalidTransition {
+                            message: e.to_string(),
+                        })?;
+                }
+                if session.state == SessionState::Created {
+                    session.transition(SessionState::Running).map_err(|e| {
+                        SessionError::InvalidTransition {
+                            message: e.to_string(),
+                        }
+                    })?;
+                }
                 session.error = None;
                 session
             }
@@ -556,7 +607,11 @@ impl TaskRegistry {
                     }
                 };
 
-                session.set_state(SessionState::Active);
+                session.transition(SessionState::Running).map_err(|e| {
+                    SessionError::InvalidTransition {
+                        message: e.to_string(),
+                    }
+                })?;
                 if let Some(parent_id) = self.parent_session_id
                     && let Ok(Some(parent)) = self.persistence.load(&parent_id).await
                 {
@@ -915,6 +970,14 @@ mod tests {
             self.inner.load(id).await
         }
 
+        async fn with_session_lock(
+            &self,
+            id: &SessionId,
+            f: crate::session::persistence::SessionMutationFn,
+        ) -> SessionResult<()> {
+            self.inner.with_session_lock(id, f).await
+        }
+
         async fn delete(&self, id: &SessionId) -> SessionResult<bool> {
             self.inner.delete(id).await
         }
@@ -969,8 +1032,8 @@ mod tests {
         }
     }
 
-    fn test_registry() -> TaskRegistry {
-        TaskRegistry::new(Arc::new(MemoryPersistence::new()))
+    fn test_registry() -> TaskTracker {
+        TaskTracker::new(Arc::new(MemoryPersistence::new()))
     }
 
     // Use valid UUIDs for tests to ensure consistent session IDs
@@ -1005,7 +1068,7 @@ mod tests {
 
         assert_eq!(
             registry.status(TASK_1_UUID).await,
-            Some(SessionState::Active)
+            Some(SessionState::Running)
         );
 
         registry
@@ -1020,7 +1083,7 @@ mod tests {
     #[tokio::test]
     async fn test_complete_retries_pending_transition_after_persistence_failure() {
         let persistence = Arc::new(FailingTerminalSavePersistence::new());
-        let registry = TaskRegistry::new(persistence.clone());
+        let registry = TaskTracker::new(persistence.clone());
 
         registry
             .register_or_resume(TASK_1_UUID.into(), "explore".into(), "Retry".into())
@@ -1055,7 +1118,7 @@ mod tests {
     #[tokio::test]
     async fn test_restarted_registry_finalizes_durable_transition() {
         let persistence = Arc::new(FailingTerminalSavePersistence::new());
-        let registry = TaskRegistry::new(persistence.clone());
+        let registry = TaskTracker::new(persistence.clone());
 
         registry
             .register_or_resume(TASK_1_UUID.into(), "explore".into(), "Restart".into())
@@ -1073,7 +1136,7 @@ mod tests {
         );
 
         persistence.set_fail_terminal_save(false);
-        let restarted = TaskRegistry::new(persistence);
+        let restarted = TaskTracker::new(persistence);
         assert_eq!(
             restarted.status(TASK_1_UUID).await,
             Some(SessionState::Completed)
@@ -1083,8 +1146,8 @@ mod tests {
     #[tokio::test]
     async fn test_orphaned_active_task_is_reconciled_to_failed() {
         let persistence = Arc::new(MemoryPersistence::new());
-        let registry = TaskRegistry::new(persistence.clone());
-        let restarted = TaskRegistry::new(persistence);
+        let registry = TaskTracker::new(persistence.clone());
+        let restarted = TaskTracker::new(persistence);
 
         let _cancel_rx = registry
             .register_or_resume(TASK_2_UUID.into(), "explore".into(), "Test task".into())
@@ -1095,13 +1158,13 @@ mod tests {
         assert_eq!(status, Some(SessionState::Failed));
 
         let result = restarted.result(TASK_2_UUID).await.unwrap();
-        assert_eq!(result.error, Some(TaskRegistry::orphaned_task_error()));
+        assert_eq!(result.error, Some(TaskTracker::orphaned_task_error()));
     }
 
     #[tokio::test]
     async fn test_finished_handle_without_cleanup_is_reconciled_to_failed() {
         let persistence = Arc::new(MemoryPersistence::new());
-        let registry = TaskRegistry::new(persistence);
+        let registry = TaskTracker::new(persistence);
 
         let _cancel_rx = registry
             .register_or_resume(TASK_2_UUID.into(), "explore".into(), "Finished task".into())
@@ -1116,7 +1179,7 @@ mod tests {
         assert_eq!(status, Some(SessionState::Failed));
 
         let result = registry.result(TASK_2_UUID).await.unwrap();
-        assert_eq!(result.error, Some(TaskRegistry::orphaned_task_error()));
+        assert_eq!(result.error, Some(TaskTracker::orphaned_task_error()));
     }
 
     #[tokio::test]
@@ -1323,7 +1386,7 @@ mod tests {
 
         assert_eq!(
             registry.status(TASK_1_UUID).await,
-            Some(SessionState::Active)
+            Some(SessionState::Running)
         );
     }
 

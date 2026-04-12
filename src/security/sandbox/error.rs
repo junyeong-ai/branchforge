@@ -5,6 +5,7 @@ use std::path::PathBuf;
 
 use thiserror::Error;
 
+#[non_exhaustive]
 #[derive(Debug, Error)]
 pub enum SandboxError {
     #[error("sandbox not supported on this platform")]

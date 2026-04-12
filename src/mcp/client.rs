@@ -11,12 +11,12 @@ use std::sync::Arc;
 #[cfg(feature = "mcp")]
 use tokio::sync::RwLock;
 
-use super::{
-    LifecyclePhase, McpConnectionStatus, McpError, McpResourceDefinition, McpResult,
-    McpServerConfig, McpServerState, McpTimeouts, McpToolDefinition, McpToolResult,
-};
 #[cfg(feature = "mcp")]
-use super::{McpContent, McpServerInfo};
+use super::McpContent;
+use super::{
+    McpClientState, McpError, McpResourceDefinition, McpResult, McpServerConfig, McpServerInfo,
+    McpServerSnapshot, McpTimeouts, McpToolDefinition, McpToolResult,
+};
 
 #[cfg(feature = "mcp")]
 use rmcp::{
@@ -29,7 +29,7 @@ use rmcp::{
 use tokio::process::Command;
 
 #[cfg(feature = "mcp")]
-type McpRunningService = RunningService<RoleClient, ()>;
+type McpRunningService = RunningService<RoleClient, super::HumanElicitationRouter>;
 
 /// Convert rmcp ServiceError into our McpError, preserving JSON-RPC error codes.
 #[cfg(feature = "mcp")]
@@ -45,16 +45,33 @@ fn map_service_error(e: ServiceError, context: &str) -> McpError {
     }
 }
 
+/// Live connection to a single MCP server.
+///
+/// Owns the transport, the negotiated capabilities, and the
+/// discovered tool / resource catalogues. Mutation of the lifecycle
+/// [`McpClientState`] goes through a validated `advance_state` helper
+/// so illegal transitions are rejected at the type level. Consumers
+/// read the canonical public view via [`Self::snapshot`].
 pub struct McpClient {
     name: String,
-    state: McpServerState,
-    timeouts: McpTimeouts,
-    /// Lifecycle phase the client is currently in (or last reached).
-    /// Updated by `connect_stdio` / `connect_sse` as they advance so
-    /// that if an error returns partway through, the manager can
-    /// read `current_phase()` and attach it to the
+    config: McpServerConfig,
+    /// Canonical handshake lifecycle FSM. Updated by
+    /// `connect_stdio` / `connect_sse` as they advance so that if an
+    /// error returns partway through, the manager can read
+    /// [`Self::state`] and attach it to the
     /// [`super::DegradedReport`] entry.
-    current_phase: LifecyclePhase,
+    state: McpClientState,
+    server_info: Option<McpServerInfo>,
+    tools: Vec<McpToolDefinition>,
+    resources: Vec<McpResourceDefinition>,
+    timeouts: McpTimeouts,
+    /// Phase D C-3: unified HITL handler plumbed through to the
+    /// rmcp `ClientHandler::create_elicitation` path via
+    /// [`super::HumanElicitationRouter`]. `None` means the router
+    /// declines every elicitation request (pure-core / unattended
+    /// default).
+    #[cfg(feature = "mcp")]
+    human: Option<Arc<dyn crate::authorization::HumanInteractionHandler>>,
     #[cfg(feature = "mcp")]
     service: Option<Arc<RwLock<McpRunningService>>>,
     #[cfg(not(feature = "mcp"))]
@@ -63,12 +80,16 @@ pub struct McpClient {
 
 impl McpClient {
     pub fn new(name: impl Into<String>, config: McpServerConfig) -> Self {
-        let name = name.into();
         Self {
-            name: name.clone(),
-            state: McpServerState::new(name, config),
+            name: name.into(),
+            config,
+            state: McpClientState::Queued,
+            server_info: None,
+            tools: Vec::new(),
+            resources: Vec::new(),
             timeouts: McpTimeouts::default(),
-            current_phase: LifecyclePhase::Queued,
+            #[cfg(feature = "mcp")]
+            human: None,
             #[cfg(feature = "mcp")]
             service: None,
             #[cfg(not(feature = "mcp"))]
@@ -76,31 +97,47 @@ impl McpClient {
         }
     }
 
-    /// Returns the most advanced phase this client has reached. After
-    /// a successful `connect()` this is [`LifecyclePhase::Ready`];
-    /// after a failed one it is the last phase that was attempted.
-    pub fn current_phase(&self) -> LifecyclePhase {
-        self.current_phase
+    /// Phase D C-3: attach a unified
+    /// [`crate::authorization::HumanInteractionHandler`] so
+    /// server-initiated elicitation requests are forwarded to the
+    /// host via [`super::HumanElicitationRouter`]. Setting this to
+    /// `None` (the default) makes the client decline every
+    /// elicitation request.
+    #[cfg(feature = "mcp")]
+    #[must_use]
+    pub fn with_human_handler(
+        mut self,
+        handler: Option<Arc<dyn crate::authorization::HumanInteractionHandler>>,
+    ) -> Self {
+        self.human = handler;
+        self
     }
 
-    /// Validated phase advancement. Returns an error and leaves
-    /// the phase unchanged if the move is illegal (backwards
+    /// Returns the most advanced phase this client has reached. After
+    /// a successful `connect()` this is [`McpClientState::Ready`];
+    /// after a failed one it is the last phase that was attempted.
+    pub fn state(&self) -> McpClientState {
+        self.state
+    }
+
+    /// Validated lifecycle advancement. Returns an error and leaves
+    /// the state unchanged if the move is illegal (backwards
     /// transition, self-loop, or terminal mutation). Connect paths
     /// use this instead of direct field assignment so a future bug
     /// in the handshake sequence cannot silently corrupt the
-    /// observable lifecycle state.
+    /// observable lifecycle.
     #[cfg(feature = "mcp")]
-    fn advance_phase(&mut self, next: LifecyclePhase) -> McpResult<()> {
-        if !self.current_phase.can_transition_to(next) {
+    fn advance_state(&mut self, next: McpClientState) -> McpResult<()> {
+        if !self.state.can_transition_to(next) {
             return Err(McpError::Protocol {
                 message: format!(
                     "illegal MCP lifecycle transition: {} → {}",
-                    self.current_phase.as_str(),
+                    self.state.as_str(),
                     next.as_str()
                 ),
             });
         }
-        self.current_phase = next;
+        self.state = next;
         Ok(())
     }
 
@@ -117,7 +154,7 @@ impl McpClient {
 
     #[cfg(feature = "mcp")]
     pub async fn connect(&mut self) -> McpResult<()> {
-        match &self.state.config {
+        match &self.config {
             McpServerConfig::Stdio {
                 command, args, env, ..
             } => {
@@ -146,7 +183,7 @@ impl McpClient {
     ) -> McpResult<()> {
         use tokio::time::timeout;
 
-        self.advance_phase(LifecyclePhase::Spawn)?;
+        self.advance_state(McpClientState::Spawn)?;
         let transport = TokioChildProcess::new(Command::new(&command).configure(|cmd| {
             cmd.args(&args);
             for (key, value) in &env {
@@ -157,9 +194,10 @@ impl McpClient {
             message: format!("Failed to create transport: {}", e),
         })?;
 
-        self.advance_phase(LifecyclePhase::Handshake)?;
+        self.advance_state(McpClientState::Handshake)?;
         let connect_timeout = self.timeouts.connection;
-        let service: McpRunningService = timeout(connect_timeout, ().serve(transport))
+        let router = super::HumanElicitationRouter::new(self.human.clone());
+        let service: McpRunningService = timeout(connect_timeout, router.serve(transport))
             .await
             .map_err(|_| McpError::ConnectionFailed {
                 message: format!("Connection timed out after {:?}", connect_timeout),
@@ -168,7 +206,7 @@ impl McpClient {
                 message: format!("Failed to connect: {}", e),
             })?;
 
-        self.advance_phase(LifecyclePhase::NegotiateCapabilities)?;
+        self.advance_state(McpClientState::NegotiateCapabilities)?;
         if let Some(info) = service.peer_info() {
             let protocol_version = info.protocol_version.to_string();
 
@@ -181,21 +219,19 @@ impl McpClient {
                 );
             }
 
-            self.state.server_info = Some(McpServerInfo {
+            self.server_info = Some(McpServerInfo {
                 name: info.server_info.name.to_string(),
                 version: info.server_info.version.to_string(),
                 protocol_version,
             });
         }
-        self.state.status = McpConnectionStatus::Connected;
-
-        self.advance_phase(LifecyclePhase::ListTools)?;
+        self.advance_state(McpClientState::ListTools)?;
         let tools_result = service
             .list_tools(Default::default())
             .await
             .map_err(|e| map_service_error(e, "Failed to list tools"))?;
 
-        self.state.tools = tools_result
+        self.tools = tools_result
             .tools
             .into_iter()
             .map(|t| McpToolDefinition {
@@ -205,9 +241,9 @@ impl McpClient {
             })
             .collect();
 
-        self.advance_phase(LifecyclePhase::ListResources)?;
+        self.advance_state(McpClientState::ListResources)?;
         if let Ok(resources_result) = service.list_resources(Default::default()).await {
-            self.state.resources = resources_result
+            self.resources = resources_result
                 .resources
                 .into_iter()
                 .map(|r| McpResourceDefinition {
@@ -220,7 +256,7 @@ impl McpClient {
         }
 
         self.service = Some(Arc::new(RwLock::new(service)));
-        self.advance_phase(LifecyclePhase::Ready)?;
+        self.advance_state(McpClientState::Ready)?;
 
         Ok(())
     }
@@ -242,7 +278,7 @@ impl McpClient {
         };
         use tokio::time::timeout;
 
-        self.advance_phase(LifecyclePhase::Spawn)?;
+        self.advance_state(McpClientState::Spawn)?;
         // Build custom headers map for rmcp
         let mut custom_headers: HashMap<HeaderName, HeaderValue> = HashMap::new();
         for (key, value) in &headers {
@@ -262,9 +298,10 @@ impl McpClient {
 
         let transport = StreamableHttpClientTransport::from_config(config);
 
-        self.advance_phase(LifecyclePhase::Handshake)?;
+        self.advance_state(McpClientState::Handshake)?;
         let connect_timeout = self.timeouts.connection;
-        let service: McpRunningService = timeout(connect_timeout, ().serve(transport))
+        let router = super::HumanElicitationRouter::new(self.human.clone());
+        let service: McpRunningService = timeout(connect_timeout, router.serve(transport))
             .await
             .map_err(|_| McpError::ConnectionFailed {
                 message: format!(
@@ -276,7 +313,7 @@ impl McpClient {
                 message: format!("SSE connection to '{}' failed: {}", url, e),
             })?;
 
-        self.advance_phase(LifecyclePhase::NegotiateCapabilities)?;
+        self.advance_state(McpClientState::NegotiateCapabilities)?;
         if let Some(info) = service.peer_info() {
             let protocol_version = info.protocol_version.to_string();
 
@@ -289,21 +326,19 @@ impl McpClient {
                 );
             }
 
-            self.state.server_info = Some(McpServerInfo {
+            self.server_info = Some(McpServerInfo {
                 name: info.server_info.name.to_string(),
                 version: info.server_info.version.to_string(),
                 protocol_version,
             });
         }
-        self.state.status = McpConnectionStatus::Connected;
-
-        self.advance_phase(LifecyclePhase::ListTools)?;
+        self.advance_state(McpClientState::ListTools)?;
         let tools_result = service
             .list_tools(Default::default())
             .await
             .map_err(|e| map_service_error(e, "Failed to list tools (SSE)"))?;
 
-        self.state.tools = tools_result
+        self.tools = tools_result
             .tools
             .into_iter()
             .map(|t| McpToolDefinition {
@@ -313,9 +348,9 @@ impl McpClient {
             })
             .collect();
 
-        self.advance_phase(LifecyclePhase::ListResources)?;
+        self.advance_state(McpClientState::ListResources)?;
         if let Ok(resources_result) = service.list_resources(Default::default()).await {
-            self.state.resources = resources_result
+            self.resources = resources_result
                 .resources
                 .into_iter()
                 .map(|r| McpResourceDefinition {
@@ -328,7 +363,7 @@ impl McpClient {
         }
 
         self.service = Some(Arc::new(RwLock::new(service)));
-        self.advance_phase(LifecyclePhase::Ready)?;
+        self.advance_state(McpClientState::Ready)?;
 
         Ok(())
     }
@@ -337,20 +372,32 @@ impl McpClient {
         &self.name
     }
 
-    pub fn state(&self) -> &McpServerState {
-        &self.state
-    }
-
-    pub fn is_connected(&self) -> bool {
-        self.state.is_connected()
+    /// `true` if the client has reached [`McpClientState::Ready`] and
+    /// is live. Equivalent to `self.state() == McpClientState::Ready`.
+    pub fn is_ready(&self) -> bool {
+        self.state == McpClientState::Ready
     }
 
     pub fn tools(&self) -> &[McpToolDefinition] {
-        &self.state.tools
+        &self.tools
     }
 
     pub fn resources(&self) -> &[McpResourceDefinition] {
-        &self.state.resources
+        &self.resources
+    }
+
+    /// Build a point-in-time [`McpServerSnapshot`] for external
+    /// consumers. The snapshot is an owned clone, safe to pass
+    /// across threads and serialize.
+    pub fn snapshot(&self) -> McpServerSnapshot {
+        McpServerSnapshot {
+            name: self.name.clone(),
+            config: self.config.clone(),
+            state: self.state,
+            server_info: self.server_info.clone(),
+            tools: self.tools.clone(),
+            resources: self.resources.clone(),
+        }
     }
 
     #[cfg(feature = "mcp")]
@@ -518,6 +565,11 @@ impl McpClient {
 
     #[cfg(feature = "mcp")]
     pub async fn close(&mut self) -> McpResult<()> {
+        // `close` is only valid from `Ready`. A client that never
+        // reached Ready (handshake failure) is already terminal.
+        if self.state.is_terminal() {
+            return Ok(());
+        }
         if let Some(service_arc) = self.service.take() {
             match Arc::try_unwrap(service_arc) {
                 Ok(service_rwlock) => {
@@ -525,7 +577,6 @@ impl McpClient {
                     service.cancel().await.map_err(|e| McpError::Protocol {
                         message: format!("Failed to cancel: {}", e),
                     })?;
-                    self.state.status = McpConnectionStatus::Disconnected;
                 }
                 Err(arc) => {
                     tracing::debug!(
@@ -539,15 +590,18 @@ impl McpClient {
                     });
                 }
             }
-        } else {
-            self.state.status = McpConnectionStatus::Disconnected;
+        }
+        // Only drive the FSM to Closed when the client was live —
+        // otherwise leave the handshake phase untouched so the
+        // degraded report still pinpoints where it stopped.
+        if matches!(self.state, McpClientState::Ready) {
+            self.advance_state(McpClientState::Closed)?;
         }
         Ok(())
     }
 
     #[cfg(not(feature = "mcp"))]
     pub async fn close(&mut self) -> McpResult<()> {
-        self.state.status = McpConnectionStatus::Disconnected;
         Ok(())
     }
 }
@@ -569,7 +623,7 @@ mod tests {
         );
 
         assert_eq!(client.name(), "test");
-        assert!(!client.is_connected());
+        assert!(!client.is_ready());
     }
 
     #[test]
@@ -635,8 +689,9 @@ mod tests {
         );
 
         assert_eq!(client.name(), "sse-test");
-        assert!(!client.is_connected());
-        match client.state().config {
+        assert!(!client.is_ready());
+        let snapshot = client.snapshot();
+        match snapshot.config {
             McpServerConfig::Sse {
                 ref url,
                 ref headers,

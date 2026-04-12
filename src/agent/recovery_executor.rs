@@ -26,6 +26,7 @@ use super::recovery_recipes::{RecipeRegistry, RecoveryAction, RecoveryDecisionIn
 
 /// Result of running [`RecoveryExecutor::apply`]. Tells the agent
 /// loop whether to continue, retry, or stop.
+#[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RecoveryOutcome {
     /// The action was applied successfully; the agent loop should
@@ -54,15 +55,23 @@ impl RecoveryExecutor<'_> {
     /// recipe set determined the error is non-recoverable.
     pub async fn apply(&self, error: &crate::Error, attempt: &mut u32) -> RecoveryOutcome {
         let category = error.category();
-        let action = self.registry.decide(&RecoveryDecisionInput {
+        // Phase D E-2: if the failing error carries a rate-limit
+        // snapshot (Anthropic/OpenAI/Gemini 429 with headers), pass
+        // it through to the recipe so it can return a data-driven
+        // `RetryAfter { delay }` based on the provider's own
+        // `seconds_until_reset` instead of exponential backoff.
+        let rate_limit = error.rate_limit_snapshot().cloned();
+        let decision = self.registry.decide(&RecoveryDecisionInput {
             category,
             attempt: *attempt,
+            rate_limit,
         });
 
         info!(
             attempt = *attempt,
             category = category.as_str(),
-            action = ?action,
+            recipe = decision.recipe,
+            action = ?decision.action,
             "Recovery executor applying action"
         );
 
@@ -72,12 +81,13 @@ impl RecoveryExecutor<'_> {
                 serde_json::json!({
                     "attempt": *attempt,
                     "category": category.as_str(),
-                    "action": format!("{:?}", action),
+                    "recipe": decision.recipe,
+                    "action": format!("{:?}", decision.action),
                 }),
             );
         }
 
-        let outcome = match action {
+        let outcome = match decision.action {
             RecoveryAction::Abort => RecoveryOutcome::Abort,
             RecoveryAction::Retry => RecoveryOutcome::Retry,
             RecoveryAction::RetryAfter { delay } => {
@@ -91,6 +101,18 @@ impl RecoveryExecutor<'_> {
             RecoveryAction::CompactAndRetry => match self.llm {
                 Some(llm) => match self.tool_state.compact(llm).await {
                     Ok(_) => RecoveryOutcome::Retry,
+                    Err(crate::Error::ContextWindowExceeded { .. }) => {
+                        // Phase D B-2 PTL fallback: the compaction
+                        // prompt itself overflowed the model window.
+                        // Drop the oldest visible round and retry so
+                        // the next recovery pass sees a smaller
+                        // projection.
+                        warn!(
+                            "Compaction overflowed context window; draining oldest round and retrying"
+                        );
+                        self.drain_oldest_rounds(1).await;
+                        RecoveryOutcome::Retry
+                    }
                     Err(e) => {
                         warn!(error = %e, "Recovery compaction failed");
                         RecoveryOutcome::Abort
@@ -101,6 +123,18 @@ impl RecoveryExecutor<'_> {
                     RecoveryOutcome::Abort
                 }
             },
+            RecoveryAction::DrainOldestRounds { rounds } => {
+                let drained = self.drain_oldest_rounds(rounds).await;
+                if drained == 0 {
+                    warn!(
+                        rounds,
+                        "DrainOldestRounds requested but nothing to drain; aborting"
+                    );
+                    RecoveryOutcome::Abort
+                } else {
+                    RecoveryOutcome::Retry
+                }
+            }
             RecoveryAction::FallbackModel => {
                 // The actual model swap is the responsibility of the
                 // budget layer (see `BudgetExceedPolicy::Fallback`).
@@ -117,6 +151,67 @@ impl RecoveryExecutor<'_> {
     /// Best-effort cancellable sleep. Used for `RetryAfter` actions.
     async fn sleep(&self, delay: Duration) {
         tokio::time::sleep(delay).await;
+    }
+
+    /// Phase D B-2 "prompt too long" fallback: archive the oldest
+    /// `rounds` visible user→assistant turns from the current
+    /// branch via [`crate::graph::SessionGraph::archive_before`].
+    /// Graph events are retained so replay/branching remains
+    /// correct; only the projection shrinks.
+    ///
+    /// Returns the number of rounds actually drained (may be less
+    /// than `rounds` if the visible projection has fewer user
+    /// turns — in which case the caller should surface `Abort`).
+    async fn drain_oldest_rounds(&self, rounds: usize) -> usize {
+        use crate::ir::Role;
+        if rounds == 0 {
+            return 0;
+        }
+
+        self.tool_state
+            .with_session_mut(|session| {
+                let messages = session.current_branch_messages();
+                // Walk visible user turns in order and collect the
+                // watermark candidates: the message immediately
+                // AFTER each user turn is where the "round" ends.
+                //
+                // To drain `rounds` oldest turns, pick the (rounds+1)-th
+                // user message as the archive watermark — everything
+                // before it will be archived.
+                let mut user_turn_ids = Vec::new();
+                for msg in &messages {
+                    if msg.role == Role::User
+                        && let Ok(uuid) = msg.id.as_str().parse::<uuid::Uuid>()
+                    {
+                        user_turn_ids.push(crate::graph::NodeId::from_uuid(uuid));
+                    }
+                }
+
+                if user_turn_ids.len() <= rounds {
+                    // Not enough rounds to drain `rounds` without
+                    // erasing the entire conversation. Return 0 and
+                    // let the executor translate to Abort.
+                    return 0usize;
+                }
+
+                let watermark = user_turn_ids[rounds];
+                match session.graph.archive_before(watermark) {
+                    Ok(archived) => {
+                        info!(
+                            rounds,
+                            watermark = %watermark,
+                            archived_nodes = archived,
+                            "PTL drain archived oldest rounds"
+                        );
+                        rounds
+                    }
+                    Err(e) => {
+                        warn!(error = %e, "archive_before failed during PTL drain");
+                        0
+                    }
+                }
+            })
+            .await
     }
 
     /// Walk the current branch's user/tool messages and truncate any
@@ -236,6 +331,75 @@ mod tests {
             executor.apply(&err, &mut attempt).await,
             RecoveryOutcome::Abort
         );
+    }
+
+    /// Phase D B-2: `DrainOldestRounds` archives the oldest visible
+    /// user turn via the graph's watermark, then returns Retry. The
+    /// next iteration sees a shorter projection.
+    #[tokio::test]
+    async fn drain_oldest_rounds_archives_oldest_user_turn() {
+        let registry = RecipeRegistry::new();
+        let tool_state = ToolState::default();
+
+        // Seed the session with three user→assistant rounds so a
+        // single-round drain leaves two visible rounds behind.
+        tool_state
+            .with_session_mut(|session| {
+                for i in 0..3 {
+                    let _ = session.add_user_message(format!("user turn {i}"));
+                    let _ = session.add_assistant_message_with_metadata(
+                        vec![crate::ir::ContentPart::text(format!("assistant {i}"))],
+                        Some(crate::ir::Usage::default()),
+                        Default::default(),
+                    );
+                }
+            })
+            .await;
+
+        let initial_len = tool_state
+            .with_session(|s| s.current_branch_messages().len())
+            .await;
+        assert_eq!(initial_len, 6, "3 user + 3 assistant");
+
+        let executor = RecoveryExecutor {
+            registry: &registry,
+            tool_state: &tool_state,
+            llm: None,
+            event_bus: None,
+        };
+        let drained = executor.drain_oldest_rounds(1).await;
+        assert_eq!(drained, 1);
+
+        let after_len = tool_state
+            .with_session(|s| s.current_branch_messages().len())
+            .await;
+        assert!(
+            after_len < initial_len,
+            "drain must shrink projection: was {initial_len}, now {after_len}"
+        );
+    }
+
+    /// Cannot drain when there are fewer visible rounds than
+    /// requested — returns 0 so the executor can surface Abort.
+    #[tokio::test]
+    async fn drain_oldest_rounds_refuses_to_erase_everything() {
+        let registry = RecipeRegistry::new();
+        let tool_state = ToolState::default();
+        tool_state
+            .with_session_mut(|session| {
+                let _ = session.add_user_message("only turn".to_string());
+            })
+            .await;
+
+        let executor = RecoveryExecutor {
+            registry: &registry,
+            tool_state: &tool_state,
+            llm: None,
+            event_bus: None,
+        };
+        // 1 visible user turn, requesting to drop 1 → can't (would
+        // leave 0 rounds). Helper returns 0; executor aborts.
+        assert_eq!(executor.drain_oldest_rounds(1).await, 0);
     }
 
     #[tokio::test]
