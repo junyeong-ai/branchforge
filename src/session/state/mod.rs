@@ -633,13 +633,7 @@ impl Session {
     /// The session's `error` field is cleared; graph, identity, usage,
     /// and history are preserved so a resume sees the prior context.
     pub fn reset_for_resume(&mut self) -> Result<(), SessionTransitionError> {
-        if !self.state.is_terminal() {
-            return Err(SessionTransitionError {
-                from: self.state,
-                to: SessionState::Created,
-            });
-        }
-        self.state = SessionState::Created;
+        self.state = self.state.try_reset()?;
         self.error = None;
         self.updated_at = Utc::now();
         Ok(())
@@ -852,6 +846,8 @@ impl Session {
         let mut forked = self.clone();
         forked.id = SessionId::new();
         forked.parent_id = Some(self.id);
+        // fsm-init: forked session begins a fresh lifecycle by construction,
+        // not by a forward transition — terminal → Created is not a legal move.
         forked.state = SessionState::Created;
         forked.error = None;
         forked.content_overrides = ContentOverrides::new();

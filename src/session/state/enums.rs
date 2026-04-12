@@ -159,6 +159,24 @@ impl SessionState {
             })
         }
     }
+
+    /// Restart the FSM back to [`SessionState::Created`] from a terminal
+    /// state, re-using the same session identity for a fresh lifecycle.
+    ///
+    /// This is a distinct semantic from [`Self::transition_to`]: the
+    /// forward DAG rejects any move out of a terminal state, but a reset
+    /// is a deliberate re-initialization rather than a forward move. The
+    /// only legal precondition is that the current state is terminal.
+    pub fn try_reset(self) -> Result<Self, SessionTransitionError> {
+        if self.is_terminal() {
+            Ok(Self::Created)
+        } else {
+            Err(SessionTransitionError {
+                from: self,
+                to: Self::Created,
+            })
+        }
+    }
 }
 
 impl fmt::Display for SessionState {
