@@ -40,6 +40,10 @@ Findings already rejected with evidence or merged via PR. Design reviews must ch
   - Only real violation: `ProviderErrorKind` at `src/lib.rs:388` (1 item, fixed in Phase 0-2)
 - **Lesson**: Before proposing "missing attribute X on enum Y", grep the enum definition directly. Don't trust cross-session memory of enum attribute state.
 
+## F-rej-018 · "Shutdown safety: spawned tasks escape DropGuard"
+- **Origin**: Round-3 analysis (Phase 7-2)
+- **Refutation**: Tool spawns use `runtime.shutdown.child_token()` via `execute_with_cancel` (`streaming.rs:1522`). Task spawns use `select!(result, cancel_rx)` at `task.rs:463-514` with handles stored in the registry for abort. The execute_inner loop checks `is_cancelled()` on every iteration (wired through IterationGate). Fire-and-forget spawns (hooks at `streaming.rs:1115`, persist at `streaming.rs:1887`) are intentionally unguarded — they complete naturally or are dropped by the Tokio runtime on program exit. The `_shutdown_guard: DropGuard` fires `cancel()` on the CancellationToken when the last Arc<AgentRuntime> drops, propagating to all child tokens.
+
 ## F-rej-017 · "Global persist mutex → per-session DashMap"
 - **Origin**: Round-3 analysis (Phase 6 task D5)
 - **Refutation**: `Agent.persist_serializer` at `executor.rs:29` is `Arc<Mutex<()>>` — per-Agent instance, not global. Each Agent wraps one session. Multi-tenant: each agent has its own serializer with zero cross-agent contention.
