@@ -33,11 +33,10 @@ paths:
 - Encode-time warnings flow into `ModelResponse::warnings` via `ProviderClient::send` (`decoded.warnings.extend(encoded.warnings)`). Streaming routes them into `ModelStreamChunk::Warning`.
 - `ModelTransport::classify_error(status, body)` is the single OCP extension point for vendor-specific HTTP failures (Vertex quota project, Bedrock throttling, Foundry Entra). The central `provider_client::classify_response_error` only delegates.
 
-## LlmCall and decorators
+## LlmCall, LlmClient, and decorators
 
-- `LlmCall` is the trait the agent runtime uses for all model invocations (`send` / `send_stream`). `ProviderClient` implements it.
-- Decorator wrappers compose around any `Arc<dyn LlmCall>`: `RetryingClient`, `FallingBackClient`, `CircuitBrokenClient`.
-- There is no monolithic `Client` type — the legacy adapter layer was removed in the Phase 1b refactor.
+- `LlmCall` is the trait for all model invocations (`send` / `send_stream` / `capabilities` / `codec_id`). `ProviderClient` implements it; decorator wrappers (`RetryingClient`, `FallingBackClient`, `CircuitBrokenClient`) compose around any `Arc<dyn LlmCall>` and forward `capabilities()` / `codec_id()` to the inner client.
+- `LlmClient::from_auth(auth)` is the standard entry point for consumers that need `Arc<dyn LlmCall>` without Agent overhead (custom loops, structured output extraction, RAG). `LlmClientBuilder` exposes retry policy and HTTP client customisation. Both `LlmClientBuilder` and `AgentBuilder` delegate to the same `build_direct_anthropic()` — no duplication.
 
 ## ProfileRegistry-based bootstrapping
 

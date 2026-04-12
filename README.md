@@ -80,6 +80,34 @@ async fn main() -> branchforge::Result<()> {
 }
 ```
 
+### Direct LLM Client (no agent overhead)
+
+```rust
+use branchforge::{Auth, LlmClient};
+use branchforge::ir::{Message, ModelRequest, ResponseFormat, JsonSchemaSpec};
+use schemars::JsonSchema;
+use serde::Deserialize;
+
+#[derive(JsonSchema, Deserialize)]
+struct Sentiment { score: f32, label: String }
+
+#[tokio::main]
+async fn main() -> branchforge::Result<()> {
+    let client = LlmClient::from_auth(Auth::from_env()).await?;
+
+    let request = ModelRequest::new("claude-sonnet-4-5", vec![Message::user("Analyze sentiment: I love Rust")])
+        .with_max_tokens(256)
+        .with_response_format(ResponseFormat::JsonSchema(
+            JsonSchemaSpec::from_type::<Sentiment>()
+        ));
+
+    let response = client.send(&request).await?;
+    let sentiment: Sentiment = response.json()?;
+    println!("{}: {}", sentiment.label, sentiment.score);
+    Ok(())
+}
+```
+
 ### Build an Agent
 
 ```rust
