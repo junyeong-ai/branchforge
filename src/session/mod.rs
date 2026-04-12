@@ -19,7 +19,7 @@ pub mod queue;
 mod replay;
 pub mod schema_version;
 pub mod state;
-pub mod tool_state;
+pub mod session_handle;
 pub mod types;
 
 pub use archive::{
@@ -64,7 +64,7 @@ pub use state::{
     SessionConfig, SessionId, SessionMessage, SessionState, SessionToolLimits,
     SessionTransitionError, SessionType, ThinkingMetadata, ToolResultMeta,
 };
-pub use tool_state::{ExecutionGuard, ExecutionState, SessionSnapshot, ToolState};
+pub use session_handle::{ExecutionGuard, ExecutionState, SessionSnapshot, SessionHandle};
 pub use types::{
     CompactRecord, CompactTrigger, EnvironmentContext, Plan, PlanState, PlanTransitionError,
     QueueItem, QueueItemState, QueueItemTransitionError, QueueOperation, SessionAccessScope,

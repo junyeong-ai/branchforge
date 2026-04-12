@@ -402,7 +402,7 @@ impl Agent {
                     }
                     let executor = super::recovery_executor::RecoveryExecutor {
                         registry: &self.runtime.recovery_recipes,
-                        tool_state: &self.state,
+                        session_handle: &self.state,
                         llm: Some(self.runtime.llm.as_ref()),
                         event_bus: self.runtime.event_bus.as_deref(),
                     };

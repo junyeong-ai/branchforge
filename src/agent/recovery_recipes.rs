@@ -15,7 +15,7 @@
 //! - **Recipes** answer "what should we do?" — pure, easy to test,
 //!   easy to compose, easy to reason about in isolation.
 //! - **Executor** answers "how do we do it?" — wired to the
-//!   `ToolState`, `LlmCall`, and `EventBus`, knows nothing about
+//!   `SessionHandle`, `LlmCall`, and `EventBus`, knows nothing about
 //!   policy.
 //!
 //! It also makes recipe chaining cheap: a chain of `[A, B, C]` is

@@ -38,13 +38,13 @@ pub fn format_plan_summary(plan: &Plan) -> String {
 pub async fn collect_compaction_state(tools: &ToolRegistry) -> Vec<String> {
     let mut sections = Vec::new();
 
-    if let Some(tool_state) = tools.tool_state() {
-        let todos = tool_state.todos().await;
+    if let Some(session_handle) = tools.session_handle() {
+        let todos = session_handle.todos().await;
         if !todos.is_empty() {
             sections.push(format!("## Current Tasks\n{}", format_todo_summary(&todos)));
         }
 
-        if let Some(plan) = tool_state.current_plan().await
+        if let Some(plan) = session_handle.current_plan().await
             && !plan.state().is_terminal()
         {
             sections.push(format!("## Active Plan\n{}", format_plan_summary(&plan)));

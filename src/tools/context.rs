@@ -11,7 +11,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::common::Extensions;
 use crate::hooks::{HookContext, HookEvent, HookInput, HookRegistry};
-use crate::session::{SessionAccessScope, SessionManager, ToolState};
+use crate::session::{SessionAccessScope, SessionManager, SessionHandle};
 
 #[cfg(feature = "local-fs")]
 use std::collections::HashMap;
@@ -298,7 +298,7 @@ impl ExecutionContext {
         self.session_scope.as_ref()
     }
 
-    pub async fn persist_tool_state(&self, state: &ToolState) -> crate::Result<()> {
+    pub async fn persist_session_handle(&self, state: &SessionHandle) -> crate::Result<()> {
         let Some(manager) = self.session_manager.as_ref() else {
             return Ok(());
         };

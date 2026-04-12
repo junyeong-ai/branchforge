@@ -11,7 +11,7 @@ concerns into one trait implementation:
 2. **Deciding** what recovery action to take (retry, back off,
    compact context, fail).
 3. **Executing** the action, which involved mutating the agent's
-   `ToolState`, calling `llm.send` again, re-emitting hook events,
+   `SessionHandle`, calling `llm.send` again, re-emitting hook events,
    and in some code paths spawning new async tasks.
 
 Mixing pure decision logic with impure execution made the trait
@@ -38,7 +38,7 @@ Split the two concerns:
    ```
 
 2. **`RecoveryExecutor`** is the one piece that knows how to act
-   on a `RecipeDecision`: it holds the `&ToolState`, `&Arc<dyn LlmCall>`,
+   on a `RecipeDecision`: it holds the `&SessionHandle`, `&Arc<dyn LlmCall>`,
    and `&Option<EventBus>` and exposes a single `apply` method
    consumed by both the streaming and unary loops.
 

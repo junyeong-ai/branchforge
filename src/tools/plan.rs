@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 
 use super::SchemaTool;
 use super::context::ExecutionContext;
-use crate::session::tool_state::ToolState;
+use crate::session::session_handle::SessionHandle;
 use crate::types::ToolResult;
 
 #[non_exhaustive]
@@ -36,11 +36,11 @@ pub struct PlanInput {
 }
 
 pub struct PlanTool {
-    state: ToolState,
+    state: SessionHandle,
 }
 
 impl PlanTool {
-    pub fn new(state: ToolState) -> Self {
+    pub fn new(state: SessionHandle) -> Self {
         Self { state }
     }
 }
@@ -72,7 +72,7 @@ impl PlanTool {
         }
 
         let plan = self.state.enter_plan_mode(name).await;
-        if let Err(e) = context.persist_tool_state(&self.state).await {
+        if let Err(e) = context.persist_session_handle(&self.state).await {
             return ToolResult::error(format!("Failed to persist plan state: {}", e));
         }
         ToolResult::success(format!(
@@ -94,7 +94,7 @@ impl PlanTool {
 
         match self.state.exit_plan_mode().await {
             Some(plan) => {
-                if let Err(e) = context.persist_tool_state(&self.state).await {
+                if let Err(e) = context.persist_session_handle(&self.state).await {
                     return ToolResult::error(format!("Failed to persist plan state: {}", e));
                 }
                 let content = if plan.content.is_empty() {
@@ -127,7 +127,7 @@ impl PlanTool {
 
         match self.state.cancel_plan().await {
             Some(plan) => {
-                if let Err(e) = context.persist_tool_state(&self.state).await {
+                if let Err(e) = context.persist_session_handle(&self.state).await {
                     return ToolResult::error(format!("Failed to persist plan state: {}", e));
                 }
                 ToolResult::success(format!(
@@ -153,7 +153,7 @@ impl PlanTool {
         };
 
         self.state.update_plan_content(content.clone()).await;
-        if let Err(e) = context.persist_tool_state(&self.state).await {
+        if let Err(e) = context.persist_session_handle(&self.state).await {
             return ToolResult::error(format!("Failed to persist plan state: {}", e));
         }
         ToolResult::success(format!(
@@ -209,8 +209,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_plan_lifecycle() {
-        let tool_state = ToolState::new(SessionId::new());
-        let tool = PlanTool::new(tool_state);
+        let session_handle = SessionHandle::new(SessionId::new());
+        let tool = PlanTool::new(session_handle);
         let context = test_context();
 
         // Start
@@ -250,8 +250,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_plan_cancel() {
-        let tool_state = ToolState::new(SessionId::new());
-        let tool = PlanTool::new(tool_state);
+        let session_handle = SessionHandle::new(SessionId::new());
+        let tool = PlanTool::new(session_handle);
         let context = test_context();
 
         // Start
@@ -276,8 +276,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_double_start_rejected() {
-        let tool_state = ToolState::new(SessionId::new());
-        let tool = PlanTool::new(tool_state);
+        let session_handle = SessionHandle::new(SessionId::new());
+        let tool = PlanTool::new(session_handle);
         let context = test_context();
 
         let _ = tool
@@ -293,8 +293,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_complete_without_start() {
-        let tool_state = ToolState::new(SessionId::new());
-        let tool = PlanTool::new(tool_state);
+        let session_handle = SessionHandle::new(SessionId::new());
+        let tool = PlanTool::new(session_handle);
         let context = test_context();
 
         let result = tool
@@ -306,8 +306,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_update_requires_content() {
-        let tool_state = ToolState::new(SessionId::new());
-        let tool = PlanTool::new(tool_state);
+        let session_handle = SessionHandle::new(SessionId::new());
+        let tool = PlanTool::new(session_handle);
         let context = test_context();
 
         let _ = tool
@@ -328,8 +328,8 @@ mod tests {
             .tenant("tenant-a")
             .principal("user-1");
         let session_id = SessionId::new();
-        let tool_state = ToolState::new(session_id);
-        let tool = PlanTool::new(tool_state);
+        let session_handle = SessionHandle::new(session_id);
+        let tool = PlanTool::new(session_handle);
         let context = ExecutionContext::empty()
             .with_session_manager(manager.clone())
             .with_session_scope(scope.clone());

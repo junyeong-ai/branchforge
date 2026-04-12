@@ -16,7 +16,7 @@ use crate::agent::{TaskOutputTool, TaskTool, TaskTracker};
 use crate::authorization::ToolPolicy;
 use crate::common::IndexRegistry;
 use crate::hooks::HookRegistry;
-use crate::session::tool_state::ToolState;
+use crate::session::session_handle::SessionHandle;
 use crate::session::{MemoryPersistence, SessionAccessScope, SessionId, SessionManager};
 use crate::subagents::SubagentIndex;
 
@@ -29,7 +29,7 @@ pub struct ToolRegistryBuilder {
     policy: Option<ToolPolicy>,
     #[cfg(feature = "local-fs")]
     sandbox_config: Option<crate::security::SandboxConfig>,
-    tool_state: Option<ToolState>,
+    session_handle: Option<SessionHandle>,
     session_id: Option<SessionId>,
     session_manager: Option<SessionManager>,
     hooks: Option<HookRegistry>,
@@ -58,7 +58,7 @@ impl ToolRegistryBuilder {
             policy: None,
             #[cfg(feature = "local-fs")]
             sandbox_config: None,
-            tool_state: None,
+            session_handle: None,
             session_id: None,
             session_manager: None,
             hooks: None,
@@ -153,8 +153,8 @@ impl ToolRegistryBuilder {
         self
     }
 
-    pub fn tool_state(mut self, state: ToolState) -> Self {
-        self.tool_state = Some(state);
+    pub fn session_handle(mut self, state: SessionHandle) -> Self {
+        self.session_handle = Some(state);
         self
     }
 
@@ -262,9 +262,9 @@ impl ToolRegistryBuilder {
                 TaskTracker::new(Arc::new(MemoryPersistence::new()))
             }
         });
-        let tool_state = self
-            .tool_state
-            .unwrap_or_else(|| ToolState::new(session_id));
+        let session_handle = self
+            .session_handle
+            .unwrap_or_else(|| SessionHandle::new(session_id));
 
         let mut task_tool_builder = TaskTool::new(task_tracker.clone());
         if let Some(manager) = self.session_manager.clone() {
@@ -287,8 +287,8 @@ impl ToolRegistryBuilder {
         let mut all_tools: Vec<Arc<dyn Tool>> = vec![
             task_tool,
             Arc::new(TaskOutputTool::new(task_tracker.clone())),
-            Arc::new(super::TodoWriteTool::new(tool_state.clone(), session_id)),
-            Arc::new(super::PlanTool::new(tool_state.clone())),
+            Arc::new(super::TodoWriteTool::new(session_handle.clone(), session_id)),
+            Arc::new(super::PlanTool::new(session_handle.clone())),
             Arc::new(super::AskUserQuestionTool),
             skill_tool,
         ];
@@ -313,7 +313,7 @@ impl ToolRegistryBuilder {
         all_tools.extend(self.custom_tools);
 
         #[allow(unused_mut)]
-        let mut env = ToolExecutionEnv::new(context).with_tool_state(tool_state);
+        let mut env = ToolExecutionEnv::new(context).with_session_handle(session_handle);
 
         #[cfg(feature = "coding-tools")]
         {

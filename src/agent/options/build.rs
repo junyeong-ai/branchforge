@@ -464,10 +464,10 @@ impl AgentBuilder {
         #[cfg(not(feature = "local-fs"))]
         let _ = self.sandbox_settings.take();
 
-        let (tool_state, session_id) = match self.resumed_session.take() {
+        let (session_handle, session_id) = match self.resumed_session.take() {
             Some(session) => {
                 let id = session.id;
-                (crate::session::ToolState::from_session(session), id)
+                (crate::session::SessionHandle::from_session(session), id)
             }
             None => {
                 let id = self
@@ -475,7 +475,7 @@ impl AgentBuilder {
                     .as_deref()
                     .and_then(crate::session::SessionId::parse)
                     .unwrap_or_default();
-                (crate::session::ToolState::new(id), id)
+                (crate::session::SessionHandle::new(id), id)
             }
         };
 
@@ -483,7 +483,7 @@ impl AgentBuilder {
             .access(self.config.security.tool_surface.clone())
             .working_dir(working_dir)
             .skill_executor(skill_executor)
-            .tool_state(tool_state)
+            .session_handle(session_handle)
             .session_id(session_id)
             .hooks(self.hooks.clone())
             .scope(crate::session::SessionAccessScope {

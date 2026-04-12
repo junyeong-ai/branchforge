@@ -91,8 +91,8 @@ impl ToolRegistry {
     }
 
     #[inline]
-    pub fn tool_state(&self) -> Option<&crate::session::tool_state::ToolState> {
-        self.env.tool_state()
+    pub fn session_handle(&self) -> Option<&crate::session::session_handle::SessionHandle> {
+        self.env.session_handle()
     }
 
     #[cfg(feature = "coding-tools")]

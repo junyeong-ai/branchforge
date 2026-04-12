@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use super::SchemaTool;
 use super::context::ExecutionContext;
 use crate::session::SessionId;
-use crate::session::tool_state::ToolState;
+use crate::session::session_handle::SessionHandle;
 use crate::session::types::{TodoItem, TodoStatus};
 use crate::types::ToolResult;
 
@@ -25,12 +25,12 @@ pub struct TodoInputItem {
 }
 
 pub struct TodoWriteTool {
-    state: ToolState,
+    state: SessionHandle,
     session_id: SessionId,
 }
 
 impl TodoWriteTool {
-    pub fn new(state: ToolState, session_id: SessionId) -> Self {
+    pub fn new(state: SessionHandle, session_id: SessionId) -> Self {
         Self { state, session_id }
     }
 }
@@ -77,7 +77,7 @@ impl SchemaTool for TodoWriteTool {
             .collect();
 
         self.state.set_todos(todos.clone()).await;
-        if let Err(e) = context.persist_tool_state(&self.state).await {
+        if let Err(e) = context.persist_session_handle(&self.state).await {
             return ToolResult::error(format!("Failed to persist todo state: {}", e));
         }
 
@@ -104,7 +104,7 @@ mod tests {
     #[tokio::test]
     async fn test_todo_write() {
         let session_id = SessionId::new();
-        let state = ToolState::new(session_id);
+        let state = SessionHandle::new(session_id);
         let tool = TodoWriteTool::new(state, session_id);
         let execution_context = ExecutionContext::default();
 
@@ -127,7 +127,7 @@ mod tests {
     #[tokio::test]
     async fn test_multiple_in_progress_rejected() {
         let session_id = SessionId::new();
-        let state = ToolState::new(session_id);
+        let state = SessionHandle::new(session_id);
         let tool = TodoWriteTool::new(state, session_id);
         let execution_context = ExecutionContext::default();
 
@@ -153,7 +153,7 @@ mod tests {
             .tenant("tenant-a")
             .principal("user-1");
         let session_id = SessionId::new();
-        let state = ToolState::new(session_id);
+        let state = SessionHandle::new(session_id);
         let tool = TodoWriteTool::new(state.clone(), session_id);
         let execution_context = ExecutionContext::empty()
             .with_session_manager(manager.clone())

@@ -12,7 +12,7 @@
 //! ```
 //!
 //! [`RecoveryExecutor::apply`] is the only function the agent loop
-//! calls; it interprets the action against the live `ToolState`
+//! calls; it interprets the action against the live `SessionHandle`
 //! (for collapse/compact), `LlmCall` (for compaction), and
 //! `EventBus` (for telemetry).
 
@@ -22,7 +22,7 @@ use std::time::Duration;
 
 use tracing::{info, warn};
 
-use crate::session::ToolState;
+use crate::session::SessionHandle;
 
 use super::recovery_recipes::{RecipeRegistry, RecoveryAction, RecoveryDecisionInput};
 
@@ -43,7 +43,7 @@ pub enum RecoveryOutcome {
 /// into mutations on the agent's runtime state.
 pub struct RecoveryExecutor<'a> {
     pub registry: &'a RecipeRegistry,
-    pub tool_state: &'a ToolState,
+    pub session_handle: &'a SessionHandle,
     pub llm: Option<&'a dyn crate::client::LlmCall>,
     pub event_bus: Option<&'a crate::events::EventBus>,
 }
@@ -101,7 +101,7 @@ impl RecoveryExecutor<'_> {
                 RecoveryOutcome::Retry
             }
             RecoveryAction::CompactAndRetry => match self.llm {
-                Some(llm) => match self.tool_state.compact(llm).await {
+                Some(llm) => match self.session_handle.compact(llm).await {
                     Ok(_) => RecoveryOutcome::Retry,
                     Err(crate::Error::ContextWindowExceeded { .. }) => {
                         // Phase D B-2 PTL fallback: the compaction
@@ -170,7 +170,7 @@ impl RecoveryExecutor<'_> {
             return 0;
         }
 
-        self.tool_state
+        self.session_handle
             .with_session_mut(|session| {
                 let messages = session.current_branch_messages();
                 // Walk visible user turns in order and collect the
@@ -224,7 +224,7 @@ impl RecoveryExecutor<'_> {
     async fn collapse_tool_results(&self, max_chars: usize) {
         use crate::ir::{ContentPart, Role, ToolResultContent};
 
-        self.tool_state
+        self.session_handle
             .with_session_mut(|session| {
                 let messages = session.current_branch_messages();
                 for message in &messages {
@@ -295,10 +295,10 @@ mod tests {
     #[tokio::test]
     async fn aborts_when_no_recipe_matches() {
         let registry = RecipeRegistry::new();
-        let tool_state = ToolState::default();
+        let session_handle = SessionHandle::default();
         let executor = RecoveryExecutor {
             registry: &registry,
-            tool_state: &tool_state,
+            session_handle: &session_handle,
             llm: None,
             event_bus: None,
         };
@@ -314,10 +314,10 @@ mod tests {
     #[tokio::test]
     async fn auth_failure_retries_once_then_aborts() {
         let registry = RecipeRegistry::new().with_boxed_recipes(builtin_general_recipes());
-        let tool_state = ToolState::default();
+        let session_handle = SessionHandle::default();
         let executor = RecoveryExecutor {
             registry: &registry,
-            tool_state: &tool_state,
+            session_handle: &session_handle,
             llm: None,
             event_bus: None,
         };
@@ -341,11 +341,11 @@ mod tests {
     #[tokio::test]
     async fn drain_oldest_rounds_archives_oldest_user_turn() {
         let registry = RecipeRegistry::new();
-        let tool_state = ToolState::default();
+        let session_handle = SessionHandle::default();
 
         // Seed the session with three user→assistant rounds so a
         // single-round drain leaves two visible rounds behind.
-        tool_state
+        session_handle
             .with_session_mut(|session| {
                 for i in 0..3 {
                     let _ = session.add_user_message(format!("user turn {i}"));
@@ -358,21 +358,21 @@ mod tests {
             })
             .await;
 
-        let initial_len = tool_state
+        let initial_len = session_handle
             .with_session(|s| s.current_branch_messages().len())
             .await;
         assert_eq!(initial_len, 6, "3 user + 3 assistant");
 
         let executor = RecoveryExecutor {
             registry: &registry,
-            tool_state: &tool_state,
+            session_handle: &session_handle,
             llm: None,
             event_bus: None,
         };
         let drained = executor.drain_oldest_rounds(1).await;
         assert_eq!(drained, 1);
 
-        let after_len = tool_state
+        let after_len = session_handle
             .with_session(|s| s.current_branch_messages().len())
             .await;
         assert!(
@@ -386,8 +386,8 @@ mod tests {
     #[tokio::test]
     async fn drain_oldest_rounds_refuses_to_erase_everything() {
         let registry = RecipeRegistry::new();
-        let tool_state = ToolState::default();
-        tool_state
+        let session_handle = SessionHandle::default();
+        session_handle
             .with_session_mut(|session| {
                 let _ = session.add_user_message("only turn".to_string());
             })
@@ -395,7 +395,7 @@ mod tests {
 
         let executor = RecoveryExecutor {
             registry: &registry,
-            tool_state: &tool_state,
+            session_handle: &session_handle,
             llm: None,
             event_bus: None,
         };
@@ -429,10 +429,10 @@ mod tests {
             }
         }
         let registry = RecipeRegistry::new().with_recipe(FastBackoff);
-        let tool_state = ToolState::default();
+        let session_handle = SessionHandle::default();
         let executor = RecoveryExecutor {
             registry: &registry,
-            tool_state: &tool_state,
+            session_handle: &session_handle,
             llm: None,
             event_bus: None,
         };

@@ -14,7 +14,7 @@ use crate::budget::{BudgetTracker, TenantBudget};
 use crate::context::PromptOrchestrator;
 use crate::hooks::{HookContext, HookEvent, HookInput, HookRegistry};
 use crate::session::compact::CompactResult;
-use crate::session::{ToolExecution, ToolState};
+use crate::session::{ToolExecution, SessionHandle};
 use crate::types::ToolResult;
 
 use super::config::BudgetConfig;
@@ -355,7 +355,7 @@ pub(crate) fn maybe_emit_budget_alert(
 
 /// Accumulate inner usage from a tool result (e.g., subagent calls).
 pub(crate) async fn accumulate_inner_usage(
-    tool_state: &ToolState,
+    session_handle: &SessionHandle,
     total_usage: &mut crate::ir::Usage,
     metrics: &mut AgentMetrics,
     budget_tracker: &BudgetTracker,
@@ -363,7 +363,7 @@ pub(crate) async fn accumulate_inner_usage(
     tool_name: &str,
 ) -> crate::Result<()> {
     if let Some(ref inner_ir_usage) = result.inner_usage {
-        tool_state
+        session_handle
             .with_session_mut(|session| {
                 session.update_usage(inner_ir_usage);
             })
@@ -393,7 +393,7 @@ pub(crate) async fn accumulate_inner_usage(
 
 pub(crate) async fn maybe_invoke_explicit_skill_command(
     tools: &ToolRegistry,
-    tool_state: &ToolState,
+    session_handle: &SessionHandle,
     hooks: &HookRegistry,
     hook_ctx: &HookContext,
     session_id: &str,
@@ -455,16 +455,16 @@ pub(crate) async fn maybe_invoke_explicit_skill_command(
     run_post_tool_hooks(hooks, hook_ctx, session_id, "Skill", is_error, &result).await;
     metrics.record_tool(&tool_call_id, "Skill", duration_ms, is_error);
 
-    tool_state
+    session_handle
         .record_tool_execution(
-            ToolExecution::new(tool_state.session_id(), "Skill", actual_input.clone())
+            ToolExecution::new(session_handle.session_id(), "Skill", actual_input.clone())
                 .message(tool_call_id.clone())
                 .output(result.output.text(), is_error)
                 .duration(duration_ms),
         )
         .await?;
 
-    tool_state
+    session_handle
         .with_session_mut(|session| -> crate::session::SessionResult<()> {
             session.add_assistant_message(
                 vec![crate::ir::ContentPart::ToolCall {
@@ -577,7 +577,7 @@ pub(crate) async fn run_stop_hooks(hooks: &HookRegistry, hook_ctx: &HookContext,
 
 /// Check whether compaction is needed and perform it if so.
 pub(crate) async fn handle_compaction(
-    tool_state: &ToolState,
+    session_handle: &SessionHandle,
     runtime: &super::runtime::AgentRuntime,
     hook_ctx: &HookContext,
     session_id: &str,
@@ -585,7 +585,7 @@ pub(crate) async fn handle_compaction(
     metrics: &mut AgentMetrics,
 ) {
     let config = &runtime.config.execution;
-    let should_compact = tool_state
+    let should_compact = session_handle
         .with_session(|session| {
             config.auto_compact && session.should_compact(max_tokens, config.compact_threshold)
         })
@@ -605,7 +605,7 @@ pub(crate) async fn handle_compaction(
     }
 
     debug!("Compacting session context");
-    let compact_result = tool_state.compact(runtime.llm.as_ref()).await;
+    let compact_result = session_handle.compact(runtime.llm.as_ref()).await;
 
     match compact_result {
         Ok(CompactResult::Compacted {
@@ -628,7 +628,7 @@ pub(crate) async fn handle_compaction(
 
             let state_sections = collect_compaction_state(&runtime.tools).await;
             if !state_sections.is_empty() {
-                let _ = tool_state
+                let _ = session_handle
                     .with_session_mut(|session| {
                         session.add_user_message(format!(
                             "<system-reminder>\n# State preserved after compaction\n\n{}\n</system-reminder>",

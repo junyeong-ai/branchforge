@@ -14,7 +14,7 @@ use branchforge::agent::{AgentMetrics, AgentState, TaskOutputTool, TaskTracker};
 use branchforge::common::{ContentSource, IndexRegistry};
 use branchforge::ir::{FinishReason, Usage};
 use branchforge::security::SecurityContext;
-use branchforge::session::{MemoryPersistence, SessionId, SessionState, ToolState};
+use branchforge::session::{MemoryPersistence, SessionId, SessionState, SessionHandle};
 use branchforge::skills::{SkillIndex, SkillRuntime};
 use branchforge::tools::{
     BashTool, EditTool, ExecutionContext, GlobTool, GrepTool, KillShellTool, PlanTool,
@@ -73,7 +73,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let ctx = ExecutionContext::new(security);
 
     let session_id = SessionId::new();
-    let session_ctx = ToolState::new(session_id);
+    let session_ctx = SessionHandle::new(session_id);
     let process_manager = Arc::new(ProcessScheduler::new());
 
     let mut runner = TestRunner::new();

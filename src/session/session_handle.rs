@@ -59,7 +59,7 @@ impl ToolExecutionLog {
     }
 }
 
-struct ToolStateInner {
+struct SessionHandleInner {
     id: SessionId,
     session: RwLock<Session>,
     executions: ToolExecutionLog,
@@ -69,9 +69,9 @@ struct ToolStateInner {
     queue_notify: Notify,
 }
 
-impl std::fmt::Debug for ToolStateInner {
+impl std::fmt::Debug for SessionHandleInner {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("ToolStateInner")
+        f.debug_struct("SessionHandleInner")
             .field("id", &self.id)
             .field("executions", &self.executions)
             .field("executing", &self.executing.load(Ordering::Relaxed))
@@ -79,7 +79,7 @@ impl std::fmt::Debug for ToolStateInner {
     }
 }
 
-impl ToolStateInner {
+impl SessionHandleInner {
     fn new(session_id: SessionId) -> Self {
         Self {
             id: session_id,
@@ -124,15 +124,15 @@ pub struct ExecutionState {
 
 /// Thread-safe tool state handle.
 #[derive(Debug, Clone)]
-pub struct ToolState(Arc<ToolStateInner>);
+pub struct SessionHandle(Arc<SessionHandleInner>);
 
-impl ToolState {
+impl SessionHandle {
     pub fn new(session_id: SessionId) -> Self {
-        Self(Arc::new(ToolStateInner::new(session_id)))
+        Self(Arc::new(SessionHandleInner::new(session_id)))
     }
 
     pub fn from_session(session: Session) -> Self {
-        Self(Arc::new(ToolStateInner::from_session(session)))
+        Self(Arc::new(SessionHandleInner::from_session(session)))
     }
 
     #[inline]
@@ -390,7 +390,7 @@ impl Drop for ExecutionGuard<'_> {
     }
 }
 
-impl Default for ToolState {
+impl Default for SessionHandle {
     fn default() -> Self {
         Self::new(SessionId::default())
     }
@@ -402,7 +402,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_plan_lifecycle() {
-        let state = ToolState::new(SessionId::new());
+        let state = SessionHandle::new(SessionId::new());
 
         let plan = state.enter_plan_mode(Some("Test Plan".to_string())).await;
         assert_eq!(plan.state, PlanState::Draft);
@@ -420,7 +420,7 @@ mod tests {
     #[tokio::test]
     async fn test_todos() {
         let session_id = SessionId::new();
-        let state = ToolState::new(session_id);
+        let state = SessionHandle::new(session_id);
 
         let todos = vec![
             TodoItem::new(session_id, "Task 1", "Doing task 1"),
@@ -435,7 +435,7 @@ mod tests {
     #[tokio::test]
     async fn test_tool_execution_recording() {
         let session_id = SessionId::new();
-        let state = ToolState::new(session_id);
+        let state = SessionHandle::new(session_id);
 
         let exec = ToolExecution::new(session_id, "Bash", serde_json::json!({"command": "ls"}))
             .output("file1\nfile2", false)
@@ -455,7 +455,7 @@ mod tests {
     #[tokio::test]
     async fn test_session_persistence_ready() {
         let session_id = SessionId::new();
-        let state = ToolState::new(session_id);
+        let state = SessionHandle::new(session_id);
 
         let todos = vec![TodoItem::new(session_id, "Task 1", "Doing task 1")];
         state.set_todos(todos).await;
@@ -483,7 +483,7 @@ mod tests {
         )]);
         session.enter_plan_mode(Some("Resumed Plan".to_string()));
 
-        let state = ToolState::from_session(session);
+        let state = SessionHandle::from_session(session);
 
         let todos = state.todos().await;
         assert_eq!(todos.len(), 1);
@@ -497,7 +497,7 @@ mod tests {
     #[tokio::test]
     async fn test_concurrent_execution_recording() {
         let session_id = SessionId::new();
-        let state = ToolState::new(session_id);
+        let state = SessionHandle::new(session_id);
 
         let handles: Vec<_> = (0..10)
             .map(|i| {
@@ -522,7 +522,7 @@ mod tests {
     #[tokio::test]
     async fn test_execution_log_limit() {
         let session_id = SessionId::new();
-        let state = ToolState::new(session_id);
+        let state = SessionHandle::new(session_id);
 
         for i in 0..MAX_EXECUTION_LOG_SIZE + 100 {
             let exec = ToolExecution::new(session_id, format!("Tool{}", i), serde_json::json!({}));

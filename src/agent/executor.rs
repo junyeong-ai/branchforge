@@ -16,13 +16,13 @@ use crate::context_scope::SharedContextScope;
 use crate::events::EventBus;
 use crate::hooks::HookRegistry;
 use crate::ir::Message;
-use crate::session::{SessionAccessScope, SessionManager, ToolState};
+use crate::session::{SessionAccessScope, SessionManager, SessionHandle};
 use crate::tools::{ToolRegistry, ToolSearchManager};
 
 pub struct Agent {
     pub(crate) runtime: Arc<AgentRuntime>,
     pub(crate) session_id: Arc<str>,
-    pub(crate) state: ToolState,
+    pub(crate) state: SessionHandle,
     pub(crate) initial_messages: Option<Vec<Message>>,
     pub(crate) session_manager: Option<SessionManager>,
     pub(crate) session_scope: Option<SessionAccessScope>,
@@ -81,9 +81,9 @@ impl Agent {
         };
 
         let state = tools
-            .tool_state()
+            .session_handle()
             .cloned()
-            .unwrap_or_else(|| ToolState::new(crate::session::SessionId::new()));
+            .unwrap_or_else(|| SessionHandle::new(crate::session::SessionId::new()));
         let session_id: Arc<str> = state.session_id().to_string().into();
 
         let shutdown = CancellationToken::new();
@@ -355,7 +355,7 @@ impl Agent {
     }
 
     #[must_use]
-    pub fn state(&self) -> &ToolState {
+    pub fn state(&self) -> &SessionHandle {
         &self.state
     }
 }

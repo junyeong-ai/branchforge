@@ -8,12 +8,12 @@ use std::sync::Arc;
 #[cfg(feature = "coding-tools")]
 use super::ProcessScheduler;
 use super::context::ExecutionContext;
-use crate::session::tool_state::ToolState;
+use crate::session::session_handle::SessionHandle;
 
 #[derive(Clone)]
 pub struct ToolExecutionEnv {
     context: ExecutionContext,
-    tool_state: Option<ToolState>,
+    session_handle: Option<SessionHandle>,
     #[cfg(feature = "coding-tools")]
     process_manager: Option<Arc<ProcessScheduler>>,
 }
@@ -22,14 +22,14 @@ impl ToolExecutionEnv {
     pub fn new(context: ExecutionContext) -> Self {
         Self {
             context,
-            tool_state: None,
+            session_handle: None,
             #[cfg(feature = "coding-tools")]
             process_manager: None,
         }
     }
 
-    pub fn with_tool_state(mut self, state: ToolState) -> Self {
-        self.tool_state = Some(state);
+    pub fn with_session_handle(mut self, state: SessionHandle) -> Self {
+        self.session_handle = Some(state);
         self
     }
 
@@ -43,8 +43,8 @@ impl ToolExecutionEnv {
         &self.context
     }
 
-    pub fn tool_state(&self) -> Option<&ToolState> {
-        self.tool_state.as_ref()
+    pub fn session_handle(&self) -> Option<&SessionHandle> {
+        self.session_handle.as_ref()
     }
 
     #[cfg(feature = "coding-tools")]

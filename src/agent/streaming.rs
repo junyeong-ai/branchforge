@@ -27,7 +27,7 @@ use crate::hooks::{HookContext, HookEvent, HookInput};
 use crate::ir::ContentPart;
 use crate::ir::ModelStreamChunk;
 use crate::session::ToolExecution;
-use crate::session::{MessageMetadata, SessionAccessScope, SessionManager, ToolState};
+use crate::session::{MessageMetadata, SessionAccessScope, SessionManager, SessionHandle};
 use crate::types::context_window;
 
 impl Agent {
@@ -133,7 +133,7 @@ impl Agent {
 
         let state = StreamState::new(
             StreamStateConfig {
-                tool_state: self.state.clone(),
+                session_handle: self.state.clone(),
                 runtime: Arc::clone(&self.runtime),
                 hook_context: self.hook_context(),
                 request_builder,
@@ -154,7 +154,7 @@ impl Agent {
 }
 
 struct StreamStateConfig {
-    tool_state: ToolState,
+    session_handle: SessionHandle,
     runtime: Arc<AgentRuntime>,
     hook_context: HookContext,
     request_builder: RequestBuilder,
@@ -570,7 +570,7 @@ impl StreamState {
                         .await;
                         let messages = self
                             .cfg
-                            .tool_state
+                            .session_handle
                             .with_session(|session| session.to_api_messages())
                             .await;
                         let result = self.build_result(
@@ -602,7 +602,7 @@ impl StreamState {
             // Propagate EventBus to Session/Graph for SessionChanged,
             // BranchForked, and CheckpointCreated events.
             if let Some(ref bus) = self.cfg.runtime.event_bus {
-                self.cfg.tool_state.with_event_bus(Arc::clone(bus)).await;
+                self.cfg.session_handle.with_event_bus(Arc::clone(bus)).await;
             }
 
             let session_start_input = HookInput::session_start(&*self.cfg.session_id);
@@ -653,7 +653,7 @@ impl StreamState {
 
                 if let Err(e) = self
                     .cfg
-                    .tool_state
+                    .session_handle
                     .with_session_mut(|session| session.add_user_message(&prompt))
                     .await
                 {
@@ -663,7 +663,7 @@ impl StreamState {
                 if let Err(e) = persist_stream_session_state(
                     self.cfg.session_manager.clone(),
                     self.cfg.session_scope.clone(),
-                    self.cfg.tool_state.clone(),
+                    self.cfg.session_handle.clone(),
                     Arc::clone(&self.cfg.persist_serializer),
                 )
                 .await
@@ -674,7 +674,7 @@ impl StreamState {
 
                 match maybe_invoke_explicit_skill_command(
                     &self.cfg.runtime.tools,
-                    &self.cfg.tool_state,
+                    &self.cfg.session_handle,
                     &self.cfg.runtime.hooks,
                     &self.cfg.hook_context,
                     &self.cfg.session_id,
@@ -687,7 +687,7 @@ impl StreamState {
                         if let Err(e) = persist_stream_session_state(
                             self.cfg.session_manager.clone(),
                             self.cfg.session_scope.clone(),
-                            self.cfg.tool_state.clone(),
+                            self.cfg.session_handle.clone(),
                             Arc::clone(&self.cfg.persist_serializer),
                         )
                         .await
@@ -710,7 +710,7 @@ impl StreamState {
             if let Err(e) = persist_stream_session_state(
                 self.cfg.session_manager.clone(),
                 self.cfg.session_scope.clone(),
-                self.cfg.tool_state.clone(),
+                self.cfg.session_handle.clone(),
                 Arc::clone(&self.cfg.persist_serializer),
             )
             .await
@@ -730,7 +730,7 @@ impl StreamState {
 
             let messages = self
                 .cfg
-                .tool_state
+                .session_handle
                 .with_session(|session| session.to_api_messages())
                 .await;
             let result = self.build_result(
@@ -758,7 +758,7 @@ impl StreamState {
 
             let messages = self
                 .cfg
-                .tool_state
+                .session_handle
                 .with_session(|session| session.to_api_messages())
                 .await;
             let result = self.build_result(
@@ -774,7 +774,7 @@ impl StreamState {
 
         let messages = self
             .cfg
-            .tool_state
+            .session_handle
             .with_session(|session| session.to_api_messages())
             .await;
 
@@ -900,7 +900,7 @@ impl StreamState {
                 }
                 let executor = super::recovery_executor::RecoveryExecutor {
                     registry: &self.cfg.runtime.recovery_recipes,
-                    tool_state: &self.cfg.tool_state,
+                    session_handle: &self.cfg.session_handle,
                     llm: Some(self.cfg.runtime.llm.as_ref()),
                     event_bus: self.cfg.runtime.event_bus.as_deref(),
                 };
@@ -1194,7 +1194,7 @@ impl StreamState {
 
         if let Err(e) = self
             .cfg
-            .tool_state
+            .session_handle
             .with_session_mut(|session| -> crate::session::SessionResult<()> {
                 let has_thinking = !self.final_thinking.is_empty();
                 let text_count = if self.final_text.is_empty() { 0 } else { 1 };
@@ -1245,7 +1245,7 @@ impl StreamState {
         persist_stream_session_state_detached(
             self.cfg.session_manager.clone(),
             self.cfg.session_scope.clone(),
-            self.cfg.tool_state.clone(),
+            self.cfg.session_handle.clone(),
             Arc::clone(&self.cfg.persist_serializer),
         );
 
@@ -1267,7 +1267,7 @@ impl StreamState {
             if let Err(e) = persist_stream_session_state(
                 self.cfg.session_manager.clone(),
                 self.cfg.session_scope.clone(),
-                self.cfg.tool_state.clone(),
+                self.cfg.session_handle.clone(),
                 Arc::clone(&self.cfg.persist_serializer),
             )
             .await
@@ -1277,7 +1277,7 @@ impl StreamState {
 
             let messages = self
                 .cfg
-                .tool_state
+                .session_handle
                 .with_session(|session| session.to_api_messages())
                 .await;
             let result = self.build_result(
@@ -1447,7 +1447,7 @@ impl StreamState {
                     obj.insert("original_input".to_string(), original);
                 }
                 self.cfg
-                    .tool_state
+                    .session_handle
                     .append_graph_node(crate::graph::NodeKind::ToolCall, node_data)
                     .await?;
                 prepared.push((tool_use.id.clone(), tool_use.name.clone(), actual_input));
@@ -1674,7 +1674,7 @@ impl StreamState {
             self.metrics.record_tool(&id, &name, duration_ms, is_error);
 
             accumulate_inner_usage(
-                &self.cfg.tool_state,
+                &self.cfg.session_handle,
                 &mut self.total_usage,
                 &mut self.metrics,
                 &self.cfg.runtime.budget_tracker,
@@ -1709,9 +1709,9 @@ impl StreamState {
             );
 
             self.cfg
-                .tool_state
+                .session_handle
                 .record_tool_execution(
-                    ToolExecution::new(self.cfg.tool_state.session_id(), &name, input.clone())
+                    ToolExecution::new(self.cfg.session_handle.session_id(), &name, input.clone())
                         .message(id.clone())
                         .output(result.output.text(), is_error)
                         .duration(duration_ms),
@@ -1746,7 +1746,7 @@ impl StreamState {
         let max_tokens = context_window::for_model(&self.cfg.runtime.config.model.primary);
 
         self.cfg
-            .tool_state
+            .session_handle
             .with_session_mut(|session| session.add_tool_results(results))
             .await?;
         // Mid-turn: tool results detached. The compaction-boundary
@@ -1754,12 +1754,12 @@ impl StreamState {
         persist_stream_session_state_detached(
             self.cfg.session_manager.clone(),
             self.cfg.session_scope.clone(),
-            self.cfg.tool_state.clone(),
+            self.cfg.session_handle.clone(),
             Arc::clone(&self.cfg.persist_serializer),
         );
 
         handle_compaction(
-            &self.cfg.tool_state,
+            &self.cfg.session_handle,
             &self.cfg.runtime,
             &self.cfg.hook_context,
             &self.cfg.session_id,
@@ -1771,7 +1771,7 @@ impl StreamState {
         persist_stream_session_state(
             self.cfg.session_manager.clone(),
             self.cfg.session_scope.clone(),
-            self.cfg.tool_state.clone(),
+            self.cfg.session_handle.clone(),
             Arc::clone(&self.cfg.persist_serializer),
         )
         .await?;
@@ -1852,7 +1852,7 @@ fn partition_tools_by_safety(
 async fn persist_stream_session_state(
     manager: Option<SessionManager>,
     scope: Option<SessionAccessScope>,
-    tool_state: ToolState,
+    session_handle: SessionHandle,
     serializer: Arc<tokio::sync::Mutex<()>>,
 ) -> crate::Result<()> {
     let Some(manager) = manager else {
@@ -1861,7 +1861,7 @@ async fn persist_stream_session_state(
     // FIFO ordering across detached and awaited saves — see the
     // doc comment on `Agent::persist_session_state_detached`.
     let _guard = serializer.lock().await;
-    let session = tool_state.session().await;
+    let session = session_handle.session().await;
     manager
         .persist_snapshot(&session, scope.as_ref())
         .await
@@ -1875,7 +1875,7 @@ async fn persist_stream_session_state(
 fn persist_stream_session_state_detached(
     manager: Option<SessionManager>,
     scope: Option<SessionAccessScope>,
-    tool_state: ToolState,
+    session_handle: SessionHandle,
     serializer: Arc<tokio::sync::Mutex<()>>,
 ) {
     let Some(manager) = manager else {
@@ -1883,7 +1883,7 @@ fn persist_stream_session_state_detached(
     };
     tokio::spawn(async move {
         let _guard = serializer.lock().await;
-        let session = tool_state.session().await;
+        let session = session_handle.session().await;
         if let Err(e) = manager.persist_snapshot(&session, scope.as_ref()).await {
             tracing::warn!(error = %e, "detached stream session persist failed");
         }

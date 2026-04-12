@@ -195,7 +195,7 @@ pub use hooks::{CommandHook, Hook, HookContext, HookEvent, HookOutput, HookRegis
 pub use output_style::OutputStyle;
 pub use session::{
     InMemoryStore, MemoryEntry, MemoryStore, ScopedSessionManager, Session, SessionConfig,
-    SessionId, SessionManager, SessionMessage, SessionState, ToolState,
+    SessionId, SessionManager, SessionMessage, SessionState, SessionHandle,
 };
 pub use skills::{SkillIndex, SkillResult, SkillRuntime};
 pub use subagents::{SubagentIndex, builtin_subagents};
