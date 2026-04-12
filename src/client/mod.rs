@@ -54,7 +54,8 @@ pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(300);
 
 /// Configurable exponential-backoff strategy.
 ///
-/// Used by [`RetryPolicy`] to compute per-attempt delays.
+/// Used by [`RetryPolicy`] to compute per-attempt delays. All tunables
+/// are named Config fields per architecture invariant #8.
 #[derive(Debug, Clone)]
 pub struct BackoffStrategy {
     /// Delay for the first retry attempt.
@@ -63,8 +64,10 @@ pub struct BackoffStrategy {
     pub max_delay: Duration,
     /// Factor applied to the delay on each successive attempt.
     pub multiplier: f64,
-    /// When `true`, +-15 % jitter is added to the delay.
-    pub jitter: bool,
+    /// When non-zero, uniform jitter in `[-fraction, +fraction]` is
+    /// applied to the computed delay. Recommended range: `0.1..=0.25`.
+    /// Set to `0.0` to disable jitter entirely.
+    pub jitter_fraction: f64,
 }
 
 impl Default for BackoffStrategy {
@@ -73,7 +76,7 @@ impl Default for BackoffStrategy {
             initial_delay: Duration::from_secs(1),
             max_delay: Duration::from_secs(60),
             multiplier: 2.0,
-            jitter: true,
+            jitter_fraction: 0.15,
         }
     }
 }
@@ -84,8 +87,8 @@ impl BackoffStrategy {
         let exp = self.initial_delay.as_millis() as f64
             * self.multiplier.powi(attempt.saturating_sub(1) as i32);
         let clamped = exp.min(self.max_delay.as_millis() as f64);
-        let with_jitter = if self.jitter {
-            let j = clamped * 0.15 * (2.0 * rand::random::<f64>() - 1.0);
+        let with_jitter = if self.jitter_fraction > 0.0 {
+            let j = clamped * self.jitter_fraction * (2.0 * rand::random::<f64>() - 1.0);
             (clamped + j).max(0.0)
         } else {
             clamped
