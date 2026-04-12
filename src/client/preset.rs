@@ -111,12 +111,6 @@ impl std::fmt::Debug for CredentialHint {
 }
 
 impl CredentialHint {
-    /// Resolve the hint against the process environment. Convenience
-    /// wrapper around [`Self::resolve_with`] for production callers.
-    #[allow(dead_code)]
-    fn resolve(&self, profile_id: &str) -> Result<Option<SecretString>> {
-        self.resolve_with(profile_id, &SystemEnv)
-    }
 
     /// Resolve the hint against an injected [`EnvLookup`] and return
     /// a configuration error explaining what the user must set.

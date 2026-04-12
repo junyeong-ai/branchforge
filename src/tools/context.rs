@@ -67,6 +67,16 @@ pub(crate) type ProgressSender = tokio::sync::mpsc::Sender<ProgressEvent>;
 /// Channel buffer size for tool progress events.
 pub(crate) const PROGRESS_CHANNEL_CAPACITY: usize = 256;
 
+/// Scope carrier for tool execution.
+///
+/// Despite the `Context` suffix, this is a TypeMap-backed scope carrier —
+/// not a `naming.md` "Context pattern" (which would imply mutable shared
+/// state). Tools receive a shared `&ExecutionContext` and read extensions
+/// from it; they do not mutate it.
+///
+/// The `extensions` field carries feature-gated and user-provided values
+/// (security handles, HITL handler, workspace root, telemetry sinks,
+/// tenant ids, …) without widening the struct surface.
 #[derive(Clone)]
 pub struct ExecutionContext {
     hooks: Option<HookRegistry>,
@@ -76,12 +86,8 @@ pub struct ExecutionContext {
     progress_tx: Option<ProgressSender>,
     cancel_token: Option<CancellationToken>,
     /// Type-keyed heterogeneous storage for feature-gated and user-provided
-    /// context — filesystem/shell security (`SecurityExtension`), HITL
-    /// handler (`HumanInteractionExtension`), workspace root, git state,
-    /// telemetry sinks, tenant ids, …
-    ///
-    /// Phase G-4 moved the Layer 2a/2b filesystem/shell security handle
-    /// here (from a feature-gated struct field) so `ExecutionContext`'s
+    /// context values. The Layer 2a/2b filesystem/shell security handle
+    /// lives here (from a feature-gated struct field) so `ExecutionContext`'s
     /// byte layout is feature-invariant. See [`crate::common::Extensions`]
     /// and `docs/architecture/layering.md` §4 for the rationale.
     extensions: Extensions,

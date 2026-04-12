@@ -40,6 +40,11 @@ Findings already rejected with evidence or merged via PR. Design reviews must ch
   - Only real violation: `ProviderErrorKind` at `src/lib.rs:388` (1 item, fixed in Phase 0-2)
 - **Lesson**: Before proposing "missing attribute X on enum Y", grep the enum definition directly. Don't trust cross-session memory of enum attribute state.
 
+## F-rej-010 · "authorization/rules.rs + dsl.rs is a dual rule source — merge"
+- **Origin**: Round-3 analysis (task 2-2)
+- **Refutation**: `rules.rs` (738 LOC) is the policy **evaluator** (`ToolPolicy → PermissionDecision`). `dsl.rs` (646 LOC) is the DSL **parser** (`string → PermissionRuleSyntax`). They are a pipeline (`dsl parses → rules evaluates`), not a dual system. Merging them would violate single-responsibility.
+- **Lesson**: Two files touching the same domain is not automatically a dual system. Check whether they have distinct responsibilities in a pipeline before proposing a merge.
+
 ## F-rej-009 · "Demote GraphNode, NodeKind, ReplayInput from public API"
 - **Origin**: Round-3 analysis
 - **Refutation**: `SessionGraph::nodes()`, `children_of()`, `replay_slice()`, `branch_nodes()`, `current_branch_nodes()` all return `&GraphNode`/`Vec<&GraphNode>`. `SessionManager::replay_input()` returns `ReplayInput`. `Agent::execute_with_replay()` accepts `ReplayInput`. `ExportNode` embeds `NodeKind`. These are **legitimate public API** used for graph introspection.

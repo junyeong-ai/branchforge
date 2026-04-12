@@ -206,12 +206,4 @@ mod tests {
         assert_eq!(router.handler.as_ref().unwrap().name(), "test_h");
     }
 
-    // Suppress unused-import warnings when the ctx helper is not
-    // used — kept for future integration tests that run against
-    // rmcp's in-memory test transport.
-    #[allow(dead_code)]
-    fn _exercise_request_builders() {
-        let _ = form_request("please fill this form");
-        let _ = url_request("open this URL", "https://example.com/ely");
-    }
 }
