@@ -585,7 +585,14 @@ fn validation_error_to_error(err: crate::client::schema::SchemaValidationError) 
     }
 }
 
-fn validate_composition(codec: &dyn ModelCodec, transport: &dyn ModelTransport) -> Result<()> {
+/// Validate a `(codec, transport)` pairing against the 3-axis composition
+/// rules: pinning, codec support, and unary invocation capability.
+///
+/// Returns [`Error::InvalidComposition`] when a rule is violated. This is
+/// the single source of truth for composition validity — both
+/// [`ProviderClient::new`] and the integration test matrix call it, so
+/// adding a new composition rule cannot regress via a parallel check.
+pub fn validate_composition(codec: &dyn ModelCodec, transport: &dyn ModelTransport) -> Result<()> {
     if let Some(pinned) = codec.pinned_transport()
         && pinned != transport.id()
     {

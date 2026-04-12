@@ -34,6 +34,7 @@ use std::time::Duration;
 pub use fallback::{FallbackConfig, FallbackTrigger};
 pub use llm_call::{CircuitBrokenClient, FallingBackClient, LlmCall, RetryingClient};
 pub use mock::{MockLlmCall, MockResponse};
+pub use provider_client::validate_composition;
 // Phase H-1: `EnvLookup` / `SystemEnv` now live in `crate::common::env`;
 // re-exported here so existing consumers of `branchforge::client::EnvLookup`
 // keep working without an import path change.

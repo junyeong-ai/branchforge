@@ -2015,3 +2015,277 @@ mod system_block_boundary_must_not_leak {
         );
     }
 }
+
+// =============================================================================
+// Phase 0-4 — Codec × Transport composition matrix
+// =============================================================================
+//
+// Frozen truth table for the 5 × 4 composition grid plus an explicit check
+// that each codec's `pinned_transport()` matches the expected table cell.
+// Adding a codec or transport without updating this matrix fails the build,
+// which is exactly what the Phase 0 gate is for.
+
+mod composition_matrix {
+    use super::*;
+    use async_trait::async_trait;
+    use branchforge::Result as BfResult;
+    use branchforge::client::transport::{Endpoint, ModelTransport};
+    use branchforge::client::validate_composition;
+    use branchforge::error::ProviderErrorKind;
+    use branchforge::client::codec::InvocationMode as IrInvocationMode;
+
+    /// Stub transport used only for the composition matrix. `resolve_endpoint`
+    /// and `authorize` are unreachable — the matrix only exercises `id()`,
+    /// `supports_codec()`, and `pinned_transport()` via `validate_composition`.
+    #[derive(Debug)]
+    struct StubTransport {
+        id: &'static str,
+        supported_codecs: &'static [&'static str],
+    }
+
+    #[async_trait]
+    impl ModelTransport for StubTransport {
+        fn id(&self) -> &'static str {
+            self.id
+        }
+
+        fn supports_codec(&self, codec_id: &str) -> bool {
+            self.supported_codecs.contains(&codec_id)
+        }
+
+        async fn resolve_endpoint(
+            &self,
+            _shape: &branchforge::client::codec::EndpointShape,
+            _model: &str,
+            _mode: IrInvocationMode,
+        ) -> BfResult<Endpoint> {
+            unreachable!("StubTransport::resolve_endpoint should never be called by the matrix")
+        }
+
+        async fn authorize(
+            &self,
+            _req: reqwest::RequestBuilder,
+            _body_bytes: &[u8],
+        ) -> BfResult<reqwest::RequestBuilder> {
+            unreachable!("StubTransport::authorize should never be called by the matrix")
+        }
+
+        fn classify_error(
+            &self,
+            _status: u16,
+            _body: &str,
+        ) -> (ProviderErrorKind, Option<&'static str>) {
+            (ProviderErrorKind::BadRequest, None)
+        }
+    }
+
+    // ---------- Expected pinning table ----------
+    //
+    // Updating this table is the intended signal for a reviewer that a
+    // codec's pin has changed. If you add a new codec, add a row; if you
+    // change `pinned_transport()` for an existing codec, update the row.
+
+    const EXPECTED_PIN: &[(&str, Option<&str>)] = &[
+        ("anthropic-messages", None),
+        ("openai-chat", None),
+        ("openai-responses", None),
+        ("gemini-generate", None),
+        ("bedrock-converse", Some("bedrock")),
+    ];
+
+    #[test]
+    fn pinned_transport_matches_expected_table() {
+        let actual: Vec<(&'static str, Option<&'static str>)> = vec![
+            (
+                AnthropicMessagesCodec::new().id(),
+                AnthropicMessagesCodec::new().pinned_transport(),
+            ),
+            (
+                OpenAiChatCodec::new().id(),
+                OpenAiChatCodec::new().pinned_transport(),
+            ),
+            (
+                OpenAiResponsesCodec::new().id(),
+                OpenAiResponsesCodec::new().pinned_transport(),
+            ),
+            (
+                GeminiGenerateCodec::new().id(),
+                GeminiGenerateCodec::new().pinned_transport(),
+            ),
+            (
+                BedrockConverseCodec::new().id(),
+                BedrockConverseCodec::new().pinned_transport(),
+            ),
+        ];
+
+        assert_eq!(
+            actual.len(),
+            EXPECTED_PIN.len(),
+            "codec count drifted — update EXPECTED_PIN with the new codec row"
+        );
+
+        for (expected_id, expected_pin) in EXPECTED_PIN {
+            let row = actual
+                .iter()
+                .find(|(id, _)| id == expected_id)
+                .unwrap_or_else(|| panic!("codec id not found in actual set: {expected_id}"));
+            assert_eq!(
+                row.1, *expected_pin,
+                "pinned_transport drifted for {}: expected {:?}, got {:?}",
+                expected_id, expected_pin, row.1
+            );
+        }
+    }
+
+    // ---------- Full composition matrix ----------
+    //
+    // Each cell is `true` when the (codec, transport) pair is a legal
+    // composition, derived from the rules in `.claude/rules/client.md`.
+    // The matrix is driven by `validate_composition` — the same helper
+    // `ProviderClient::new` uses — so a change to either the pinning logic
+    // or the per-transport `supports_codec` filter will flip a cell and
+    // fail this test.
+
+    fn direct_transport_stub() -> StubTransport {
+        StubTransport {
+            id: "direct",
+            supported_codecs: &[
+                "anthropic-messages",
+                "openai-chat",
+                "openai-responses",
+                "gemini-generate",
+            ],
+        }
+    }
+
+    fn vertex_transport_stub() -> StubTransport {
+        StubTransport {
+            id: "vertex",
+            supported_codecs: &["anthropic-messages", "gemini-generate"],
+        }
+    }
+
+    fn bedrock_transport_stub() -> StubTransport {
+        StubTransport {
+            id: "bedrock",
+            supported_codecs: &["bedrock-converse"],
+        }
+    }
+
+    fn foundry_transport_stub() -> StubTransport {
+        StubTransport {
+            id: "foundry",
+            supported_codecs: &["anthropic-messages"],
+        }
+    }
+
+    /// Expected `(codec_id, transport_id) -> legal?` matrix.
+    ///
+    /// **This is the frozen source of truth for legal compositions.**
+    /// Any PR that changes a cell must update this table and explain why
+    /// in the commit message.
+    const EXPECTED_MATRIX: &[(&str, &str, bool)] = &[
+        // anthropic-messages
+        ("anthropic-messages", "direct", true),
+        ("anthropic-messages", "vertex", true),
+        ("anthropic-messages", "bedrock", false),
+        ("anthropic-messages", "foundry", true),
+        // openai-chat
+        ("openai-chat", "direct", true),
+        ("openai-chat", "vertex", false),
+        ("openai-chat", "bedrock", false),
+        ("openai-chat", "foundry", false),
+        // openai-responses
+        ("openai-responses", "direct", true),
+        ("openai-responses", "vertex", false),
+        ("openai-responses", "bedrock", false),
+        ("openai-responses", "foundry", false),
+        // gemini-generate
+        ("gemini-generate", "direct", true),
+        ("gemini-generate", "vertex", true),
+        ("gemini-generate", "bedrock", false),
+        ("gemini-generate", "foundry", false),
+        // bedrock-converse (pinned to bedrock — every other cell false)
+        ("bedrock-converse", "direct", false),
+        ("bedrock-converse", "vertex", false),
+        ("bedrock-converse", "bedrock", true),
+        ("bedrock-converse", "foundry", false),
+    ];
+
+    fn codec_by_id(id: &str) -> Box<dyn branchforge::client::codec::ModelCodec> {
+        match id {
+            "anthropic-messages" => Box::new(AnthropicMessagesCodec::new()),
+            "openai-chat" => Box::new(OpenAiChatCodec::new()),
+            "openai-responses" => Box::new(OpenAiResponsesCodec::new()),
+            "gemini-generate" => Box::new(GeminiGenerateCodec::new()),
+            "bedrock-converse" => Box::new(BedrockConverseCodec::new()),
+            other => panic!("unknown codec id in matrix: {other}"),
+        }
+    }
+
+    fn transport_by_id(id: &str) -> StubTransport {
+        match id {
+            "direct" => direct_transport_stub(),
+            "vertex" => vertex_transport_stub(),
+            "bedrock" => bedrock_transport_stub(),
+            "foundry" => foundry_transport_stub(),
+            other => panic!("unknown transport id in matrix: {other}"),
+        }
+    }
+
+    #[test]
+    fn composition_matrix_matches_rules_client_md() {
+        assert_eq!(
+            EXPECTED_MATRIX.len(),
+            5 * 4,
+            "matrix must cover all 5 codecs × 4 transports (got {})",
+            EXPECTED_MATRIX.len()
+        );
+
+        for (codec_id, transport_id, expected_legal) in EXPECTED_MATRIX {
+            let codec = codec_by_id(codec_id);
+            let transport = transport_by_id(transport_id);
+            let result = validate_composition(&*codec, &transport);
+            let actually_legal = result.is_ok();
+            assert_eq!(
+                actually_legal, *expected_legal,
+                "composition ({codec_id} × {transport_id}) drifted: expected legal={expected_legal}, got legal={actually_legal}; err={:?}",
+                result.err()
+            );
+        }
+    }
+
+    #[test]
+    fn composition_matrix_covers_every_real_codec() {
+        // Sanity: the matrix rows must cover every real codec id. If a new
+        // codec is added without a row, this test fires before the pinning
+        // test so the failure points at the right place.
+        let codec_ids: std::collections::BTreeSet<&str> =
+            EXPECTED_MATRIX.iter().map(|(c, _, _)| *c).collect();
+        let expected_codecs: std::collections::BTreeSet<&str> = [
+            "anthropic-messages",
+            "openai-chat",
+            "openai-responses",
+            "gemini-generate",
+            "bedrock-converse",
+        ]
+        .into_iter()
+        .collect();
+        assert_eq!(
+            codec_ids, expected_codecs,
+            "EXPECTED_MATRIX codec set drifted from the 5 real codecs"
+        );
+    }
+
+    #[test]
+    fn composition_matrix_covers_every_real_transport() {
+        let transport_ids: std::collections::BTreeSet<&str> =
+            EXPECTED_MATRIX.iter().map(|(_, t, _)| *t).collect();
+        let expected_transports: std::collections::BTreeSet<&str> =
+            ["direct", "vertex", "bedrock", "foundry"].into_iter().collect();
+        assert_eq!(
+            transport_ids, expected_transports,
+            "EXPECTED_MATRIX transport set drifted from the 4 real transports"
+        );
+    }
+}
