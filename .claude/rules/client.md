@@ -8,7 +8,7 @@ paths:
 ## Provider stack (3-axis)
 
 - **Never collapse** `ModelCodec` × `ModelTransport` × `EndpointShape`. The orthogonality is what makes `vertex-gemini`, `vertex-anthropic`, `bedrock-converse`, and `foundry-anthropic` fall out as free compositions.
-- `ProviderClient::new(codec, transport)` validates the pairing via `codec.pinned_transport()` and `transport.supports_codec()`. Invalid pairings return `Error::InvalidComposition` at construction — never at send time.
+- `ProviderClient::new(codec, transport, auth_preamble)` validates the pairing via `codec.pinned_transport()` and `transport.supports_codec()`. Invalid pairings return `Error::InvalidComposition` at construction — never at send time. The optional `auth_preamble` is auto-injected as the first system block on every request.
 - Codecs are **pure**: no HTTP, no auth, no state except `StreamDecodeState`. Transports are **stateful**: auth caches, token refresh, TLS client.
 - `EndpointShape` is a `const`-friendly descriptor each codec exposes. Transports consume it via `resolve_endpoint(shape, model, mode) -> Endpoint`. The codec never knows the URL; the transport never knows the body shape.
 
@@ -39,10 +39,10 @@ paths:
 - Decorator wrappers compose around any `Arc<dyn LlmCall>`: `RetryingClient`, `FallingBackClient`, `CircuitBrokenClient`.
 - There is no monolithic `Client` type — the legacy adapter layer was removed in the Phase 1b refactor.
 
-## Preset-based bootstrapping
+## ProfileRegistry-based bootstrapping
 
-- `Preset` enum maps names (`anthropic`, `openai`, `openai-chat`, `gemini`, `vertex-gemini`, `vertex-anthropic`, `bedrock`, `foundry-anthropic`) to `(codec, transport)` pairs with `build_from_env()` factories. Cloud presets are `cfg`-gated behind their feature flags.
-- `BRANCHFORGE_PROVIDER` env var selects the preset at runtime; `Preset::from_id(&name)` is the programmatic entry point.
+- `ProfileRegistry` maps profile ids (`anthropic`, `openai`, `openai-chat`, `gemini`, `vertex-gemini`, `vertex-anthropic`, `bedrock`, `foundry-anthropic`, plus OpenAI-compatible third-party) to `(codec, transport_builder, credential_hint)` recipes. Cloud profiles are `cfg`-gated behind their feature flags. User-registered profiles are accepted at runtime via `registry.register(ProviderProfile { ... })`.
+- `BRANCHFORGE_PROVIDER` env var selects the profile at runtime; `ProfileRegistry::build(&name)` is the programmatic entry point.
 
 ## Environment variables
 

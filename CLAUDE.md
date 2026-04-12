@@ -52,12 +52,12 @@ Module-specific rules in `.claude/rules/` auto-load when editing files matching 
 | File | Scope |
 | :--- | :--- |
 | `architecture.md` | 10 invariants — loads on all `src/**` edits |
-| `client.md` | Provider stack, codecs, transports, presets |
+| `client.md` | Provider stack, codecs, transports, ProfileRegistry |
 | `schema.md` | `SchemaPolicy` pipeline, walker, cycle detection |
 | `ir.md` | Provider-neutral IR types, `JsonSchemaSpec`, warnings |
 | `graph-session.md` | `SessionGraph` SSoT, event replay, fork semantics |
 | `tools.md` | `Tool` trait, `ExecutionContext`, naming, cancellation |
-| `auth.md` | `CredentialProvider`, OAuth refresh, token storage |
+| `auth.md` | `CredentialProvider`, OAuth refresh, token storage, preamble SSoT |
 | `security.md` | `SecureFs`, `BashAnalyzer`, sandbox, resource limits |
 | `naming.md` | Type-suffix taxonomy, FSM terminology, enum evolution |
 | `events.md` | EventBus fire-and-forget contract, StreamAggregator |

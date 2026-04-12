@@ -219,7 +219,7 @@ See [Tools](docs/tools.md) for details.
 
 ```bash
 cargo build --all-features                       # compilation
-cargo test --all-features                        # 1967+ tests
+cargo test --all-features                        # unit + integration
 cargo clippy --all-features -- -D warnings       # lint
 cargo fmt --all -- --check                       # format
 RUSTDOCFLAGS="-D warnings" cargo doc --all-features --no-deps  # docs
