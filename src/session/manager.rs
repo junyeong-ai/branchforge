@@ -689,13 +689,11 @@ impl SessionManager {
     }
 
     pub async fn complete(&self, id: &SessionId) -> SessionResult<()> {
-        self.persistence
-            .set_state(id, SessionState::Completed)
-            .await
+        self.persistence.finalize(id, SessionState::Completed).await
     }
 
     pub async fn set_error(&self, id: &SessionId) -> SessionResult<()> {
-        self.persistence.set_state(id, SessionState::Failed).await
+        self.persistence.finalize(id, SessionState::Failed).await
     }
 
     pub async fn cleanup_expired(&self) -> SessionResult<usize> {
@@ -1096,7 +1094,7 @@ impl ScopedSessionManager {
         self.manager.get_scoped(id, &self.scope).await?;
         self.manager
             .persistence
-            .set_state(id, SessionState::Completed)
+            .finalize(id, SessionState::Completed)
             .await
     }
 
@@ -1104,7 +1102,7 @@ impl ScopedSessionManager {
         self.manager.get_scoped(id, &self.scope).await?;
         self.manager
             .persistence
-            .set_state(id, SessionState::Failed)
+            .finalize(id, SessionState::Failed)
             .await
     }
 }

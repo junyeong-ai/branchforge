@@ -149,9 +149,22 @@ impl ToolExecution {
     }
 }
 
+/// Lifecycle state of a [`Plan`]. Forward-only FSM with three
+/// terminal outcomes; mutation goes through
+/// [`Plan::transition`] so illegal moves are rejected at the type
+/// level.
+///
+/// ```text
+/// Draft ──▶ Approved ──▶ Executing ──┬─▶ Completed
+///                                    ├─▶ Failed
+///                                    └─▶ Cancelled
+/// ```
+///
+/// `Failed` and `Cancelled` are also reachable from any non-terminal
+/// state for hard-abort and user-cancel lanes.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum PlanStatus {
+pub enum PlanState {
     #[default]
     Draft,
     Approved,
@@ -161,7 +174,7 @@ pub enum PlanStatus {
     Cancelled,
 }
 
-impl PlanStatus {
+impl PlanState {
     pub fn is_terminal(&self) -> bool {
         matches!(self, Self::Completed | Self::Failed | Self::Cancelled)
     }
@@ -170,17 +183,59 @@ impl PlanStatus {
         matches!(self, Self::Approved)
     }
 
-    /// Parse from string with legacy alias support.
-    pub fn from_str_lenient(s: &str) -> Self {
-        match s.to_lowercase().as_str() {
-            "approved" => Self::Approved,
-            "executing" | "inprogress" | "in_progress" => Self::Executing,
-            "completed" => Self::Completed,
-            "cancelled" | "canceled" => Self::Cancelled,
-            "failed" => Self::Failed,
-            _ => Self::Draft,
+    /// `true` if moving from `self` to `next` is a legal plan
+    /// transition. The linear happy path is
+    /// `Draft → Approved → Executing → Completed`; `Failed` and
+    /// `Cancelled` are reachable from any non-terminal state.
+    /// Self-loops and backward moves are rejected.
+    pub fn can_transition_to(self, next: Self) -> bool {
+        if self.is_terminal() || self == next {
+            return false;
+        }
+        if matches!(next, Self::Failed | Self::Cancelled) {
+            return true;
+        }
+        matches!(
+            (self, next),
+            (Self::Draft, Self::Approved)
+                | (Self::Approved, Self::Executing)
+                | (Self::Executing, Self::Completed)
+        )
+    }
+
+    pub fn transition_to(self, next: Self) -> Result<Self, PlanTransitionError> {
+        if self.can_transition_to(next) {
+            Ok(next)
+        } else {
+            Err(PlanTransitionError {
+                from: self,
+                to: next,
+            })
         }
     }
+}
+
+impl std::fmt::Display for PlanState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let s = match self {
+            Self::Draft => "draft",
+            Self::Approved => "approved",
+            Self::Executing => "executing",
+            Self::Completed => "completed",
+            Self::Failed => "failed",
+            Self::Cancelled => "cancelled",
+        };
+        f.write_str(s)
+    }
+}
+
+/// Returned when [`PlanState::transition_to`] is called with an
+/// illegal target.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
+#[error("illegal plan transition {from} → {to}")]
+pub struct PlanTransitionError {
+    pub from: PlanState,
+    pub to: PlanState,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -189,7 +244,7 @@ pub struct Plan {
     pub session_id: SessionId,
     pub name: Option<String>,
     pub content: String,
-    pub status: PlanStatus,
+    pub(crate) state: PlanState,
     pub error: Option<String>,
     pub created_at: DateTime<Utc>,
     pub approved_at: Option<DateTime<Utc>>,
@@ -204,13 +259,19 @@ impl Plan {
             session_id,
             name: None,
             content: String::new(),
-            status: PlanStatus::Draft,
+            state: PlanState::Draft,
             error: None,
             created_at: Utc::now(),
             approved_at: None,
             started_at: None,
             completed_at: None,
         }
+    }
+
+    /// Current plan state. Read-only — mutation goes through
+    /// [`Self::transition`].
+    pub fn state(&self) -> PlanState {
+        self.state
     }
 
     pub fn name(mut self, name: impl Into<String>) -> Self {
@@ -223,51 +284,39 @@ impl Plan {
         self
     }
 
-    pub fn approve(&mut self) {
-        self.status = PlanStatus::Approved;
-        self.approved_at = Some(Utc::now());
+    /// Drive the plan FSM to `next` with full validation. Returns
+    /// [`PlanTransitionError`] if the move is illegal.
+    pub fn transition(&mut self, next: PlanState) -> Result<(), PlanTransitionError> {
+        self.state = self.state.transition_to(next)?;
+        let now = Utc::now();
+        match next {
+            PlanState::Approved => self.approved_at = Some(now),
+            PlanState::Executing => self.started_at = Some(now),
+            PlanState::Completed | PlanState::Cancelled | PlanState::Failed => {
+                self.completed_at = Some(now)
+            }
+            PlanState::Draft => {}
+        }
+        Ok(())
     }
 
-    pub fn start_execution(&mut self) {
-        self.status = PlanStatus::Executing;
-        self.started_at = Some(Utc::now());
-    }
-
-    pub fn complete(&mut self) {
-        self.status = PlanStatus::Completed;
-        self.completed_at = Some(Utc::now());
-    }
-
-    pub fn fail(&mut self, error: impl Into<String>) {
-        self.status = PlanStatus::Failed;
-        self.completed_at = Some(Utc::now());
+    /// Record an error message on the plan. Call before / alongside
+    /// `transition(PlanState::Failed)` when the plan fails.
+    pub fn set_error(&mut self, error: impl Into<String>) {
         self.error = Some(error.into());
-    }
-
-    pub fn cancel(&mut self) {
-        self.status = PlanStatus::Cancelled;
-        self.completed_at = Some(Utc::now());
     }
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema,
+)]
+#[non_exhaustive]
 #[serde(rename_all = "snake_case")]
 pub enum TodoStatus {
     #[default]
     Pending,
     InProgress,
     Completed,
-}
-
-impl TodoStatus {
-    /// Parse from string with legacy alias support.
-    pub fn from_str_lenient(s: &str) -> Self {
-        match s.to_lowercase().as_str() {
-            "in_progress" | "inprogress" => Self::InProgress,
-            "completed" | "done" => Self::Completed,
-            _ => Self::Pending,
-        }
-    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -326,6 +375,7 @@ impl TodoItem {
     }
 }
 
+#[non_exhaustive]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CompactTrigger {
@@ -333,17 +383,6 @@ pub enum CompactTrigger {
     Manual,
     Auto,
     Threshold,
-}
-
-impl CompactTrigger {
-    /// Parse from string with legacy alias support.
-    pub fn from_str_lenient(s: &str) -> Self {
-        match s.to_lowercase().as_str() {
-            "auto" | "automatic" => Self::Auto,
-            "threshold" => Self::Threshold,
-            _ => Self::Manual,
-        }
-    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -412,20 +451,86 @@ impl CompactRecord {
     }
 }
 
+#[non_exhaustive]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum QueueOperation {
     Enqueue,
 }
 
+/// Lifecycle state of a [`QueueItem`]. Forward-only FSM with two
+/// terminal outcomes; mutation goes through [`QueueItem::transition`]
+/// so illegal moves are rejected at the type level.
+///
+/// ```text
+/// Pending ──▶ Processing ──┬─▶ Completed
+///                          └─▶ Cancelled
+/// ```
+///
+/// `Cancelled` is also reachable directly from `Pending` for
+/// user-cancel-before-start semantics.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum QueueStatus {
+pub enum QueueItemState {
     #[default]
     Pending,
     Processing,
     Completed,
     Cancelled,
+}
+
+impl QueueItemState {
+    pub fn is_terminal(&self) -> bool {
+        matches!(self, Self::Completed | Self::Cancelled)
+    }
+
+    /// `true` if moving from `self` to `next` is a legal transition.
+    /// Legal: `Pending → Processing`, `Processing → Completed`,
+    /// `{Pending,Processing} → Cancelled`.
+    pub fn can_transition_to(self, next: Self) -> bool {
+        if self.is_terminal() || self == next {
+            return false;
+        }
+        if matches!(next, Self::Cancelled) {
+            return true;
+        }
+        matches!(
+            (self, next),
+            (Self::Pending, Self::Processing) | (Self::Processing, Self::Completed)
+        )
+    }
+
+    pub fn transition_to(self, next: Self) -> Result<Self, QueueItemTransitionError> {
+        if self.can_transition_to(next) {
+            Ok(next)
+        } else {
+            Err(QueueItemTransitionError {
+                from: self,
+                to: next,
+            })
+        }
+    }
+}
+
+impl std::fmt::Display for QueueItemState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let s = match self {
+            Self::Pending => "pending",
+            Self::Processing => "processing",
+            Self::Completed => "completed",
+            Self::Cancelled => "cancelled",
+        };
+        f.write_str(s)
+    }
+}
+
+/// Returned when [`QueueItemState::transition_to`] is called with an
+/// illegal target.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
+#[error("illegal queue item transition {from} → {to}")]
+pub struct QueueItemTransitionError {
+    pub from: QueueItemState,
+    pub to: QueueItemState,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -435,7 +540,7 @@ pub struct QueueItem {
     pub operation: QueueOperation,
     pub content: String,
     pub priority: i32,
-    pub status: QueueStatus,
+    pub(crate) state: QueueItemState,
     pub created_at: DateTime<Utc>,
     pub processed_at: Option<DateTime<Utc>>,
 }
@@ -448,10 +553,16 @@ impl QueueItem {
             operation: QueueOperation::Enqueue,
             content: content.into(),
             priority: 0,
-            status: QueueStatus::Pending,
+            state: QueueItemState::Pending,
             created_at: Utc::now(),
             processed_at: None,
         }
+    }
+
+    /// Current state. Read-only — mutation goes through
+    /// [`Self::transition`].
+    pub fn state(&self) -> QueueItemState {
+        self.state
     }
 
     pub fn priority(mut self, priority: i32) -> Self {
@@ -459,18 +570,13 @@ impl QueueItem {
         self
     }
 
-    pub fn start_processing(&mut self) {
-        self.status = QueueStatus::Processing;
-    }
-
-    pub fn complete(&mut self) {
-        self.status = QueueStatus::Completed;
-        self.processed_at = Some(Utc::now());
-    }
-
-    pub fn cancel(&mut self) {
-        self.status = QueueStatus::Cancelled;
-        self.processed_at = Some(Utc::now());
+    /// Drive the FSM to `next` with full validation.
+    pub fn transition(&mut self, next: QueueItemState) -> Result<(), QueueItemTransitionError> {
+        self.state = self.state.transition_to(next)?;
+        if next.is_terminal() {
+            self.processed_at = Some(Utc::now());
+        }
+        Ok(())
     }
 }
 
@@ -574,18 +680,18 @@ mod tests {
             .name("Implement auth")
             .content("1. Create user model\n2. Add endpoints");
 
-        assert_eq!(plan.status, PlanStatus::Draft);
+        assert_eq!(plan.state(), PlanState::Draft);
 
-        plan.approve();
-        assert_eq!(plan.status, PlanStatus::Approved);
+        plan.transition(PlanState::Approved).unwrap();
+        assert_eq!(plan.state(), PlanState::Approved);
         assert!(plan.approved_at.is_some());
 
-        plan.start_execution();
-        assert_eq!(plan.status, PlanStatus::Executing);
+        plan.transition(PlanState::Executing).unwrap();
+        assert_eq!(plan.state(), PlanState::Executing);
 
-        plan.complete();
-        assert_eq!(plan.status, PlanStatus::Completed);
-        assert!(plan.status.is_terminal());
+        plan.transition(PlanState::Completed).unwrap();
+        assert_eq!(plan.state(), PlanState::Completed);
+        assert!(plan.state().is_terminal());
     }
 
     #[test]
@@ -626,15 +732,41 @@ mod tests {
         let session_id = SessionId::new();
         let mut item = QueueItem::enqueue(session_id, "Process this").priority(10);
 
-        assert_eq!(item.status, QueueStatus::Pending);
+        assert_eq!(item.state(), QueueItemState::Pending);
         assert_eq!(item.priority, 10);
 
-        item.start_processing();
-        assert_eq!(item.status, QueueStatus::Processing);
+        item.transition(QueueItemState::Processing).unwrap();
+        assert_eq!(item.state(), QueueItemState::Processing);
 
-        item.complete();
-        assert_eq!(item.status, QueueStatus::Completed);
+        item.transition(QueueItemState::Completed).unwrap();
+        assert_eq!(item.state(), QueueItemState::Completed);
         assert!(item.processed_at.is_some());
+    }
+
+    #[test]
+    fn test_queue_item_fsm_rejects_illegal_transitions() {
+        let session_id = SessionId::new();
+        let mut item = QueueItem::enqueue(session_id, "Process");
+        // Pending → Completed is illegal (must pass Processing)
+        assert!(item.transition(QueueItemState::Completed).is_err());
+        // Pending → Cancelled is legal (user-cancel before start)
+        item.transition(QueueItemState::Cancelled).unwrap();
+        // Terminal rejects everything
+        assert!(item.transition(QueueItemState::Processing).is_err());
+    }
+
+    #[test]
+    fn test_plan_fsm_rejects_illegal_transitions() {
+        let session_id = SessionId::new();
+        let mut plan = Plan::new(session_id);
+        // Draft → Executing is illegal (must pass Approved)
+        assert!(plan.transition(PlanState::Executing).is_err());
+        plan.transition(PlanState::Approved).unwrap();
+        plan.transition(PlanState::Executing).unwrap();
+        plan.transition(PlanState::Completed).unwrap();
+        assert!(plan.state().is_terminal());
+        // Terminal rejects everything
+        assert!(plan.transition(PlanState::Cancelled).is_err());
     }
 
     #[test]
@@ -650,60 +782,5 @@ mod tests {
 
         assert!((stats.tool_success_rate() - 0.8).abs() < 0.001);
         assert_eq!(stats.total_tokens(), 1500);
-    }
-
-    #[test]
-    fn test_status_from_str_lenient() {
-        // TodoStatus
-        assert_eq!(
-            TodoStatus::from_str_lenient("in_progress"),
-            TodoStatus::InProgress
-        );
-        assert_eq!(
-            TodoStatus::from_str_lenient("inprogress"),
-            TodoStatus::InProgress
-        );
-        assert_eq!(
-            TodoStatus::from_str_lenient("completed"),
-            TodoStatus::Completed
-        );
-        assert_eq!(TodoStatus::from_str_lenient("unknown"), TodoStatus::Pending);
-
-        // PlanStatus
-        assert_eq!(
-            PlanStatus::from_str_lenient("approved"),
-            PlanStatus::Approved
-        );
-        assert_eq!(
-            PlanStatus::from_str_lenient("executing"),
-            PlanStatus::Executing
-        );
-        assert_eq!(
-            PlanStatus::from_str_lenient("inprogress"),
-            PlanStatus::Executing
-        );
-        assert_eq!(
-            PlanStatus::from_str_lenient("cancelled"),
-            PlanStatus::Cancelled
-        );
-        assert_eq!(PlanStatus::from_str_lenient("unknown"), PlanStatus::Draft);
-
-        // CompactTrigger
-        assert_eq!(
-            CompactTrigger::from_str_lenient("auto"),
-            CompactTrigger::Auto
-        );
-        assert_eq!(
-            CompactTrigger::from_str_lenient("automatic"),
-            CompactTrigger::Auto
-        );
-        assert_eq!(
-            CompactTrigger::from_str_lenient("threshold"),
-            CompactTrigger::Threshold
-        );
-        assert_eq!(
-            CompactTrigger::from_str_lenient("unknown"),
-            CompactTrigger::Manual
-        );
     }
 }

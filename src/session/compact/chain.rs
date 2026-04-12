@@ -43,7 +43,7 @@ impl CompactionChain {
         if !self.circuit_breaker.allow_request() {
             debug!("Compaction circuit breaker is open, skipping");
             return Ok(CompactResult::Skipped {
-                reason: "circuit breaker open".into(),
+                reason: crate::session::compact::CompactSkipReason::CircuitBreakerOpen,
             });
         }
 

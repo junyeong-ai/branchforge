@@ -35,12 +35,13 @@ use tokio::sync::{Mutex, RwLock};
 use uuid::Uuid;
 
 use super::archive::verify_restored_session_roundtrip;
+use super::persistence::{SessionMutationFn, validate_session_graph};
 use super::state::{
     MessageId, Session, SessionConfig, SessionId, SessionMessage, SessionType,
     build_graph_provenance, graph_node_id_for_message, graph_node_kind_for_message,
     graph_parent_node_id_for_message, graph_payload_for_message, graph_tags_for_message,
 };
-use super::types::{CompactRecord, Plan, QueueItem, QueueOperation, QueueStatus, TodoItem};
+use super::types::{CompactRecord, Plan, QueueItem, QueueItemState, QueueOperation, TodoItem};
 use super::{Persistence, SessionError, SessionResult};
 use crate::graph::{GraphEvent, GraphMaterializer, GraphValidator, SessionGraph};
 use crate::ir::Usage as IrUsage;
@@ -110,6 +111,7 @@ fn parse_auxiliary_uuid(session_id: &SessionId, entry_type: &str, raw_id: &str) 
 // ============================================================================
 
 /// Sync mode for file operations.
+#[non_exhaustive]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum SyncMode {
     /// No explicit sync (OS buffering only).
@@ -206,9 +208,18 @@ impl JsonlConfigBuilder {
 // ============================================================================
 
 /// Graph-first JSONL entry types for local session persistence.
+#[non_exhaustive]
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum JsonlEntry {
+    /// Phase D F-1: schema-version preamble. Written as the **first**
+    /// line of every session file on create so subsequent reads can
+    /// validate that the binary and the file agree on layout.
+    /// Files written before F-1 have no header; the loader treats
+    /// a missing header as
+    /// [`crate::session::SessionSchemaVersion::MIN_SUPPORTED`] for forward
+    /// compatibility during the roll-out window.
+    SchemaHeader(SchemaHeaderEntry),
     GraphEvent(GraphEventEntry),
     QueueReset(ResetEntry),
     QueueOperation(QueueOperationEntry),
@@ -218,6 +229,33 @@ pub enum JsonlEntry {
     PlanReset(ResetEntry),
     Plan(PlanEntry),
     Compact(CompactEntry),
+}
+
+/// Schema-version preamble written as the first line of every
+/// JSONL session file. See [`JsonlEntry::SchemaHeader`] for the
+/// rationale.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SchemaHeaderEntry {
+    pub version: crate::session::SessionSchemaVersion,
+    /// Human-readable writer label, e.g. `"branchforge 0.9.0"`.
+    /// Purely informational — loaders must not depend on its
+    /// format.
+    #[serde(rename = "writtenBy", default, skip_serializing_if = "Option::is_none")]
+    pub written_by: Option<String>,
+    #[serde(rename = "writtenAt")]
+    pub written_at: DateTime<Utc>,
+}
+
+impl SchemaHeaderEntry {
+    /// Build a header stamped at `now` with the version the
+    /// current binary writes.
+    pub fn current() -> Self {
+        Self {
+            version: crate::session::SessionSchemaVersion::CURRENT,
+            written_by: Some(format!("branchforge {}", env!("CARGO_PKG_VERSION"))),
+            written_at: Utc::now(),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -483,6 +521,7 @@ fn read_entries_sync(path: &Path) -> SessionResult<Vec<JsonlEntry>> {
 
     let reader = BufReader::with_capacity(64 * 1024, file);
     let mut entries = Vec::with_capacity(128);
+    let mut header_version: Option<crate::session::SessionSchemaVersion> = None;
 
     for (line_num, line) in reader.lines().enumerate() {
         let line = line.map_err(|e| SessionError::Storage {
@@ -494,6 +533,40 @@ fn read_entries_sync(path: &Path) -> SessionResult<Vec<JsonlEntry>> {
         }
 
         match serde_json::from_str::<JsonlEntry>(&line) {
+            Ok(JsonlEntry::SchemaHeader(header)) => {
+                // Phase D F-1: the first line of every
+                // newly-written session file is a SchemaHeader.
+                // Validate it here so malformed payloads never
+                // enter the deserialize loop below. We only honor
+                // the first header seen — duplicates would be a
+                // bug in the writer path, not a security issue,
+                // so a warning is enough.
+                if header_version.is_some() {
+                    tracing::warn!(
+                        path = %path.display(),
+                        line = line_num + 1,
+                        "Duplicate JSONL SchemaHeader — ignoring"
+                    );
+                    continue;
+                }
+                if header.version.is_from_the_future() {
+                    return Err(SessionError::SchemaVersionMismatch {
+                        component: "jsonl",
+                        found: header.version,
+                        expected: crate::session::SessionSchemaVersion::CURRENT,
+                        direction: crate::session::SchemaVersionMismatchDirection::TooNew,
+                    });
+                }
+                if !header.version.is_supported() {
+                    return Err(SessionError::SchemaVersionMismatch {
+                        component: "jsonl",
+                        found: header.version,
+                        expected: crate::session::SessionSchemaVersion::CURRENT,
+                        direction: crate::session::SchemaVersionMismatchDirection::TooOld,
+                    });
+                }
+                header_version = Some(header.version);
+            }
             Ok(entry) => entries.push(entry),
             Err(e) => {
                 tracing::warn!(
@@ -504,6 +577,17 @@ fn read_entries_sync(path: &Path) -> SessionResult<Vec<JsonlEntry>> {
                 );
             }
         }
+    }
+
+    if header_version.is_none() && !entries.is_empty() {
+        // Legacy file written before F-1 — assume MIN_SUPPORTED
+        // and emit a migration-tracking trace so operators can
+        // aggregate how many sessions still need a rewrite.
+        tracing::debug!(
+            path = %path.display(),
+            "JSONL session file has no SchemaHeader; treating as {}",
+            crate::session::SessionSchemaVersion::MIN_SUPPORTED
+        );
     }
 
     Ok(entries)
@@ -520,6 +604,25 @@ fn append_entries_sync(path: &Path, entries: &[JsonlEntry], sync: bool) -> Sessi
         })?;
     }
 
+    // Phase D F-1: detect whether the file is newly created on
+    // this append. If the file does not yet exist (or is zero
+    // bytes), prepend a SchemaHeader so later reads always have
+    // a version to validate against. We check file length
+    // before opening in append mode to avoid a TOCTOU race
+    // against another writer — the worst case is that two
+    // concurrent writers both try to stamp a header, which
+    // is harmless because the reader skips duplicates with a
+    // trace-level warning.
+    let needs_header = match std::fs::metadata(path) {
+        Ok(meta) => meta.len() == 0,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => true,
+        Err(e) => {
+            return Err(SessionError::Storage {
+                message: format!("stat failed on {}: {}", path.display(), e),
+            });
+        }
+    };
+
     let file = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
@@ -529,6 +632,14 @@ fn append_entries_sync(path: &Path, entries: &[JsonlEntry], sync: bool) -> Sessi
         })?;
 
     let mut writer = std::io::BufWriter::with_capacity(64 * 1024, file);
+
+    if needs_header {
+        let header = JsonlEntry::SchemaHeader(SchemaHeaderEntry::current());
+        serde_json::to_writer(&mut writer, &header)?;
+        writeln!(writer).map_err(|e| SessionError::Storage {
+            message: format!("Write failed: {}", e),
+        })?;
+    }
 
     for entry in entries {
         serde_json::to_writer(&mut writer, entry)?;
@@ -589,6 +700,13 @@ fn write_entries_to_temp_sync(
             })?;
 
         let mut writer = std::io::BufWriter::with_capacity(64 * 1024, file);
+        // Phase D F-1: atomic restore always writes a fresh file,
+        // so the SchemaHeader goes first every time.
+        let header = JsonlEntry::SchemaHeader(SchemaHeaderEntry::current());
+        serde_json::to_writer(&mut writer, &header)?;
+        writeln!(writer).map_err(|e| SessionError::Storage {
+            message: format!("Write failed: {}", e),
+        })?;
         for entry in entries {
             serde_json::to_writer(&mut writer, entry)?;
             writeln!(writer).map_err(|e| SessionError::Storage {
@@ -861,7 +979,7 @@ impl JsonlPersistence {
                                     operation: QueueOperation::Enqueue,
                                     content: q.content.clone(),
                                     priority: q.priority,
-                                    status: QueueStatus::Pending,
+                                    state: QueueItemState::Pending,
                                     created_at: q.timestamp,
                                     processed_at: None,
                                 },
@@ -869,13 +987,13 @@ impl JsonlPersistence {
                         }
                         "dequeue" => {
                             if let Some(item) = queue_items.get_mut(&q.item_id) {
-                                item.status = QueueStatus::Processing;
+                                item.state = QueueItemState::Processing;
                                 item.processed_at = Some(q.timestamp);
                             }
                         }
                         "cancel" => {
                             if let Some(item) = queue_items.get_mut(&q.item_id) {
-                                item.status = QueueStatus::Cancelled;
+                                item.state = QueueItemState::Cancelled;
                                 item.processed_at = Some(q.timestamp);
                             }
                         }
@@ -917,7 +1035,7 @@ impl JsonlPersistence {
                         session_id,
                         name: p.name.clone(),
                         content: p.content.clone(),
-                        status: jsonl_to_enum(&p.status).unwrap_or_default(),
+                        state: jsonl_to_enum(&p.status).unwrap_or_default(),
                         error: p.error.clone(),
                         created_at: p.created_at,
                         approved_at: p.approved_at,
@@ -1032,7 +1150,7 @@ impl JsonlPersistence {
             .cloned()
             .map(|mut item| {
                 item.session_id = session_id;
-                item.status = QueueStatus::Pending;
+                item.state = QueueItemState::Pending;
                 item.processed_at = None;
                 item
             })
@@ -1072,7 +1190,7 @@ impl JsonlPersistence {
                 session_id: session.id.to_string(),
                 name: plan.name.clone(),
                 content: plan.content.clone(),
-                status: enum_to_jsonl(&plan.status, "draft"),
+                status: enum_to_jsonl(&plan.state, "draft"),
                 error: plan.error.clone(),
                 created_at: plan.created_at,
                 approved_at: plan.approved_at,
@@ -1176,7 +1294,7 @@ impl JsonlPersistence {
         let mut hasher = hasher_state.build_hasher();
         if let Some(p) = plan {
             p.id.hash(&mut hasher);
-            enum_to_jsonl(&p.status, "draft").hash(&mut hasher);
+            enum_to_jsonl(&p.state, "draft").hash(&mut hasher);
             p.content.hash(&mut hasher);
         }
         hasher.finish()
@@ -1294,7 +1412,7 @@ impl JsonlPersistence {
                     session_id: session.id.to_string(),
                     name: plan.name.clone(),
                     content: plan.content.clone(),
-                    status: enum_to_jsonl(&plan.status, "draft"),
+                    status: enum_to_jsonl(&plan.state, "draft"),
                     error: plan.error.clone(),
                     created_at: plan.created_at,
                     approved_at: plan.approved_at,
@@ -1441,7 +1559,7 @@ impl JsonlPersistence {
                         session_id,
                         name: p.name,
                         content: p.content,
-                        status: jsonl_to_enum(&p.status).unwrap_or_default(),
+                        state: jsonl_to_enum(&p.status).unwrap_or_default(),
                         error: p.error,
                         created_at: p.created_at,
                         approved_at: p.approved_at,
@@ -1511,6 +1629,37 @@ impl Persistence for JsonlPersistence {
     async fn save(&self, session: &Session) -> SessionResult<()> {
         let _guard = self.mutation_lock.lock().await;
         self.save_inner(session).await
+    }
+
+    /// Phase G-1: one-shot mutation under the JSONL instance's
+    /// `mutation_lock`. All four reads and writes — load, validate,
+    /// save — are serialized against other mutation paths (save,
+    /// append_graph_event, add_message, …) through the same
+    /// `tokio::sync::Mutex`. Cross-process safety is explicitly
+    /// out of scope for the JSONL backend; multi-process
+    /// deployments must use Postgres or Redis.
+    async fn with_session_lock(&self, id: &SessionId, f: SessionMutationFn) -> SessionResult<()> {
+        let _guard = self.mutation_lock.lock().await;
+        let entries = {
+            let index = self.index.read().await;
+            let Some(meta) = index.sessions.get(id).cloned() else {
+                return Err(SessionError::NotFound { id: id.to_string() });
+            };
+            let path = meta.path.clone();
+            drop(index);
+            tokio::task::spawn_blocking(move || read_entries_sync(&path))
+                .await
+                .map_err(|e| SessionError::Storage {
+                    message: format!("Task join error: {}", e),
+                })??
+        };
+        if entries.is_empty() {
+            return Err(SessionError::NotFound { id: id.to_string() });
+        }
+        let mut session = Self::reconstruct_session(*id, entries)?;
+        f(&mut session)?;
+        validate_session_graph(&session, "jsonl")?;
+        self.save_inner(&session).await
     }
 
     async fn append_graph_event(
@@ -1808,8 +1957,8 @@ impl Persistence for JsonlPersistence {
 
             let mut result = None;
             for item in items.iter_mut() {
-                if item.status == QueueStatus::Pending {
-                    item.start_processing();
+                if item.state == QueueItemState::Pending {
+                    let _ = item.transition(QueueItemState::Processing);
                     result = Some(item.clone());
                     break;
                 }
@@ -1852,7 +2001,7 @@ impl Persistence for JsonlPersistence {
             let mut found = None;
             for items in queue.values_mut() {
                 if let Some(item) = items.iter_mut().find(|i| i.id == item_id) {
-                    item.cancel();
+                    let _ = item.transition(QueueItemState::Cancelled);
                     found = Some(item.clone());
                     break;
                 }
@@ -1899,7 +2048,7 @@ impl Persistence for JsonlPersistence {
             .map(|items| {
                 items
                     .iter()
-                    .filter(|i| i.status == QueueStatus::Pending)
+                    .filter(|i| i.state == QueueItemState::Pending)
                     .cloned()
                     .collect()
             })
@@ -1926,7 +2075,7 @@ impl Persistence for JsonlPersistence {
             entries.extend(items.iter().map(|item| {
                 let mut item = item.clone();
                 item.session_id = *session_id;
-                item.status = QueueStatus::Pending;
+                item.state = QueueItemState::Pending;
                 item.processed_at = None;
                 JsonlEntry::QueueOperation(QueueOperationEntry {
                     operation: "enqueue".to_string(),
@@ -1951,7 +2100,7 @@ impl Persistence for JsonlPersistence {
             .cloned()
             .map(|mut item| {
                 item.session_id = *session_id;
-                item.status = QueueStatus::Pending;
+                item.state = QueueItemState::Pending;
                 item.processed_at = None;
                 item
             })
@@ -2660,5 +2809,108 @@ mod tests {
         let encoded = config.encode_project_path(Path::new("C:\\Users\\alice\\project"));
         assert!(encoded.chars().all(|c| c.is_ascii_hexdigit()));
         assert!(!encoded.is_empty());
+    }
+
+    // ── Phase D F-1: schema version header ─────────────────────────
+
+    /// Newly-written JSONL files stamp a SchemaHeader as the very
+    /// first line. Existing round-trip tests already verify the
+    /// header doesn't break the load path; this test pins the
+    /// wire format so a future refactor that moves the header
+    /// somewhere else can't do so silently.
+    #[tokio::test]
+    async fn f1_save_writes_schema_header_as_first_line() {
+        let (persistence, _temp) = create_test_persistence().await;
+        let session = Session::new(SessionConfig::default());
+        persistence.save(&session).await.unwrap();
+
+        let path = persistence.session_file_path(&session.id, None);
+        let raw = std::fs::read_to_string(&path).expect("file must exist after save");
+        let first_line = raw.lines().next().expect("file must not be empty");
+        let entry: JsonlEntry =
+            serde_json::from_str(first_line).expect("first line must parse as JsonlEntry");
+        match entry {
+            JsonlEntry::SchemaHeader(h) => {
+                assert_eq!(h.version, crate::session::SessionSchemaVersion::CURRENT);
+                assert!(
+                    h.written_by
+                        .as_ref()
+                        .is_some_and(|s| s.contains("branchforge"))
+                );
+            }
+            other => panic!("expected first line to be SchemaHeader, got {other:?}"),
+        }
+    }
+
+    /// A JSONL file whose SchemaHeader declares a version newer
+    /// than the binary supports is rejected with a typed
+    /// `SchemaVersionMismatch` error. This is the critical
+    /// fail-closed contract: loading data we can't interpret
+    /// must never silently succeed.
+    #[tokio::test]
+    async fn f1_future_schema_version_is_rejected_with_typed_error() {
+        let (persistence, _temp) = create_test_persistence().await;
+        let session = Session::new(SessionConfig::default());
+        persistence.save(&session).await.unwrap();
+
+        // Rewrite the file with a SchemaHeader one version past
+        // CURRENT. The rest of the session body is preserved so
+        // the only difference is the version stamp.
+        let path = persistence.session_file_path(&session.id, None);
+        let raw = std::fs::read_to_string(&path).unwrap();
+        let mut lines: Vec<String> = raw.lines().map(str::to_owned).collect();
+        let future = crate::session::SessionSchemaVersion(
+            crate::session::SessionSchemaVersion::CURRENT.value() + 1,
+        );
+        let future_header = JsonlEntry::SchemaHeader(SchemaHeaderEntry {
+            version: future,
+            written_by: Some("time-traveller".into()),
+            written_at: Utc::now(),
+        });
+        lines[0] = serde_json::to_string(&future_header).unwrap();
+        std::fs::write(&path, lines.join("\n")).unwrap();
+
+        let err = persistence.load(&session.id).await.unwrap_err();
+        match err {
+            SessionError::SchemaVersionMismatch {
+                component,
+                found,
+                direction,
+                ..
+            } => {
+                assert_eq!(component, "jsonl");
+                assert_eq!(found, future);
+                assert_eq!(
+                    direction,
+                    crate::session::SchemaVersionMismatchDirection::TooNew
+                );
+            }
+            other => panic!("expected SchemaVersionMismatch, got {other:?}"),
+        }
+    }
+
+    /// A legacy file written before F-1 (i.e. without any
+    /// SchemaHeader at all) is still loadable — the loader treats
+    /// a missing header as `MIN_SUPPORTED`. This is the
+    /// forward-compat promise for the one-time roll-out window;
+    /// once every file has been rewritten by the new binary,
+    /// legacy files drop out of circulation naturally.
+    #[tokio::test]
+    async fn f1_legacy_file_without_header_still_loads() {
+        let (persistence, _temp) = create_test_persistence().await;
+        let session = Session::new(SessionConfig::default());
+        persistence.save(&session).await.unwrap();
+
+        // Strip the header line to simulate a pre-F-1 file.
+        let path = persistence.session_file_path(&session.id, None);
+        let raw = std::fs::read_to_string(&path).unwrap();
+        let without_header = raw.lines().skip(1).collect::<Vec<_>>().join("\n");
+        std::fs::write(&path, without_header).unwrap();
+
+        let loaded = persistence.load(&session.id).await.unwrap();
+        assert!(
+            loaded.is_some(),
+            "loader must accept legacy pre-F-1 files without a header"
+        );
     }
 }

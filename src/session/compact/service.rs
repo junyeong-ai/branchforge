@@ -426,6 +426,7 @@ Here's an example of how your output should be structured:
 
 Please provide a focused summary based on the conversation so far."#;
 
+#[non_exhaustive]
 #[derive(Debug)]
 pub enum PreparedCompact {
     NotNeeded,

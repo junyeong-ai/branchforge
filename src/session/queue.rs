@@ -14,6 +14,7 @@ use super::types::EnvironmentContext;
 const MAX_QUEUE_SIZE: usize = 100;
 const MAX_MERGE_CHARS: usize = 100_000;
 
+#[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum QueueError {
     Full,

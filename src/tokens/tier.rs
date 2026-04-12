@@ -8,6 +8,7 @@ pub const DEFAULT_WARNING_THRESHOLD: f64 = 0.80;
 /// Default critical threshold for context window utilization (95%)
 pub const DEFAULT_CRITICAL_THRESHOLD: f64 = 0.95;
 
+#[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum PricingTier {
     Standard,

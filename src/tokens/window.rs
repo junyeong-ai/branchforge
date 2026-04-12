@@ -1,6 +1,7 @@
 use super::tier::{DEFAULT_CRITICAL_THRESHOLD, DEFAULT_WARNING_THRESHOLD};
 use crate::models::{Capabilities, ModelSpec};
 
+#[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum WindowStatus {
     Ok { utilization: f64, remaining: u64 },

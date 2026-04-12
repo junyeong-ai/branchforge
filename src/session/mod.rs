@@ -15,8 +15,9 @@ pub mod persistence_postgres;
 pub mod persistence_redis;
 pub mod queue;
 mod replay;
-pub mod session_state;
+pub mod schema_version;
 pub mod state;
+pub mod tool_state;
 pub mod types;
 
 pub use archive::{
@@ -52,16 +53,20 @@ pub use persistence_postgres::{
 pub use persistence_redis::{RedisConfig, RedisPersistence};
 pub use queue::{InputQueue, MergedInput, QueueError, QueuedInput, SharedInputQueue};
 pub use replay::Replayer;
-pub use session_state::{ExecutionGuard, ExecutionState, SessionSnapshot, ToolState};
+pub use schema_version::{
+    MigrationLadder, SchemaMigration, SchemaMigrationError, SchemaVersionMismatchDirection,
+    SessionSchemaVersion,
+};
 pub use state::{
     ContentOverrides, ExecutionMetadata, MessageId, MessageMetadata, Session, SessionAuthorization,
-    SessionConfig, SessionId, SessionMessage, SessionState, SessionToolLimits, SessionType,
-    ThinkingMetadata, ToolResultMeta,
+    SessionConfig, SessionId, SessionMessage, SessionState, SessionToolLimits,
+    SessionTransitionError, SessionType, ThinkingMetadata, ToolResultMeta,
 };
+pub use tool_state::{ExecutionGuard, ExecutionState, SessionSnapshot, ToolState};
 pub use types::{
-    CompactRecord, CompactTrigger, EnvironmentContext, Plan, PlanStatus, QueueItem, QueueOperation,
-    QueueStatus, SessionAccessScope, SessionStats, SessionTree, TodoItem, TodoStatus,
-    ToolExecution,
+    CompactRecord, CompactTrigger, EnvironmentContext, Plan, PlanState, PlanTransitionError,
+    QueueItem, QueueItemState, QueueItemTransitionError, QueueOperation, SessionAccessScope,
+    SessionStats, SessionTree, TodoItem, TodoStatus, ToolExecution,
 };
 
 use thiserror::Error;
@@ -98,6 +103,26 @@ pub enum SessionError {
 
     #[error("Execution error: {message}")]
     Execution { message: String },
+
+    #[error("Invalid lifecycle transition: {message}")]
+    InvalidTransition { message: String },
+
+    /// Phase D F-1: a persistence backend observed a payload whose
+    /// [`SessionSchemaVersion`] is outside the supported window.
+    /// `component` names the backend ("jsonl", "postgres", …);
+    /// `found` is the version stamped on the payload; `expected`
+    /// is what the current binary writes; `direction` disambiguates
+    /// "the payload is too old — write a migration" from "the
+    /// payload is too new — upgrade or restore from a backup".
+    #[error(
+        "schema version mismatch in {component}: found {found}, expected {expected} ({direction})"
+    )]
+    SchemaVersionMismatch {
+        component: &'static str,
+        found: SessionSchemaVersion,
+        expected: SessionSchemaVersion,
+        direction: SchemaVersionMismatchDirection,
+    },
 }
 
 pub type SessionResult<T> = std::result::Result<T, SessionError>;

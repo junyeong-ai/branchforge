@@ -3,6 +3,7 @@ use serde::{Deserialize, Serialize};
 use super::SessionGraph;
 use super::types::{BranchId, NodeId};
 
+#[non_exhaustive]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum GraphReference {
     Bookmark {

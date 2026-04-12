@@ -34,7 +34,7 @@ mod service;
 pub mod strategy;
 pub mod time_based;
 
-pub use result::CompactResult;
+pub use result::{CompactResult, CompactSkipReason};
 
 // Core strategy types
 pub use strategy::{CompactionContext, CompactionPlan, CompactionStrategy, ContentOverrideEntry};

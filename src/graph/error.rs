@@ -1,5 +1,6 @@
 use super::{BranchId, NodeId};
 
+#[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum GraphError {
     #[error("Graph branch {branch_id} does not exist")]

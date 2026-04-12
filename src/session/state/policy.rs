@@ -11,6 +11,7 @@ use serde::{Deserialize, Serialize};
 /// Serializable execution mode for session persistence.
 ///
 /// Maps to [`crate::authorization::ExecutionMode`] at runtime.
+#[non_exhaustive]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SessionExecutionMode {

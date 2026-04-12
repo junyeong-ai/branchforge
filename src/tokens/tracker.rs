@@ -4,6 +4,7 @@ use super::{ContextWindow, PricingTier, WindowStatus};
 use crate::ir::Usage;
 use crate::models::ModelSpec;
 
+#[non_exhaustive]
 #[derive(Debug, Clone)]
 pub enum PreflightResult {
     Ok {

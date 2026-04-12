@@ -13,15 +13,16 @@ use super::messaging::{AgentMessage, MessageChannel};
 crate::uuid_id!(AgentId);
 
 /// Agent execution status.
+#[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
-pub enum AgentStatus {
+pub enum DirectoryEntryStatus {
     Running = 0,
     Completed = 1,
     Failed = 2,
 }
 
-impl From<u8> for AgentStatus {
+impl From<u8> for DirectoryEntryStatus {
     fn from(v: u8) -> Self {
         match v {
             0 => Self::Running,
@@ -54,22 +55,22 @@ impl AgentHandle {
             id: AgentId::new(),
             name: name.into(),
             channel,
-            status: AtomicU8::new(AgentStatus::Running as u8),
+            status: AtomicU8::new(DirectoryEntryStatus::Running as u8),
             last_result: tokio::sync::RwLock::new(None),
         }
     }
 
-    pub fn status(&self) -> AgentStatus {
-        AgentStatus::from(self.status.load(Ordering::Acquire))
+    pub fn status(&self) -> DirectoryEntryStatus {
+        DirectoryEntryStatus::from(self.status.load(Ordering::Acquire))
     }
 
     pub fn is_running(&self) -> bool {
-        self.status() == AgentStatus::Running
+        self.status() == DirectoryEntryStatus::Running
     }
 
     pub fn mark_completed(&self, result: Option<String>) {
         self.status
-            .store(AgentStatus::Completed as u8, Ordering::Release);
+            .store(DirectoryEntryStatus::Completed as u8, Ordering::Release);
         if let Ok(mut guard) = self.last_result.try_write() {
             *guard = result;
         }
@@ -77,7 +78,7 @@ impl AgentHandle {
 
     pub fn mark_failed(&self) {
         self.status
-            .store(AgentStatus::Failed as u8, Ordering::Release);
+            .store(DirectoryEntryStatus::Failed as u8, Ordering::Release);
     }
 
     pub async fn last_result(&self) -> Option<String> {

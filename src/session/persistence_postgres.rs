@@ -42,13 +42,13 @@ use uuid::Uuid;
 use crate::graph::{GraphEvent, GraphEventBody, GraphValidator, SessionGraph};
 
 use super::archive::verify_restored_session_roundtrip;
-use super::persistence::Persistence;
+use super::persistence::{Persistence, SessionMutationFn};
 use super::state::{
     Session, SessionAuthorization, SessionConfig, SessionId, SessionMessage, SessionState,
     SessionType, build_graph_provenance, graph_node_id_for_message, graph_node_kind_for_message,
     graph_parent_node_id_for_message, graph_payload_for_message, graph_tags_for_message,
 };
-use super::types::{CompactRecord, Plan, QueueItem, QueueOperation, QueueStatus, TodoItem};
+use super::types::{CompactRecord, Plan, QueueItem, QueueItemState, QueueOperation, TodoItem};
 use super::{SessionError, SessionResult, StorageResultExt};
 
 fn enum_to_db<T: serde::Serialize>(value: &T, default: &str) -> String {
@@ -66,6 +66,15 @@ fn db_to_session_type(s: &str) -> SessionType {
         .ok()
         .or_else(|| db_to_enum(s))
         .unwrap_or_default()
+}
+
+/// Phase G-1: derive a stable i64 key for
+/// `pg_advisory_xact_lock($1)` from a session UUID. Folds the 128-bit
+/// UUID into 64 bits by XOR-ing the two halves; Postgres treats the
+/// resulting i64 as an opaque application-defined lock identifier.
+fn session_advisory_lock_key(id: &SessionId) -> i64 {
+    let (hi, lo) = id.as_uuid().as_u64_pair();
+    (hi ^ lo) as i64
 }
 
 fn validate_graph(session_id: &SessionId, graph: &SessionGraph) -> SessionResult<()> {
@@ -262,7 +271,7 @@ fn parse_plan_row(session_id: &SessionId, row: Option<PgRow>) -> Option<Plan> {
         session_id: *session_id,
         name: row.try_get("name").ok(),
         content,
-        status,
+        state: status,
         error: row.try_get("error").ok(),
         created_at: row.try_get("created_at").unwrap_or_else(|_| Utc::now()),
         approved_at: row.try_get("approved_at").ok(),
@@ -297,7 +306,7 @@ fn parse_pending_queue_rows(session_id: &SessionId, rows: Vec<PgRow>) -> Vec<Que
             operation: QueueOperation::Enqueue,
             content,
             priority: row.try_get("priority").unwrap_or(0),
-            status: QueueStatus::Pending,
+            state: QueueItemState::Pending,
             created_at: row.try_get("created_at").unwrap_or_else(|_| Utc::now()),
             processed_at: row.try_get("processed_at").ok(),
         });
@@ -521,6 +530,13 @@ pub struct PostgresConfig {
     pub queue_table: String,
     pub todos_table: String,
     pub plans_table: String,
+    /// Phase D F-1: single-row-per-component schema-version
+    /// tracking table. Defaults to `{prefix}schema_version`.
+    /// Written by [`PostgresSchema::migrate`] and read back by
+    /// [`PostgresSchema::verify_schema_version`] so the binary
+    /// can refuse to operate on a database whose schema was
+    /// written by a newer deployment.
+    pub schema_version_table: String,
     pub pool: PgPoolConfig,
     /// Session retention period in days (default: 30).
     ///
@@ -556,6 +572,7 @@ impl PostgresConfig {
             queue_table: format!("{prefix}queue"),
             todos_table: format!("{prefix}todos"),
             plans_table: format!("{prefix}plans"),
+            schema_version_table: format!("{prefix}schema_version"),
             pool: PgPoolConfig::default(),
             retention_days: 30,
         })
@@ -589,6 +606,7 @@ impl PostgresConfig {
 // ============================================================================
 
 /// Schema issue found during verification.
+#[non_exhaustive]
 #[derive(Debug, Clone)]
 pub enum SchemaIssue {
     MissingTable(String),
@@ -636,6 +654,22 @@ impl PostgresSchema {
         }
 
         sql
+    }
+
+    /// Phase D F-1: schema-version tracking table DDL. Created
+    /// alongside the session tables so every fresh database is
+    /// stamped with its schema version, and so upgrades can
+    /// query "what version am I reading?" without relying on
+    /// out-of-band metadata.
+    pub fn schema_version_table_ddl(config: &PostgresConfig) -> String {
+        format!(
+            r#"CREATE TABLE IF NOT EXISTS {table} (
+    component VARCHAR(64) PRIMARY KEY,
+    version BIGINT NOT NULL,
+    applied_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);"#,
+            table = config.schema_version_table
+        )
     }
 
     /// Generate table DDL statements.
@@ -841,7 +875,21 @@ impl PostgresSchema {
     }
 
     /// Run migration to create tables and indexes.
+    ///
+    /// Phase D F-1: also creates the schema-version tracking
+    /// table and stamps it with
+    /// [`crate::session::SessionSchemaVersion::CURRENT`] on first run. Subsequent
+    /// runs are idempotent — the row is upserted to the current
+    /// version so a fresh binary can re-mark the database as
+    /// owned by its layout.
     pub async fn migrate(pool: &PgPool, config: &PostgresConfig) -> Result<(), sqlx::Error> {
+        // Create the version-tracking table first so a migration
+        // failure later still leaves the database in a
+        // self-describing state.
+        sqlx::query(&Self::schema_version_table_ddl(config))
+            .execute(pool)
+            .await?;
+
         for table_ddl in Self::table_ddl(config) {
             sqlx::query(&table_ddl).execute(pool).await?;
         }
@@ -850,7 +898,83 @@ impl PostgresSchema {
             sqlx::query(&index_ddl).execute(pool).await?;
         }
 
+        // Stamp the current version. Uses ON CONFLICT DO UPDATE
+        // so re-running migrate on an older DB brings the stamp
+        // forward; the calling side is expected to have already
+        // checked `verify_schema_version` and decided the upgrade
+        // is safe.
+        let upsert = format!(
+            r#"INSERT INTO {table} (component, version) VALUES ($1, $2)
+               ON CONFLICT (component) DO UPDATE SET version = EXCLUDED.version, applied_at = NOW()"#,
+            table = config.schema_version_table
+        );
+        sqlx::query(&upsert)
+            .bind("session")
+            .bind(crate::session::SessionSchemaVersion::CURRENT.value() as i64)
+            .execute(pool)
+            .await?;
+
         Ok(())
+    }
+
+    /// Pure helper: translate a raw stamped version value from
+    /// the `schema_version` table into a typed result. Separated
+    /// from the SQL round-trip so unit tests can cover the
+    /// window-checking logic without a live database.
+    pub fn interpret_stamped_version(
+        raw: Option<i64>,
+    ) -> Result<Option<crate::session::SessionSchemaVersion>, SessionError> {
+        let Some(raw) = raw else {
+            return Ok(None);
+        };
+        let version = crate::session::SessionSchemaVersion(raw as u32);
+        if version.is_from_the_future() {
+            return Err(SessionError::SchemaVersionMismatch {
+                component: "postgres",
+                found: version,
+                expected: crate::session::SessionSchemaVersion::CURRENT,
+                direction: crate::session::SchemaVersionMismatchDirection::TooNew,
+            });
+        }
+        if !version.is_supported() {
+            return Err(SessionError::SchemaVersionMismatch {
+                component: "postgres",
+                found: version,
+                expected: crate::session::SessionSchemaVersion::CURRENT,
+                direction: crate::session::SchemaVersionMismatchDirection::TooOld,
+            });
+        }
+        Ok(Some(version))
+    }
+
+    /// Phase D F-1: read the stamped schema version and compare
+    /// it against [`crate::session::SessionSchemaVersion::CURRENT`]. Returns:
+    ///
+    /// - `Ok(None)` when the database has not yet been
+    ///   migrated — the version row is absent, which is the
+    ///   expected state for a pristine deployment.
+    /// - `Ok(Some(version))` when the stamped version is
+    ///   inside the `[MIN_SUPPORTED, CURRENT]` window.
+    /// - `Err(SessionError::SchemaVersionMismatch)` when the
+    ///   stamped version is outside that window — either too
+    ///   old for the built-in migration ladder or too new for
+    ///   the running binary.
+    pub async fn verify_schema_version(
+        pool: &PgPool,
+        config: &PostgresConfig,
+    ) -> Result<Option<crate::session::SessionSchemaVersion>, SessionError> {
+        let query = format!(
+            "SELECT version FROM {table} WHERE component = $1",
+            table = config.schema_version_table
+        );
+        let row: Option<i64> = sqlx::query_scalar(&query)
+            .bind("session")
+            .fetch_optional(pool)
+            .await
+            .map_err(|e| SessionError::Storage {
+                message: format!("schema_version lookup failed: {e}"),
+            })?;
+        Self::interpret_stamped_version(row)
     }
 
     /// Verify schema integrity - check tables and indexes exist.
@@ -958,6 +1082,20 @@ impl PostgresPersistence {
     /// Verify schema integrity.
     pub async fn verify_schema(&self) -> Result<Vec<SchemaIssue>, sqlx::Error> {
         PostgresSchema::verify(&self.pool, &self.config).await
+    }
+
+    /// Phase D F-1: verify the stamped session-schema version on
+    /// this database matches the running binary. Operators running
+    /// the `connect` (no-auto-migrate) path call this immediately
+    /// after construction so a binary that doesn't know the on-disk
+    /// schema fails loudly instead of silently mis-reading rows.
+    /// The `connect_and_migrate` path is already self-consistent —
+    /// `migrate` stamps the current version — so callers there do
+    /// not need to call this.
+    pub async fn verify_schema_version(
+        &self,
+    ) -> Result<Option<crate::session::SessionSchemaVersion>, SessionError> {
+        PostgresSchema::verify_schema_version(&self.pool, &self.config).await
     }
 
     /// Get the underlying connection pool.
@@ -1352,7 +1490,7 @@ impl PostgresPersistence {
     ) -> SessionResult<()> {
         let c = &self.config;
 
-        let status = enum_to_db(&plan.status, "draft");
+        let status = enum_to_db(&plan.state, "draft");
 
         sqlx::query(&format!(
             r#"
@@ -1560,11 +1698,18 @@ impl PostgresPersistence {
         Ok(())
     }
 
-    async fn save_inner(&self, session: &Session) -> SessionResult<()> {
+    /// Phase G-1: persist a full session snapshot into the supplied
+    /// transaction without committing. Extracted from `save_inner` so
+    /// [`with_session_lock`] can run load/f/save inside a single
+    /// transaction while retaining `save_inner`'s wrap-and-commit
+    /// shape for the simple save path.
+    async fn save_session_into_tx(
+        &self,
+        tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+        session: &Session,
+    ) -> SessionResult<()> {
         let c = &self.config;
         let summary_cache = session.graph.latest_summary();
-
-        let mut tx = self.pool.begin().await.storage_err()?;
 
         let session_type = enum_to_db(&session.session_type, "main");
         let state = enum_to_db(&session.state, "created");
@@ -1630,25 +1775,29 @@ impl PostgresPersistence {
         .bind(session.created_at)
         .bind(session.updated_at)
         .bind(session.expires_at)
-        .execute(&mut *tx)
+        .execute(&mut **tx)
         .await
         .storage_err()?;
 
-        self.save_graph_events_tx(&mut tx, &session.id, &session.graph.events)
+        self.save_graph_events_tx(tx, &session.id, &session.graph.events)
             .await?;
-        self.save_todos_tx(&mut tx, &session.id, &session.todos)
-            .await?;
-        self.save_compacts_tx(&mut tx, &session.id, &session.compact_history)
+        self.save_todos_tx(tx, &session.id, &session.todos).await?;
+        self.save_compacts_tx(tx, &session.id, &session.compact_history)
             .await?;
 
         if let Some(ref plan) = session.current_plan {
-            self.save_plan_tx(&mut tx, plan).await?;
+            self.save_plan_tx(tx, plan).await?;
         } else {
-            self.delete_plan_tx(&mut tx, &session.id).await?;
+            self.delete_plan_tx(tx, &session.id).await?;
         }
 
-        tx.commit().await.storage_err()?;
+        Ok(())
+    }
 
+    async fn save_inner(&self, session: &Session) -> SessionResult<()> {
+        let mut tx = self.pool.begin().await.storage_err()?;
+        self.save_session_into_tx(&mut tx, session).await?;
+        tx.commit().await.storage_err()?;
         Ok(())
     }
 
@@ -1664,7 +1813,7 @@ impl PostgresPersistence {
             .cloned()
             .map(|mut item| {
                 item.session_id = session.id;
-                item.status = QueueStatus::Pending;
+                item.state = QueueItemState::Pending;
                 item.processed_at = None;
                 item
             })
@@ -1763,6 +1912,35 @@ impl Persistence for PostgresPersistence {
     async fn save(&self, session: &Session) -> SessionResult<()> {
         validate_graph(&session.id, &session.graph)?;
         self.with_retry(|| self.save_inner(session)).await
+    }
+
+    /// Phase G-1: one-shot mutation under a Postgres transaction-scoped
+    /// advisory lock keyed off the session UUID. `pg_advisory_xact_lock`
+    /// is released automatically on commit or rollback, so we never
+    /// leak a lock even if the caller's closure panics.
+    ///
+    /// The lock key is derived by folding the session UUID's 128 bits
+    /// into an i64. Collision probability across the lifetime of a
+    /// single database is negligible for the expected session count
+    /// (< 2^32 active sessions); a collision would only serialize
+    /// two unrelated sessions briefly, never corrupt data.
+    async fn with_session_lock(&self, id: &SessionId, f: SessionMutationFn) -> SessionResult<()> {
+        let sid = *id;
+        let lock_key = session_advisory_lock_key(&sid);
+        let mut tx = self.pool.begin().await.storage_err()?;
+
+        sqlx::query("SELECT pg_advisory_xact_lock($1)")
+            .bind(lock_key)
+            .execute(&mut *tx)
+            .await
+            .storage_err()?;
+
+        let mut session = self.load_session_row_tx(&mut tx, &sid).await?;
+        f(&mut session)?;
+        validate_graph(&session.id, &session.graph)?;
+        self.save_session_into_tx(&mut tx, &session).await?;
+        tx.commit().await.storage_err()?;
+        Ok(())
     }
 
     async fn load(&self, id: &SessionId) -> SessionResult<Option<Session>> {
@@ -2098,14 +2276,24 @@ impl Persistence for PostgresPersistence {
         .await
     }
 
-    async fn set_state(&self, session_id: &SessionId, state: SessionState) -> SessionResult<()> {
+    async fn finalize(&self, session_id: &SessionId, terminal: SessionState) -> SessionResult<()> {
+        if !terminal.is_terminal() {
+            return Err(SessionError::InvalidTransition {
+                message: format!("finalize requires a terminal state, got {terminal}"),
+            });
+        }
         let sid = *session_id;
-        let state_value = enum_to_db(&state, "created");
+        let state_value = enum_to_db(&terminal, "completed");
         self.with_retry(|| async {
             let c = &self.config;
 
+            // Atomic transition: only sessions not already in a terminal
+            // state are eligible. Same-state finalize is a no-op (0 rows
+            // affected and not an error, matching the in-memory
+            // idempotency of `Session::finalize`).
             let result = sqlx::query(&format!(
-                "UPDATE {sessions} SET state = $2, updated_at = NOW() WHERE id = $1",
+                "UPDATE {sessions} SET state = $2, updated_at = NOW() \
+                 WHERE id = $1 AND state NOT IN ('completed', 'failed', 'cancelled')",
                 sessions = c.sessions_table
             ))
             .bind(sid.to_string())
@@ -2115,9 +2303,32 @@ impl Persistence for PostgresPersistence {
             .storage_err()?;
 
             if result.rows_affected() == 0 {
-                return Err(SessionError::NotFound {
-                    id: sid.to_string(),
-                });
+                // Either not found or already terminal — probe to decide.
+                let exists: Option<(String,)> = sqlx::query_as(&format!(
+                    "SELECT state FROM {sessions} WHERE id = $1",
+                    sessions = c.sessions_table
+                ))
+                .bind(sid.to_string())
+                .fetch_optional(self.pool.as_ref())
+                .await
+                .storage_err()?;
+                match exists {
+                    None => {
+                        return Err(SessionError::NotFound {
+                            id: sid.to_string(),
+                        });
+                    }
+                    Some((existing,)) if existing == state_value => {
+                        // Already at target terminal — idempotent no-op.
+                    }
+                    Some((existing,)) => {
+                        return Err(SessionError::InvalidTransition {
+                            message: format!(
+                                "session already terminal ({existing}), cannot finalize to {state_value}"
+                            ),
+                        });
+                    }
+                }
             }
 
             Ok(())
@@ -2210,7 +2421,7 @@ impl Persistence for PostgresPersistence {
                 operation: super::types::QueueOperation::Enqueue,
                 content,
                 priority: row.try_get("priority").unwrap_or(0),
-                status: QueueStatus::Processing,
+                state: QueueItemState::Processing,
                 created_at: row.try_get("created_at").unwrap_or_else(|_| Utc::now()),
                 processed_at: row.try_get("processed_at").ok(),
             }))
@@ -2370,6 +2581,52 @@ mod tests {
         assert!(ddl.contains(&config.graph_events_table));
         assert!(ddl.contains("primary_branch_id UUID NOT NULL"));
         assert!(indexes.contains(&format!("idx_{}_session", config.graph_events_table)));
+    }
+
+    /// Phase D F-1 follow-up: `interpret_stamped_version` is the
+    /// pure helper that decides whether a raw row value from
+    /// `schema_version` is acceptable. Exercising it here lets us
+    /// cover every branch without a live Postgres connection.
+    #[test]
+    fn interpret_stamped_version_covers_all_windows() {
+        use crate::session::{SchemaVersionMismatchDirection, SessionError, SessionSchemaVersion};
+
+        // Missing row -> None (pristine DB, caller decides what to do).
+        let result = PostgresSchema::interpret_stamped_version(None).unwrap();
+        assert!(result.is_none());
+
+        // Current version -> accepted.
+        let current = SessionSchemaVersion::CURRENT.value() as i64;
+        let result = PostgresSchema::interpret_stamped_version(Some(current))
+            .unwrap()
+            .unwrap();
+        assert_eq!(result, SessionSchemaVersion::CURRENT);
+
+        // Future version -> TooNew.
+        let future = (SessionSchemaVersion::CURRENT.value() + 1) as i64;
+        match PostgresSchema::interpret_stamped_version(Some(future)).unwrap_err() {
+            SessionError::SchemaVersionMismatch {
+                component,
+                direction,
+                ..
+            } => {
+                assert_eq!(component, "postgres");
+                assert_eq!(direction, SchemaVersionMismatchDirection::TooNew);
+            }
+            other => panic!("expected SchemaVersionMismatch, got {other:?}"),
+        }
+    }
+
+    /// The `schema_version` DDL string and upsert query reference
+    /// the configured table name. A regression against an
+    /// accidental hardcoded "schema_version" literal elsewhere
+    /// in the file.
+    #[test]
+    fn schema_version_ddl_uses_configured_table_name() {
+        let config = PostgresConfig::prefix("my_").unwrap();
+        let ddl = PostgresSchema::schema_version_table_ddl(&config);
+        assert!(ddl.contains("my_schema_version"));
+        assert_eq!(config.schema_version_table, "my_schema_version");
     }
 
     #[test]

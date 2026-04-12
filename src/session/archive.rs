@@ -4,8 +4,8 @@ use crate::graph::{
     BranchExport, GraphEventBody, GraphSessionStats, GraphValidator, NodeKind, SessionGraph,
 };
 use crate::session::{
-    ExportPolicy, Persistence, QueueItem, Session, SessionAuthorization, SessionConfig,
-    SessionError, SessionResult, SessionState, SessionType,
+    ExportPolicy, Persistence, QueueItem, QueueItemState, Session, SessionAuthorization,
+    SessionConfig, SessionError, SessionResult, SessionState, SessionType,
 };
 use rust_decimal::Decimal;
 
@@ -485,7 +485,7 @@ fn normalize_queue(items: &[QueueItem], session_id: crate::session::SessionId) -
         .cloned()
         .map(|mut item| {
             item.session_id = session_id;
-            item.status = crate::session::QueueStatus::Pending;
+            item.state = QueueItemState::Pending;
             item.processed_at = None;
             item
         })

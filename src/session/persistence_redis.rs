@@ -8,9 +8,9 @@ use std::time::Duration;
 
 use super::archive::verify_restored_session_roundtrip;
 use super::lock::{DEFAULT_LOCK_TTL_SECS, DistributedLock, RedisLock};
-use super::persistence::{Persistence, validate_session_graph};
+use super::persistence::{Persistence, SessionMutationFn, validate_session_graph};
 use super::state::{Session, SessionId, SessionMessage, SessionState};
-use super::types::QueueItem;
+use super::types::{QueueItem, QueueItemState};
 use super::{SessionError, SessionResult, StorageResultExt};
 use crate::graph::{GraphEvent, GraphMaterializer, GraphValidator};
 use uuid::Uuid;
@@ -110,6 +110,82 @@ impl RedisPersistence {
 
     fn session_key(&self, id: &SessionId) -> String {
         format!("{}{}", self.config.key_prefix, id)
+    }
+
+    /// Phase D F-1: per-namespace schema-version key. One stamp
+    /// per Redis namespace (prefix), written once on first
+    /// access via [`Self::verify_and_stamp_schema_version`].
+    /// Readers compare the stamped value against
+    /// [`crate::session::SessionSchemaVersion::CURRENT`] and
+    /// refuse to operate on a namespace written by a newer
+    /// binary.
+    fn schema_version_key(&self) -> String {
+        format!("{}schema_version", self.config.key_prefix)
+    }
+
+    /// Pure helper: interpret the raw string value fetched from
+    /// [`Self::schema_version_key`] and return the typed result.
+    /// Separated from the Redis round-trip so unit tests cover
+    /// every window branch without a live Redis instance.
+    pub(crate) fn interpret_version_bytes(
+        raw: Option<&str>,
+    ) -> Result<Option<crate::session::SessionSchemaVersion>, SessionError> {
+        let Some(raw) = raw else {
+            return Ok(None);
+        };
+        let parsed: u32 = raw.parse().map_err(|_| SessionError::Storage {
+            message: format!("Redis schema_version key holds non-numeric value `{raw}`"),
+        })?;
+        let version = crate::session::SessionSchemaVersion(parsed);
+        if version.is_from_the_future() {
+            return Err(SessionError::SchemaVersionMismatch {
+                component: "redis",
+                found: version,
+                expected: crate::session::SessionSchemaVersion::CURRENT,
+                direction: crate::session::SchemaVersionMismatchDirection::TooNew,
+            });
+        }
+        if !version.is_supported() {
+            return Err(SessionError::SchemaVersionMismatch {
+                component: "redis",
+                found: version,
+                expected: crate::session::SessionSchemaVersion::CURRENT,
+                direction: crate::session::SchemaVersionMismatchDirection::TooOld,
+            });
+        }
+        Ok(Some(version))
+    }
+
+    /// Phase D F-1: verify the Redis namespace's stamped session
+    /// schema version and, if it's absent, stamp it with
+    /// [`crate::session::SessionSchemaVersion::CURRENT`] via
+    /// `SET NX`. Callers run this once after construction (or
+    /// on every save if they prefer belt-and-braces). A stamped
+    /// mismatch is always fatal — readers must never silently
+    /// operate on a namespace written by a newer binary.
+    pub async fn verify_and_stamp_schema_version(
+        &self,
+    ) -> SessionResult<crate::session::SessionSchemaVersion> {
+        let mut conn = self.get_connection().await?;
+        let key = self.schema_version_key();
+        let current = crate::session::SessionSchemaVersion::CURRENT;
+        // SET NX: stamp the key only if it does not yet exist.
+        // `nx` returns true when the key was created, false when
+        // it already existed.
+        let _: Option<()> = redis::cmd("SET")
+            .arg(&key)
+            .arg(current.value().to_string())
+            .arg("NX")
+            .query_async(&mut conn)
+            .await
+            .storage_err()?;
+        let raw: Option<String> = conn.get(&key).await.storage_err()?;
+        match Self::interpret_version_bytes(raw.as_deref())? {
+            Some(version) => Ok(version),
+            None => Err(SessionError::Storage {
+                message: "Redis schema_version stamp vanished immediately after write".into(),
+            }),
+        }
     }
 
     fn tenant_key(&self, tenant_id: &str) -> String {
@@ -468,6 +544,61 @@ impl Persistence for RedisPersistence {
         Ok(())
     }
 
+    /// Phase G-1: one-shot mutation under the Redis distributed lock.
+    /// Unlike the private `mutate_session_atomic` helper — which is
+    /// used by the hot-path `add_message`/`append_graph_event`/
+    /// `finalize` methods and retries on CAS conflicts — this
+    /// primitive is strictly one-shot. A `SessionMutationFn` is
+    /// `FnOnce` and cannot be re-run, so if the underlying CAS fails
+    /// we surface the conflict as an error rather than silently
+    /// retrying. Callers that need retry semantics wrap this in
+    /// their own recovery loop.
+    async fn with_session_lock(&self, id: &SessionId, f: SessionMutationFn) -> SessionResult<()> {
+        let key = self.session_key(id);
+        let lock_resource = format!("session:{}", id);
+        let lock_ttl = Duration::from_secs(DEFAULT_LOCK_TTL_SECS);
+        let mut guard = self.lock.acquire(&lock_resource, lock_ttl).await?;
+
+        let inner = async {
+            let mut conn = self.get_connection().await?;
+            let Some((expected_json, mut session)) =
+                self.load_session_from_key(&mut conn, &key).await?
+            else {
+                return Err(SessionError::NotFound { id: id.to_string() });
+            };
+
+            f(&mut session)?;
+            validate_session_graph(&session, "redis")?;
+            session.refresh_summary_cache();
+            let next_json = serde_json::to_string(&session).map_err(SessionError::Serialization)?;
+
+            if self
+                .compare_and_set_session(&mut conn, &key, &expected_json, &next_json)
+                .await?
+            {
+                Ok(())
+            } else {
+                Err(SessionError::Storage {
+                    message: format!(
+                        "REDIS_SESSION_CONFLICT during with_session_lock for session {}",
+                        id
+                    ),
+                })
+            }
+        }
+        .await;
+
+        if let Err(release_err) = self.lock.release(&mut guard).await {
+            tracing::warn!(
+                session_id = %id,
+                error = %release_err,
+                "Failed to release distributed lock after with_session_lock"
+            );
+        }
+
+        inner
+    }
+
     async fn append_graph_event(
         &self,
         session_id: &SessionId,
@@ -500,10 +631,13 @@ impl Persistence for RedisPersistence {
         .await
     }
 
-    async fn set_state(&self, session_id: &SessionId, state: SessionState) -> SessionResult<()> {
-        self.mutate_session_atomic(session_id, "set_state", |session| {
-            session.set_state(state);
-            Ok(())
+    async fn finalize(&self, session_id: &SessionId, terminal: SessionState) -> SessionResult<()> {
+        self.mutate_session_atomic(session_id, "finalize", |session| {
+            session
+                .finalize(terminal)
+                .map_err(|e| SessionError::InvalidTransition {
+                    message: e.to_string(),
+                })
         })
         .await
     }
@@ -650,7 +784,7 @@ impl Persistence for RedisPersistence {
         let json = &items[0];
         let mut item: QueueItem =
             serde_json::from_str(json).map_err(SessionError::Serialization)?;
-        item.start_processing();
+        let _ = item.transition(QueueItemState::Processing);
 
         let index_key = self.queue_index_key();
         conn.hdel::<_, _, ()>(&index_key, item.id.to_string())
@@ -723,7 +857,7 @@ impl Persistence for RedisPersistence {
         for item in items {
             let mut item = item.clone();
             item.session_id = *session_id;
-            item.status = super::types::QueueStatus::Pending;
+            item.state = QueueItemState::Pending;
             item.processed_at = None;
             let data = serde_json::to_string(&item).map_err(SessionError::Serialization)?;
             pipe.cmd("ZADD")
@@ -772,7 +906,7 @@ impl Persistence for RedisPersistence {
             .cloned()
             .map(|mut item| {
                 item.session_id = persisted.id;
-                item.status = super::types::QueueStatus::Pending;
+                item.state = QueueItemState::Pending;
                 item.processed_at = None;
                 item
             })
@@ -1172,6 +1306,52 @@ mod tests {
     use super::*;
     use crate::ir::ContentPart;
     use crate::session::{SessionConfig, SessionMessage};
+
+    /// Phase D F-1 follow-up: `interpret_version_bytes` is the
+    /// pure helper that turns a raw Redis string value into a
+    /// typed version, erroring out when the value is outside the
+    /// supported window. Covers every branch of the helper
+    /// without a live Redis instance.
+    #[test]
+    fn interpret_version_bytes_covers_all_windows() {
+        use crate::session::{SchemaVersionMismatchDirection, SessionError, SessionSchemaVersion};
+
+        // Absent key -> None.
+        assert!(
+            RedisPersistence::interpret_version_bytes(None)
+                .unwrap()
+                .is_none()
+        );
+
+        // Current version -> accepted.
+        let current = SessionSchemaVersion::CURRENT.value().to_string();
+        let got = RedisPersistence::interpret_version_bytes(Some(&current))
+            .unwrap()
+            .unwrap();
+        assert_eq!(got, SessionSchemaVersion::CURRENT);
+
+        // Future version -> TooNew with component="redis".
+        let future = (SessionSchemaVersion::CURRENT.value() + 3).to_string();
+        match RedisPersistence::interpret_version_bytes(Some(&future)).unwrap_err() {
+            SessionError::SchemaVersionMismatch {
+                component,
+                direction,
+                ..
+            } => {
+                assert_eq!(component, "redis");
+                assert_eq!(direction, SchemaVersionMismatchDirection::TooNew);
+            }
+            other => panic!("expected SchemaVersionMismatch, got {other:?}"),
+        }
+
+        // Garbage value -> typed Storage error, not a silent skip.
+        match RedisPersistence::interpret_version_bytes(Some("not-a-number")).unwrap_err() {
+            SessionError::Storage { message } => {
+                assert!(message.contains("non-numeric"));
+            }
+            other => panic!("expected Storage, got {other:?}"),
+        }
+    }
 
     #[test]
     fn validate_loaded_session_rejects_invalid_graph() {

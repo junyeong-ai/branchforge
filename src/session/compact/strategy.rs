@@ -46,6 +46,7 @@ impl CompactionContext {
 }
 
 /// What a compaction strategy plans to do.
+#[non_exhaustive]
 #[derive(Debug)]
 pub enum CompactionPlan {
     /// No compaction needed.

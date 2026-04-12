@@ -9,7 +9,7 @@ use uuid::Uuid;
 
 use super::queue::{MergedInput, QueueError, QueuedInput, SharedInputQueue};
 use super::state::{Session, SessionConfig, SessionId};
-use super::types::{CompactRecord, Plan, PlanStatus, TodoItem, ToolExecution};
+use super::types::{CompactRecord, Plan, PlanState, TodoItem, ToolExecution};
 use crate::graph::{NodeId, NodeKind};
 
 const MAX_EXECUTION_LOG_SIZE: usize = 1000;
@@ -194,7 +194,7 @@ impl ToolState {
             let mut session = self.0.session.write().await;
             let branch_id = session.graph.primary_branch;
             let plan_id = if let Some(ref plan) = session.current_plan
-                && plan.status == PlanStatus::Executing
+                && plan.state == PlanState::Executing
             {
                 Some(plan.id)
             } else {
@@ -403,7 +403,7 @@ mod tests {
         let state = ToolState::new(SessionId::new());
 
         let plan = state.enter_plan_mode(Some("Test Plan".to_string())).await;
-        assert_eq!(plan.status, PlanStatus::Draft);
+        assert_eq!(plan.state, PlanState::Draft);
         assert!(state.is_in_plan_mode().await);
 
         state
@@ -412,7 +412,7 @@ mod tests {
 
         let approved = state.exit_plan_mode().await;
         assert!(approved.is_some());
-        assert_eq!(approved.unwrap().status, PlanStatus::Approved);
+        assert_eq!(approved.unwrap().state(), PlanState::Approved);
     }
 
     #[tokio::test]

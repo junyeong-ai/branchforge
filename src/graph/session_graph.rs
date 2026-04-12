@@ -648,14 +648,11 @@ impl SessionGraph {
             }));
 
         if let Some(ref bus) = self.event_bus {
-            bus.emit_simple(
-                crate::events::EventKind::BranchForked,
-                serde_json::json!({
-                    "branch_id": branch_id.to_string(),
-                    "name": &branch.name,
-                    "forked_from": branch.forked_from.map(|id| id.to_string()),
-                }),
-            );
+            bus.emit_typed(crate::events::BranchForkedPayload {
+                branch_id: branch_id.to_string(),
+                name: branch.name.clone(),
+                forked_from: branch.forked_from.map(|id| id.to_string()),
+            });
         }
 
         Ok(branch_id)
@@ -735,14 +732,11 @@ impl SessionGraph {
         ));
 
         if let Some(ref bus) = self.event_bus {
-            bus.emit_simple(
-                crate::events::EventKind::CheckpointCreated,
-                serde_json::json!({
-                    "checkpoint_id": checkpoint_id.to_string(),
-                    "branch_id": branch_id.to_string(),
-                    "label": &checkpoint_label,
-                }),
-            );
+            bus.emit_typed(crate::events::CheckpointCreatedPayload {
+                checkpoint_id: checkpoint_id.to_string(),
+                branch_id: branch_id.to_string(),
+                label: checkpoint_label.clone(),
+            });
         }
 
         Ok(checkpoint_id)

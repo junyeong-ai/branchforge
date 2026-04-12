@@ -10,7 +10,7 @@ use super::archive::verify_restored_session_roundtrip;
 use chrono::{DateTime, Utc};
 
 use super::state::{Session, SessionId, SessionMessage, SessionState, SessionType};
-use super::types::QueueItem;
+use super::types::{QueueItem, QueueItemState};
 use super::{SessionError, SessionResult};
 use crate::graph::{GraphEvent, GraphValidator, SessionGraph};
 
@@ -184,25 +184,28 @@ pub trait Persistence: Send + Sync {
     // Cleanup
     async fn cleanup_expired(&self) -> SessionResult<usize>;
 
-    /// Apply a synchronous mutation to a session under an advisory lock.
+    /// Apply a synchronous mutation to a session under a backend-owned
+    /// lock primitive. Each backend MUST override this method and wire
+    /// it to its own concurrency primitive:
     ///
-    /// The default implementation performs an **unlocked** load-modify-save cycle,
-    /// which is NOT safe under concurrent access. Backends that support concurrent
-    /// sessions **must** override this with a proper locking mechanism.
-    async fn with_session_lock(&self, id: &SessionId, f: SessionMutationFn) -> SessionResult<()> {
-        tracing::warn!(
-            session_id = %id,
-            backend = std::any::type_name::<Self>(),
-            "with_session_lock: using default unlocked load-modify-save — \
-             override this method for concurrent safety"
-        );
-        let mut session = self
-            .load(id)
-            .await?
-            .ok_or_else(|| SessionError::NotFound { id: id.to_string() })?;
-        f(&mut session)?;
-        self.save(&session).await
-    }
+    /// - **Memory**: `Arc<RwLock<HashMap>>` write guard.
+    /// - **JSONL**: `tokio::sync::Mutex` mutation lock (in-process only).
+    /// - **Postgres**: `BEGIN` + `SELECT ... FOR UPDATE` inside a single
+    ///   transaction so load/modify/save are row-level atomic.
+    /// - **Redis**: distributed lock (`RedisLock`) wrapping the
+    ///   compare-and-set cycle.
+    ///
+    /// The contract is **one-shot**: acquire the lock, run `f` exactly
+    /// once, release the lock, return. Retry belongs to higher-level
+    /// wrappers (e.g. [`crate::agent::recovery_recipes`] for transient
+    /// failures), not to this primitive — mixing the two concerns makes
+    /// recovery semantics opaque to callers.
+    ///
+    /// Phase G-1 removed the former `tracing::warn!` default implementation
+    /// because a silent runtime warning is not a safety mechanism. The
+    /// trait now fails to compile on backends that skip the override,
+    /// which is the only way to guarantee every backend is audited.
+    async fn with_session_lock(&self, id: &SessionId, f: SessionMutationFn) -> SessionResult<()>;
 
     async fn append_graph_event(
         &self,
@@ -248,11 +251,19 @@ pub trait Persistence: Send + Sync {
         .await
     }
 
-    async fn set_state(&self, session_id: &SessionId, state: SessionState) -> SessionResult<()> {
+    /// Drive the persisted session to a terminal state via the
+    /// [`Session::finalize`] FSM walker. The `terminal` argument must be
+    /// one of `Completed`, `Failed`, or `Cancelled`; any other value is
+    /// rejected by `Session::finalize`.
+    async fn finalize(&self, session_id: &SessionId, terminal: SessionState) -> SessionResult<()> {
         self.with_session_lock(
             session_id,
             Box::new(move |session| {
-                session.set_state(state);
+                session
+                    .finalize(terminal)
+                    .map_err(|e| SessionError::InvalidTransition {
+                        message: e.to_string(),
+                    })?;
                 Ok(())
             }),
         )
@@ -411,9 +422,9 @@ impl Persistence for MemoryPersistence {
             items.sort_by(|a, b| b.priority.cmp(&a.priority));
             if let Some(pos) = items
                 .iter()
-                .position(|i| i.status == super::types::QueueStatus::Pending)
+                .position(|i| i.state == QueueItemState::Pending)
             {
-                items[pos].start_processing();
+                let _ = items[pos].transition(QueueItemState::Processing);
                 return Ok(Some(items[pos].clone()));
             }
         }
@@ -423,7 +434,7 @@ impl Persistence for MemoryPersistence {
     async fn cancel_queued(&self, item_id: Uuid) -> SessionResult<bool> {
         for items in self.queue.write().await.values_mut() {
             if let Some(item) = items.iter_mut().find(|i| i.id == item_id) {
-                item.cancel();
+                let _ = item.transition(QueueItemState::Cancelled);
                 return Ok(true);
             }
         }
@@ -439,7 +450,7 @@ impl Persistence for MemoryPersistence {
             .map(|items| {
                 items
                     .iter()
-                    .filter(|i| i.status == super::types::QueueStatus::Pending)
+                    .filter(|i| i.state == QueueItemState::Pending)
                     .cloned()
                     .collect()
             })
@@ -456,7 +467,7 @@ impl Persistence for MemoryPersistence {
             .cloned()
             .map(|mut item| {
                 item.session_id = *session_id;
-                item.status = super::types::QueueStatus::Pending;
+                item.state = QueueItemState::Pending;
                 item.processed_at = None;
                 item
             })
@@ -478,7 +489,7 @@ impl Persistence for MemoryPersistence {
             .cloned()
             .map(|mut item| {
                 item.session_id = session.id;
-                item.status = super::types::QueueStatus::Pending;
+                item.state = QueueItemState::Pending;
                 item.processed_at = None;
                 item
             })
@@ -696,6 +707,60 @@ mod tests {
 
         let loaded = persistence.load(&session.id).await.unwrap().unwrap();
         assert_eq!(loaded.current_branch_messages().len(), 1);
+    }
+
+    /// Phase G-1 regression: `with_session_lock` is now a required
+    /// trait method with NO default implementation. Concurrent
+    /// mutations through this generic path must be serialized — if
+    /// the Memory backend's lock were incorrectly wired, the lost
+    /// update pattern would be observable here as a final counter
+    /// below N. Raising N to 50 gives the tokio scheduler enough
+    /// interleaving opportunities that an unlocked load-modify-save
+    /// fails reliably. The counter is stored on
+    /// `session.total_usage.input_tokens` because it is a plain
+    /// `u64` field on the session snapshot — no graph invariants
+    /// are touched, so any concurrency race manifests as a direct
+    /// lost update rather than a secondary integrity error.
+    #[tokio::test]
+    async fn phase_g1_with_session_lock_serializes_concurrent_mutations() {
+        use std::sync::Arc;
+
+        let persistence: Arc<dyn Persistence> = Arc::new(MemoryPersistence::new());
+        let session = Session::new(SessionConfig::default());
+        let id = session.id;
+        persistence.save(&session).await.unwrap();
+
+        const N: u64 = 50;
+        let mut handles = Vec::with_capacity(N as usize);
+        for _ in 0..N {
+            let p = persistence.clone();
+            handles.push(tokio::spawn(async move {
+                p.with_session_lock(
+                    &id,
+                    Box::new(|s: &mut Session| {
+                        // Non-atomic read-modify-write on a simple
+                        // scalar field. If `with_session_lock` is
+                        // unlocked, two concurrent tasks will both
+                        // read the same `current` and both write
+                        // `current + 1`, losing one increment.
+                        let current = s.total_usage.input_tokens;
+                        s.total_usage.input_tokens = current + 1;
+                        Ok(())
+                    }),
+                )
+                .await
+                .unwrap();
+            }));
+        }
+        for h in handles {
+            h.await.unwrap();
+        }
+
+        let final_session = persistence.load(&id).await.unwrap().unwrap();
+        assert_eq!(
+            final_session.total_usage.input_tokens, N,
+            "lost updates detected — with_session_lock failed to serialize mutations"
+        );
     }
 
     #[tokio::test]

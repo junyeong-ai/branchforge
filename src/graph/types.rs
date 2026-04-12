@@ -16,6 +16,7 @@ pub struct NodeProvenance {
     pub subagent_description: Option<String>,
 }
 
+#[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum NodeKind {

@@ -30,6 +30,7 @@ use super::{COST_SCALE_FACTOR, cost_to_bits};
 /// request construction (it changes which pricing table the
 /// preflight uses), but the budget enforcement decision must
 /// happen after construction (it sees the final estimate).
+#[non_exhaustive]
 #[derive(Debug, Clone, Default, PartialEq)]
 pub enum BudgetExceedPolicy {
     /// Stop execution before the next API call. The default —
@@ -122,6 +123,21 @@ impl BudgetTracker {
         Ok(cost)
     }
 
+    /// Seed the tracker with cost already spent **outside** this
+    /// process — used by `AgentCheckpoint` resume to rehydrate a
+    /// fresh tracker with the accumulated spend from a prior run.
+    ///
+    /// Returns [`crate::Error::ResourceExhausted`] on overflow, just
+    /// like [`Self::record`]. Callers should invoke this **once**,
+    /// right after constructing the tracker and before any
+    /// [`Self::record`] calls, so the baseline is established before
+    /// new usage is accumulated on top.
+    pub fn restore_spent(&self, cost: Decimal) -> crate::Result<()> {
+        let bits = cost_to_bits(cost)?;
+        self.used_cost_bits.fetch_add(bits, Ordering::Relaxed);
+        Ok(())
+    }
+
     fn used_cost_usd_internal(&self) -> Decimal {
         Decimal::from(self.used_cost_bits.load(Ordering::Relaxed)) / COST_SCALE_FACTOR
     }
@@ -206,6 +222,7 @@ impl BudgetTracker {
     }
 }
 
+#[non_exhaustive]
 #[derive(Debug, Clone)]
 pub enum BudgetStatus {
     Unlimited {
@@ -299,5 +316,51 @@ mod tests {
 
         assert!(matches!(tracker.check(), BudgetStatus::Exceeded { .. }));
         assert!(!tracker.should_stop()); // WarnAndContinue doesn't stop
+    }
+
+    /// B-1 checkpoint/resume contract: a fresh tracker seeded with
+    /// `restore_spent` plus one additional `record` must match the
+    /// total cost a single tracker would have after two records.
+    /// Proves the restore path is the identity element for the
+    /// `record` accumulator — no rounding, no drift.
+    #[test]
+    fn restore_spent_resumes_accumulator() {
+        let usage = Usage {
+            input_tokens: 100_000,
+            output_tokens: 50_000,
+            ..Default::default()
+        };
+
+        // Baseline: single tracker records the full usage twice.
+        let live = BudgetTracker::new(dec!(10));
+        live.record("claude-sonnet-4-5", &usage).unwrap();
+        live.record("claude-sonnet-4-5", &usage).unwrap();
+        let live_total = live.used_cost_usd();
+
+        // Simulated restart: the first tracker is dropped, a new one
+        // is built and seeded with the first tracker's cost, then
+        // the second record arrives.
+        let before_checkpoint = BudgetTracker::new(dec!(10));
+        before_checkpoint
+            .record("claude-sonnet-4-5", &usage)
+            .unwrap();
+        let checkpointed = before_checkpoint.used_cost_usd();
+
+        let after_restart = BudgetTracker::new(dec!(10));
+        after_restart.restore_spent(checkpointed).unwrap();
+        after_restart.record("claude-sonnet-4-5", &usage).unwrap();
+
+        assert_eq!(after_restart.used_cost_usd(), live_total);
+    }
+
+    /// `restore_spent` must cooperate with the Stop policy: if the
+    /// seeded cost already exceeds the limit, the next `check()`
+    /// must report Exceeded even before a fresh `record` is made.
+    #[test]
+    fn restore_spent_triggers_exceeded_without_new_record() {
+        let tracker = BudgetTracker::new(dec!(5));
+        tracker.restore_spent(dec!(6)).unwrap();
+        assert!(matches!(tracker.check(), BudgetStatus::Exceeded { .. }));
+        assert!(tracker.should_stop());
     }
 }

@@ -41,7 +41,7 @@ mod traits;
 mod worker;
 
 pub use coordinator::{Coordinator, CoordinatorBuilder};
-pub use directory::{AgentDirectory, AgentHandle, AgentId, AgentStatus};
+pub use directory::{AgentDirectory, AgentHandle, AgentId, DirectoryEntryStatus};
 pub use messaging::{AgentMessage, MessageChannel};
 pub use send_message::SendMessageTool;
 pub use traits::{Coordination, CoordinationContext};

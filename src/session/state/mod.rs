@@ -7,7 +7,7 @@ mod message;
 mod policy;
 
 pub use config::SessionConfig;
-pub use enums::{SessionState, SessionType};
+pub use enums::{SessionState, SessionTransitionError, SessionType};
 pub use ids::{MessageId, SessionId};
 pub use message::{
     ExecutionMetadata, MessageMetadata, SessionMessage, ThinkingMetadata, ToolResultMeta,
@@ -88,8 +88,9 @@ pub struct Session {
     pub(crate) tenant_id: Option<String>,
     /// Principal (user/service) identifier — set via [`Self::set_identity`] only.
     pub(crate) principal_id: Option<String>,
-    /// Lifecycle state. Mutated only via [`Self::set_state`] so the
-    /// caller cannot bypass observability hooks. Read access stays public.
+    /// Lifecycle state. Mutated only via [`Self::transition`] or
+    /// [`Self::finalize`] so the FSM invariant is enforced at every
+    /// mutation point. Read access stays public.
     pub(crate) state: SessionState,
     pub config: SessionConfig,
     pub authorization: SessionAuthorization,
@@ -608,9 +609,64 @@ impl Session {
         }
     }
 
-    pub fn set_state(&mut self, state: SessionState) {
-        self.state = state;
+    /// Validated lifecycle transition. Returns [`SessionTransitionError`]
+    /// if the move is illegal per the [`SessionState`] FSM.
+    ///
+    /// This is the only mutation entry point for `Session::state` —
+    /// direct field assignment is not permitted outside this module
+    /// (except for the fork reset, which constructs a fresh session).
+    pub fn transition(&mut self, next: SessionState) -> Result<(), SessionTransitionError> {
+        self.state = self.state.transition_to(next)?;
         self.updated_at = Utc::now();
+        Ok(())
+    }
+
+    /// Reset a terminal session to [`SessionState::Created`] so it can
+    /// be re-used by the task tracker's resume path.
+    ///
+    /// This is the single documented escape hatch from the forward-only
+    /// FSM. It is valid **only** when the current state is terminal —
+    /// resuming an in-flight session is rejected.
+    ///
+    /// The session's `error` field is cleared; graph, identity, usage,
+    /// and history are preserved so a resume sees the prior context.
+    pub fn reset_for_resume(&mut self) -> Result<(), SessionTransitionError> {
+        if !self.state.is_terminal() {
+            return Err(SessionTransitionError {
+                from: self.state,
+                to: SessionState::Created,
+            });
+        }
+        self.state = SessionState::Created;
+        self.error = None;
+        self.updated_at = Utc::now();
+        Ok(())
+    }
+
+    /// Drive the FSM to a terminal state, walking through any required
+    /// intermediate phases (`Created → Running → <finalizing> → <terminal>`).
+    ///
+    /// This is the one-shot "finalize" entry point for external consumers
+    /// that want to force an end state without caring about intermediate
+    /// phases. Idempotent: returns `Ok(())` if `self.state == terminal`.
+    /// Errors if `terminal` is not a terminal state or if the current
+    /// state has already committed to a different finalizing lane.
+    pub fn finalize(&mut self, terminal: SessionState) -> Result<(), SessionTransitionError> {
+        if self.state == terminal {
+            return Ok(());
+        }
+        let finalizing = terminal.finalizing_phase().ok_or(SessionTransitionError {
+            from: self.state,
+            to: terminal,
+        })?;
+        if self.state == SessionState::Created {
+            self.transition(SessionState::Running)?;
+        }
+        if !self.state.is_finalizing() {
+            self.transition(finalizing)?;
+        }
+        self.transition(terminal)?;
+        Ok(())
     }
 
     pub fn set_todos(&mut self, todos: Vec<TodoItem>) {
@@ -643,7 +699,12 @@ impl Session {
 
     pub fn exit_plan_mode(&mut self) -> Option<Plan> {
         if let Some(ref mut plan) = self.current_plan {
-            plan.approve();
+            // Plan exits plan-mode by transitioning Draft → Approved.
+            // A plan already past Draft (previously approved, for
+            // example) is left at its current state.
+            if plan.state() == crate::session::types::PlanState::Draft {
+                let _ = plan.transition(crate::session::types::PlanState::Approved);
+            }
             self.updated_at = Utc::now();
         }
         self.current_plan.take()
@@ -651,7 +712,8 @@ impl Session {
 
     pub fn cancel_plan(&mut self) -> Option<Plan> {
         if let Some(ref mut plan) = self.current_plan {
-            plan.cancel();
+            // Cancel is reachable from any non-terminal plan state.
+            let _ = plan.transition(crate::session::types::PlanState::Cancelled);
             self.updated_at = Utc::now();
         }
         self.current_plan.take()
@@ -660,7 +722,7 @@ impl Session {
     pub fn is_in_plan_mode(&self) -> bool {
         self.current_plan
             .as_ref()
-            .is_some_and(|p| !p.status.is_terminal())
+            .is_some_and(|p| !p.state().is_terminal())
     }
 
     pub fn record_compact(&mut self, record: CompactRecord) {
