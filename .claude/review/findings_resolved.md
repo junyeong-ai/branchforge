@@ -40,6 +40,10 @@ Findings already rejected with evidence or merged via PR. Design reviews must ch
   - Only real violation: `ProviderErrorKind` at `src/lib.rs:388` (1 item, fixed in Phase 0-2)
 - **Lesson**: Before proposing "missing attribute X on enum Y", grep the enum definition directly. Don't trust cross-session memory of enum attribute state.
 
+## F-rej-019 · "BashAnalyzer regex+AST is a dual system — merge into AST only"
+- **Origin**: Round-3 analysis (Phase 7.5-2 task D5)
+- **Refutation**: Regex and AST serve DIFFERENT analysis concerns. Regex catches multi-command dangerous patterns (curl|sh, rm -rf /, find / -exec rm) spanning pipeline boundaries — hard to express as tree-sitter queries. AST catches structural concerns (command substitution, variable expansion, path extraction) — unreliable with regex due to nested quoting/heredocs. This is defense-in-depth, not a dual system. `security.md` explicitly documents this design. The regex patterns run on the model's bash command input (not on tool outputs), and word boundaries (`\b`) prevent the false-positive scenarios cited in the heuristics audit (`\bsrm\b` doesn't match `premium_srm_tool`, `\bmkfs(\.[a-z0-9]+)?\s` doesn't match paths containing mkfs).
+
 ## F-rej-018 · "Shutdown safety: spawned tasks escape DropGuard"
 - **Origin**: Round-3 analysis (Phase 7-2)
 - **Refutation**: Tool spawns use `runtime.shutdown.child_token()` via `execute_with_cancel` (`streaming.rs:1522`). Task spawns use `select!(result, cancel_rx)` at `task.rs:463-514` with handles stored in the registry for abort. The execute_inner loop checks `is_cancelled()` on every iteration (wired through IterationGate). Fire-and-forget spawns (hooks at `streaming.rs:1115`, persist at `streaming.rs:1887`) are intentionally unguarded — they complete naturally or are dropped by the Tokio runtime on program exit. The `_shutdown_guard: DropGuard` fires `cancel()` on the CancellationToken when the last Arc<AgentRuntime> drops, propagating to all child tokens.
