@@ -144,8 +144,7 @@ pub use context::PromptFrame;
 pub use context_scope::{ContextScope, SharedContextScope};
 pub use graph::{
     Bookmark, BookmarkId, Branch, BranchExport, BranchId, Checkpoint, ExportBookmark, ExportNode,
-    GraphError, GraphEvent, GraphEventBody, GraphMaterializer, GraphNode, NodeId, NodeKind,
-    ReplayInput, SessionGraph,
+    GraphError, GraphEvent, GraphEventBody, GraphNode, NodeId, NodeKind, ReplayInput, SessionGraph,
 };
 pub use tools::{
     ExecutionContext, ProgressBuilder, ProgressStatus, SchemaTool, Tool, ToolRegistry, ToolSurface,

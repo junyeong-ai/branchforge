@@ -20,7 +20,7 @@ pub use error::GraphError;
 pub use event::{EventMetadata, GraphEvent, GraphEventBody};
 pub use explorer::{BranchSummary, GraphExplorer, NodeSummary, TreeNodeSummary, TreeRenderMode};
 pub use export::{BranchExport, ExportBookmark, ExportCheckpoint, ExportNode, ExportTreeNode};
-pub use materializer::GraphMaterializer;
+pub(crate) use materializer::GraphMaterializer;
 pub use provenance::{ProvenanceDigest, ProvenanceSummarizer};
 pub use query::{GraphFilter, GraphQuery};
 pub use reference::{GraphReference, GraphReferenceResolver};

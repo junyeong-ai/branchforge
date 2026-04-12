@@ -7,14 +7,14 @@ use super::session_graph::SessionGraph;
 use super::types::{Bookmark, Branch, Checkpoint, GraphNode, NodeKind};
 
 #[derive(Debug, Default)]
-pub struct GraphMaterializer;
+pub(crate) struct GraphMaterializer;
 
 impl GraphMaterializer {
     /// Materialize a graph from events with an explicit primary branch ID.
     ///
     /// Persistence backends should always use this method when restoring,
     /// passing the stored primary_branch_id to avoid event-order dependence.
-    pub fn from_events_with_primary(
+    pub(crate) fn from_events_with_primary(
         events: &[super::GraphEvent],
         primary_branch_id: Option<super::types::BranchId>,
     ) -> SessionGraph {
@@ -27,7 +27,7 @@ impl GraphMaterializer {
         graph
     }
 
-    pub fn from_events(events: &[super::GraphEvent]) -> SessionGraph {
+    pub(crate) fn from_events(events: &[super::GraphEvent]) -> SessionGraph {
         let mut graph = SessionGraph::default();
         graph.events.clear();
         graph.nodes = HashMap::new();
@@ -239,9 +239,6 @@ impl GraphMaterializer {
         graph
     }
 
-    pub fn empty() -> SessionGraph {
-        SessionGraph::default()
-    }
 }
 
 #[cfg(test)]
@@ -889,8 +886,8 @@ mod tests {
     // ---------------------------------------------------------------
 
     #[test]
-    fn empty_materializer_produces_default_graph() {
-        let graph = GraphMaterializer::empty();
+    fn empty_event_log_materializes_valid_graph() {
+        let graph = GraphMaterializer::from_events(&[]);
         assert!(graph.nodes.is_empty());
         assert_eq!(graph.branches.len(), 1);
         assert!(graph.branches.contains_key(&graph.primary_branch));
