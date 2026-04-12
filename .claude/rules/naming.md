@@ -130,7 +130,7 @@ accordingly:
      `TransitionError` on illegal preconditions. Callers use the
      method, not direct assignment.
 
-  Enforced by `scripts/audit_fsm_bypass.py` (Phase 0-3 gate).
+  Enforced by `scripts/audit_fsm_bypass.py`.
 - **Mathematical binary** — two-variant symmetry that cannot grow:
   `SchemaVersionMismatchDirection` (`TooOld` / `TooNew`).
 - **SSoT design commitment** — variants are fixed by a project

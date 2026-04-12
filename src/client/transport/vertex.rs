@@ -318,10 +318,10 @@ impl ModelTransport for VertexTransport {
     }
 }
 
-/// File-level test helper: construct a `VertexTransport` with a stub
-/// token provider so offline tests can exercise `resolve_endpoint` and
-/// `classify_error` without touching GCP metadata. Compiled only under
-/// `cfg(test)` and visible to the whole crate's test tree.
+/// Construct a `VertexTransport` with a stub token provider so offline
+/// tests can exercise `resolve_endpoint` and `classify_error` without
+/// touching GCP metadata. Visible to the whole crate's test tree so the
+/// cross-transport `classification_matrix` module can reach it.
 #[cfg(test)]
 pub(crate) fn fake_transport(location: &str) -> VertexTransport {
     struct FakeProvider;

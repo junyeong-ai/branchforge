@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-`#[non_exhaustive]` hygiene audit (Phase 0-2 + Phase 0-7 gate).
+`#[non_exhaustive]` hygiene audit.
 
 Walks every `pub enum` under `src/` and checks it against the closed-list
 declared in `.claude/rules/naming.md`:

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-FSM-bypass audit (Phase 0-3 + Phase 0-7 gate).
+FSM bypass audit.
 
 Scans src/ for assignments of the form `<lvalue> = <Fsm>::Variant` where
 <Fsm> is one of the five closed-list FSMs declared in .claude/rules/naming.md.

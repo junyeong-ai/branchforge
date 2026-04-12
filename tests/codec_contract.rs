@@ -2017,13 +2017,12 @@ mod system_block_boundary_must_not_leak {
 }
 
 // =============================================================================
-// Phase 0-4 — Codec × Transport composition matrix
+// Codec × Transport composition matrix
 // =============================================================================
 //
 // Frozen truth table for the 5 × 4 composition grid plus an explicit check
 // that each codec's `pinned_transport()` matches the expected table cell.
-// Adding a codec or transport without updating this matrix fails the build,
-// which is exactly what the Phase 0 gate is for.
+// Adding a codec or transport without updating this matrix fails the build.
 
 mod composition_matrix {
     use super::*;

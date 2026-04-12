@@ -89,7 +89,7 @@ pub mod security;
 pub mod session;
 pub mod skills;
 pub mod subagents;
-/// Token counting primitives and the [`TokenCount`](tokens::TokenCount) newtype.
+/// Token counting primitives and the `TokenCount` newtype.
 pub mod tokens;
 pub mod tools;
 pub mod types;

@@ -83,10 +83,9 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
 
-      # Phase 0-6 gate: the pure-core build must keep working so the
-      # SDK stays usable as a minimal LLM client without filesystem,
-      # sandbox, or cloud dependencies. Layer invariants in
-      # .claude/rules/architecture.md#10 and memory/verified_structure.md.
+      # The pure-core build keeps the SDK usable as a minimal LLM client
+      # without filesystem, sandbox, or cloud dependencies. Any missing
+      # #[cfg(feature = "...")] gate must fail CI before merge.
       - name: Build (no-default-features)
         run: cargo build --lib --no-default-features
 

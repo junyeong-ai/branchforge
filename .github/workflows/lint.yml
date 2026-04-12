@@ -32,9 +32,9 @@ jobs:
       - run: cargo clippy --all-targets --all-features -- -D warnings
 
   naming-lint:
-    # Phase 0-7 gate: enforce the rules declared in .claude/rules/naming.md
-    # without waiting for a human reviewer to spot violations. Each audit is
-    # a single Python file under scripts/ and fails closed.
+    # Enforce the rules declared in .claude/rules/naming.md without waiting
+    # for a human reviewer to spot violations. Each audit is a single
+    # Python file under scripts/ and fails closed.
     name: Naming & FSM Audit
     runs-on: ubuntu-latest
     steps:

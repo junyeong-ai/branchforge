@@ -283,7 +283,7 @@ mod tests {
 }
 
 // =============================================================================
-// Phase 0-5 — Transport error classification matrix
+// Transport error classification matrix
 // =============================================================================
 //
 // Cross-transport frozen expectation table for `classify_error(status, body)`.
@@ -293,12 +293,11 @@ mod tests {
 // `(ProviderErrorKind, has_hint)` outcome on every transport.
 //
 // Adding a new transport or changing a classification rule flips a cell and
-// fails the build — which is exactly the Phase 0 gate invariant.
+// fails the build.
 //
-// Note: this matrix is an internal audit, so it lives as a `#[cfg(test)]`
-// module inside the crate rather than in `tests/`. That way it can reach
-// each transport's `pub(crate) fn fake_transport(...)` helper without
-// exposing a production-facing test-utility surface.
+// The matrix lives as a `#[cfg(test)]` module inside the crate rather than
+// in `tests/` so it can reach each transport's `pub(crate) fn fake_transport`
+// helper without exposing a production-facing test-utility surface.
 
 #[cfg(all(test, feature = "aws", feature = "azure", feature = "gcp"))]
 mod classification_matrix {
@@ -307,8 +306,7 @@ mod classification_matrix {
 
     // Build real transport instances for the matrix. Direct and Foundry
     // have public sync constructors; Vertex and Bedrock use their
-    // `#[cfg(test)] pub(crate) fn fake_transport` helpers promoted in
-    // Phase 0-5.
+    // `#[cfg(test)] pub(crate) fn fake_transport` helpers.
     fn direct() -> direct::DirectTransport {
         use secrecy::SecretString;
         direct::DirectTransport::new(

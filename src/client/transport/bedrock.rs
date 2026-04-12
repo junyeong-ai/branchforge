@@ -272,10 +272,10 @@ impl ModelTransport for BedrockTransport {
     }
 }
 
-/// File-level test helper: construct a `BedrockTransport` with a bearer
-/// stub so offline tests can exercise `classify_error` without hitting
-/// AWS. Compiled only under `cfg(test)` and visible to the whole crate's
-/// test tree.
+/// Construct a `BedrockTransport` with a bearer stub so offline tests
+/// can exercise `classify_error` without hitting AWS. Visible to the
+/// whole crate's test tree so the cross-transport `classification_matrix`
+/// module can reach it.
 #[cfg(test)]
 pub(crate) fn fake_transport(region: &str) -> BedrockTransport {
     BedrockTransport {
