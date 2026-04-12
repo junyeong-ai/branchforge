@@ -40,6 +40,18 @@ Findings already rejected with evidence or merged via PR. Design reviews must ch
   - Only real violation: `ProviderErrorKind` at `src/lib.rs:388` (1 item, fixed in Phase 0-2)
 - **Lesson**: Before proposing "missing attribute X on enum Y", grep the enum definition directly. Don't trust cross-session memory of enum attribute state.
 
+## F-rej-017 · "Global persist mutex → per-session DashMap"
+- **Origin**: Round-3 analysis (Phase 6 task D5)
+- **Refutation**: `Agent.persist_serializer` at `executor.rs:29` is `Arc<Mutex<()>>` — per-Agent instance, not global. Each Agent wraps one session. Multi-tenant: each agent has its own serializer with zero cross-agent contention.
+
+## F-rej-016 · "persist_session_state called 3-5× per turn — reduce frequency"
+- **Origin**: Round-3 analysis (Phase 6 task D11)
+- **Refutation**: Of 7 calls in execute_inner, 2 are `_detached()` (non-blocking fire-and-forget via persist serializer mutex), 2 are bookends (initial user message + final flush), 1 is post-compaction (significant state change), 1 is post-shutdown, 1 is post-skill. The detached calls at `execution.rs:539,826` are explicitly documented as mid-turn crash-safety saves that don't block the LLM iteration. Per-turn cost: 0 blocking calls in the hot loop (response + tool results are detached), 1 await at compaction boundary. Already optimal.
+
+## F-rej-015 · "OTEL span attributes missing on ProviderClient/Tool/execute_inner"
+- **Origin**: Round-3 analysis (Phase 5 OTEL task)
+- **Refutation**: `ProviderClient::send` at `provider_client.rs:113` creates `ApiCallSpan::with_system(model, codec_id)` with `gen_ai.request.model`, `gen_ai.system`, full usage + cache + reasoning tokens, latency, error category. `ToolRegistry::execute_with_progress` at `registry.rs:151` creates a `tool.execute` span with `tool.name`, `tool.duration_ms`, `tool.error`, `error.category`. `Agent::execute_inner` has `#[instrument(fields(session_id))]`. All stable OTel semantic conventions are covered.
+
 ## F-rej-014 · "CostLedger SSoT needed to replace 3-way cost accumulation"
 - **Origin**: Round-3/4 analysis (Phase 5 CostLedger task)
 - **Refutation**: The 4 accumulators (total_usage, session.total_usage, metrics, budget_tracker) serve **intentionally different scopes** (per-turn / per-session / per-turn-metrics / per-agent). All receive the **same** `ir_usage` object in the same call chain (`accumulate_response_usage` at `src/agent/common.rs:234`). There is no parallel computation from different sources, so drift is structurally impossible. A CostLedger would be an abstraction over 4 different-scoped views, not a simplification.
