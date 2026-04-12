@@ -26,7 +26,10 @@ use futures::stream::{Stream, StreamExt};
 
 use crate::client::codec::{InvocationMode, ModelCodec};
 use crate::client::transport::ModelTransport;
-use crate::ir::{ModelRequest, ModelResponse, ModelStreamChunk, StreamDecodeState, StreamFraming};
+use crate::ir::{
+    ModelRequest, ModelResponse, ModelStreamChunk, StreamDecodeState, StreamFraming, SystemBlock,
+    SystemPrompt,
+};
 use crate::{Error, Result};
 
 /// Boxed stream of decoded [`ModelStreamChunk`]s.
@@ -38,6 +41,7 @@ pub struct ProviderClient {
     codec: Arc<dyn ModelCodec>,
     transport: Arc<dyn ModelTransport>,
     http: reqwest::Client,
+    auth_preamble: Option<String>,
 }
 
 impl std::fmt::Debug for ProviderClient {
@@ -51,12 +55,17 @@ impl std::fmt::Debug for ProviderClient {
 
 impl ProviderClient {
     /// Compose a codec and transport with composition checks.
-    pub fn new(codec: Arc<dyn ModelCodec>, transport: Arc<dyn ModelTransport>) -> Result<Self> {
+    pub fn new(
+        codec: Arc<dyn ModelCodec>,
+        transport: Arc<dyn ModelTransport>,
+        auth_preamble: Option<String>,
+    ) -> Result<Self> {
         validate_composition(codec.as_ref(), transport.as_ref())?;
         Ok(Self {
             codec,
             transport,
             http: reqwest::Client::new(),
+            auth_preamble,
         })
     }
 
@@ -66,12 +75,14 @@ impl ProviderClient {
         codec: Arc<dyn ModelCodec>,
         transport: Arc<dyn ModelTransport>,
         http: reqwest::Client,
+        auth_preamble: Option<String>,
     ) -> Result<Self> {
         validate_composition(codec.as_ref(), transport.as_ref())?;
         Ok(Self {
             codec,
             transport,
             http,
+            auth_preamble,
         })
     }
 
@@ -97,6 +108,31 @@ impl ProviderClient {
     /// [`crate::auth::Auth::OAuth`]. Read-only by design.
     pub fn transport(&self) -> &dyn crate::client::transport::ModelTransport {
         self.transport.as_ref()
+    }
+
+    /// If `auth_preamble` is set, clone the request and prepend an uncached
+    /// [`ir::SystemBlock`] containing the preamble text. This ensures the
+    /// preamble (e.g. `CLI_IDENTITY` for OAuth) is always the first system
+    /// content on the wire, regardless of how the caller constructed the
+    /// system prompt.
+    fn with_preamble(&self, request: &ModelRequest) -> ModelRequest {
+        let preamble = match &self.auth_preamble {
+            Some(p) => p,
+            None => return request.clone(),
+        };
+        let preamble_block = SystemBlock::uncached(preamble);
+        let mut request = request.clone();
+        request.system = Some(match request.system.take() {
+            Some(SystemPrompt::Blocks(mut blocks)) => {
+                blocks.insert(0, preamble_block);
+                SystemPrompt::Blocks(blocks)
+            }
+            Some(SystemPrompt::Text(text)) => {
+                SystemPrompt::Blocks(vec![preamble_block, SystemBlock::uncached(text)])
+            }
+            None => SystemPrompt::Blocks(vec![preamble_block]),
+        });
+        request
     }
 
     /// Send a unary request and decode the response.
@@ -171,6 +207,8 @@ impl ProviderClient {
         request: &ModelRequest,
         mode: InvocationMode,
     ) -> Result<ModelResponse> {
+        let request = self.with_preamble(request);
+        let request = &request;
         let encoded = self.codec.encode_request(request, mode)?;
         let endpoint = self
             .transport
@@ -283,6 +321,8 @@ impl ProviderClient {
         cancel_token: tokio_util::sync::CancellationToken,
     ) -> Result<ChunkStream> {
         let mode = InvocationMode::Stream;
+        let request = self.with_preamble(request);
+        let request = &request;
         let encoded = self.codec.encode_request(request, mode)?;
         let endpoint = self
             .transport
@@ -739,7 +779,7 @@ mod tests {
 
     #[test]
     fn pinned_codec_rejects_wrong_transport() {
-        let result = ProviderClient::new(Arc::new(PinnedCodec), Arc::new(FakeTransport));
+        let result = ProviderClient::new(Arc::new(PinnedCodec), Arc::new(FakeTransport), None);
         match result {
             Err(Error::InvalidComposition {
                 codec, transport, ..
@@ -758,7 +798,7 @@ mod tests {
             "https://api.anthropic.com",
             DirectAuth::XApiKey(SecretString::from("sk-test")),
         ));
-        let client = ProviderClient::new(codec, transport).unwrap();
+        let client = ProviderClient::new(codec, transport, None).unwrap();
         assert_eq!(client.codec_id(), "anthropic-messages");
         assert_eq!(client.transport_id(), "direct");
     }
@@ -773,7 +813,7 @@ mod tests {
                 value: SecretString::from("k"),
             },
         ));
-        let _ = ProviderClient::new(codec, transport).unwrap();
+        let _ = ProviderClient::new(codec, transport, None).unwrap();
     }
 
     #[test]
@@ -788,7 +828,7 @@ mod tests {
             )
             .with_allowed_codecs(&["anthropic-messages"]),
         );
-        let result = ProviderClient::new(codec, transport);
+        let result = ProviderClient::new(codec, transport, None);
         assert!(matches!(result, Err(Error::InvalidComposition { .. })));
     }
 
@@ -814,7 +854,7 @@ mod tests {
             mock.uri(),
             DirectAuth::XApiKey(SecretString::from("sk-test")),
         ));
-        let client = ProviderClient::new(codec, transport).unwrap();
+        let client = ProviderClient::new(codec, transport, None).unwrap();
         let req = ModelRequest::new("claude-sonnet-4-5", vec![Message::user("ping")]);
         let resp = client.send(&req).await.unwrap();
         assert_eq!(resp.id, "msg_42");
@@ -851,7 +891,7 @@ mod tests {
                 value: SecretString::from("test-key"),
             },
         ));
-        let client = ProviderClient::new(codec, transport).unwrap();
+        let client = ProviderClient::new(codec, transport, None).unwrap();
         let req = ModelRequest::new("gemini-2.5-flash", vec![Message::user("ping")]);
         let resp = client.send(&req).await.unwrap();
         assert_eq!(resp.text(), "pong");
@@ -918,7 +958,7 @@ mod tests {
 
         let codec = Arc::new(GeminiGenerateCodec::new());
         let transport = Arc::new(FakeVertex(mock.uri()));
-        let client = ProviderClient::new(codec, transport).unwrap();
+        let client = ProviderClient::new(codec, transport, None).unwrap();
         let req = ModelRequest::new("gemini-2.5-flash", vec![Message::user("hi")]);
         let err = client.send(&req).await.unwrap_err();
         match err {
@@ -1065,7 +1105,7 @@ mod tests {
             mock.uri(),
             DirectAuth::XApiKey(SecretString::from("sk-test")),
         ));
-        let client = ProviderClient::new(codec, transport).unwrap();
+        let client = ProviderClient::new(codec, transport, None).unwrap();
         let req = ModelRequest::new("claude-sonnet-4-5", vec![Message::user("ping")]);
         let mut stream = client
             .send_stream(&req, tokio_util::sync::CancellationToken::new())
@@ -1113,7 +1153,7 @@ mod tests {
             mock.uri(),
             DirectAuth::Bearer(SecretString::from("k")),
         ));
-        let client = ProviderClient::new(codec, transport).unwrap();
+        let client = ProviderClient::new(codec, transport, None).unwrap();
         let req = ModelRequest::new("gpt-4o-mini", vec![Message::user("hi")]);
         let mut stream = client
             .send_stream(&req, tokio_util::sync::CancellationToken::new())
@@ -1156,7 +1196,7 @@ mod tests {
             mock.uri(),
             DirectAuth::XApiKey(SecretString::from("k")),
         ));
-        let client = ProviderClient::new(codec, transport).unwrap();
+        let client = ProviderClient::new(codec, transport, None).unwrap();
         let mut req = ModelRequest::new("claude-sonnet-4-5", vec![Message::user("hi")]);
         req.settings.seed = Some(42); // unsupported on anthropic-messages
         let mut stream = client
@@ -1284,7 +1324,7 @@ mod tests {
             mock.uri(),
             DirectAuth::XApiKey(SecretString::from("k")),
         ));
-        let client = ProviderClient::new(codec, transport).unwrap();
+        let client = ProviderClient::new(codec, transport, None).unwrap();
 
         let mut req = ModelRequest::new("claude-sonnet-4-5", vec![Message::user("hi")]);
         req.provider_options = ProviderOptions {
@@ -1348,7 +1388,7 @@ mod tests {
             mock.uri(),
             DirectAuth::XApiKey(SecretString::from("k")),
         ));
-        let client = ProviderClient::new(codec, transport).unwrap();
+        let client = ProviderClient::new(codec, transport, None).unwrap();
         let req = ModelRequest::new("claude-sonnet-4-5", vec![Message::user("hi")])
             .with_response_format(ResponseFormat::JsonSchema(JsonSchemaSpec {
                 schema: json!({
@@ -1409,7 +1449,7 @@ mod tests {
             mock.uri(),
             DirectAuth::XApiKey(SecretString::from("k")),
         ));
-        let client = ProviderClient::new(codec, transport).unwrap();
+        let client = ProviderClient::new(codec, transport, None).unwrap();
         let req = ModelRequest::new("claude-sonnet-4-5", vec![Message::user("hi")])
             .with_response_format(ResponseFormat::JsonSchema(JsonSchemaSpec {
                 schema: json!({
@@ -1482,6 +1522,107 @@ mod tests {
                 );
             }
             other => panic!("expected Stream cancellation error, got {other:?}"),
+        }
+    }
+
+    // ── with_preamble unit tests ────────────────────────────────────
+
+    fn client_with_preamble(preamble: Option<&str>) -> ProviderClient {
+        let codec = Arc::new(AnthropicMessagesCodec::new());
+        let transport = Arc::new(DirectTransport::new(
+            "https://api.anthropic.com",
+            DirectAuth::XApiKey(SecretString::from("sk-test")),
+        ));
+        ProviderClient::new(codec, transport, preamble.map(String::from)).unwrap()
+    }
+
+    #[test]
+    fn preamble_prepended_to_text_system_prompt() {
+        let client = client_with_preamble(Some("IDENTITY"));
+        let mut req = ModelRequest::new("m", vec![Message::user("hi")]);
+        req.system = Some(SystemPrompt::Text("Base prompt.".into()));
+
+        let result = client.with_preamble(&req);
+        match result.system.as_ref().unwrap() {
+            SystemPrompt::Blocks(blocks) => {
+                assert_eq!(blocks.len(), 2);
+                assert_eq!(blocks[0].text, "IDENTITY");
+                assert_eq!(blocks[1].text, "Base prompt.");
+            }
+            other => panic!("expected Blocks, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn preamble_prepended_to_blocks_system_prompt() {
+        let client = client_with_preamble(Some("IDENTITY"));
+        let mut req = ModelRequest::new("m", vec![Message::user("hi")]);
+        req.system = Some(SystemPrompt::Blocks(vec![
+            SystemBlock::cached("Cached block"),
+            SystemBlock::uncached("Uncached block"),
+        ]));
+
+        let result = client.with_preamble(&req);
+        match result.system.as_ref().unwrap() {
+            SystemPrompt::Blocks(blocks) => {
+                assert_eq!(blocks.len(), 3);
+                assert_eq!(blocks[0].text, "IDENTITY");
+                assert!(
+                    blocks[0].cache_marker.is_none(),
+                    "preamble block must not be cached"
+                );
+                assert_eq!(blocks[1].text, "Cached block");
+                assert!(
+                    blocks[1].cache_marker.is_some(),
+                    "existing cache markers preserved"
+                );
+                assert_eq!(blocks[2].text, "Uncached block");
+            }
+            other => panic!("expected Blocks, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn preamble_applied_when_system_prompt_is_none() {
+        let client = client_with_preamble(Some("IDENTITY"));
+        let req = ModelRequest::new("m", vec![Message::user("hi")]);
+        assert!(req.system.is_none());
+
+        let result = client.with_preamble(&req);
+        match result.system.as_ref().unwrap() {
+            SystemPrompt::Blocks(blocks) => {
+                assert_eq!(blocks.len(), 1);
+                assert_eq!(blocks[0].text, "IDENTITY");
+            }
+            other => panic!("expected Blocks, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn no_preamble_passes_through_unchanged() {
+        let client = client_with_preamble(None);
+        let mut req = ModelRequest::new("m", vec![Message::user("hi")]);
+        req.system = Some(SystemPrompt::Text("Original.".into()));
+
+        let result = client.with_preamble(&req);
+        match result.system.as_ref().unwrap() {
+            SystemPrompt::Text(text) => assert_eq!(text, "Original."),
+            other => panic!("expected Text passthrough, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn preamble_does_not_mutate_original_request() {
+        let client = client_with_preamble(Some("IDENTITY"));
+        let mut req = ModelRequest::new("m", vec![Message::user("hi")]);
+        req.system = Some(SystemPrompt::Text("Original.".into()));
+
+        let _ = client.with_preamble(&req);
+
+        // Original request is untouched.
+        match req.system.as_ref().unwrap() {
+            SystemPrompt::Text(text) => assert_eq!(text, "Original."),
+            other => panic!("original mutated: {other:?}"),
         }
     }
 }

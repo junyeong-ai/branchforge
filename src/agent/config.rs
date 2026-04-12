@@ -264,17 +264,6 @@ impl IdentityConfig {
 /// Prompt and output configuration.
 #[derive(Debug, Clone, Default)]
 pub struct PromptConfig {
-    /// Protocol-required preamble set by the auth layer.
-    ///
-    /// When present, this string is prepended **unconditionally** before all
-    /// other system prompt content — it is outside the scope of
-    /// [`SystemPromptMode`] (Replace / Append). The auth layer is the sole
-    /// writer; SDK users should never set this directly.
-    ///
-    /// Example: Claude Code OAuth requires `CLI_IDENTITY` as the first line
-    /// of the system prompt. The Anthropic API rejects OAuth requests whose
-    /// system prompt does not start with this identity statement.
-    pub auth_preamble: Option<String>,
     /// Custom system prompt
     pub system_prompt: Option<String>,
     /// How to apply system prompt

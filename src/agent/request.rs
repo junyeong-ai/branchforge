@@ -17,7 +17,6 @@ pub struct RequestBuilder {
     max_tokens: u32,
     tools: Arc<ToolRegistry>,
     tool_surface: crate::tools::ToolSurface,
-    auth_preamble: Option<String>,
     system_prompt_mode: SystemPromptMode,
     custom_system_prompt: Option<String>,
     base_system_prompt: String,
@@ -45,7 +44,6 @@ impl RequestBuilder {
             max_tokens: config.model.max_tokens,
             tools,
             tool_surface: config.security.tool_surface.clone(),
-            auth_preamble: config.prompt.auth_preamble.clone(),
             system_prompt_mode: config.prompt.system_prompt_mode,
             custom_system_prompt: config.prompt.system_prompt.clone(),
             base_system_prompt,
@@ -297,8 +295,7 @@ impl RequestBuilder {
     }
 
     fn composed_system_prompt(&self) -> String {
-        // User-controllable prompt body (Replace / Append).
-        let body = match self.system_prompt_mode {
+        match self.system_prompt_mode {
             SystemPromptMode::Replace => self
                 .custom_system_prompt
                 .clone()
@@ -311,14 +308,6 @@ impl RequestBuilder {
                 }
                 base
             }
-        };
-
-        // Auth preamble (e.g. CLI_IDENTITY for OAuth) is prepended
-        // unconditionally — it is a protocol requirement, not a
-        // user-configurable prompt section.
-        match &self.auth_preamble {
-            Some(preamble) => format!("{preamble}\n\n{body}"),
-            None => body,
         }
     }
 
@@ -505,108 +494,5 @@ mod tests {
         let request = builder.build(vec![Message::user("hello")], "");
 
         assert!(request.metadata.is_empty());
-    }
-
-    // --- auth_preamble tests ---
-
-    use crate::agent::config::PromptConfig;
-    use crate::prompts::identity::CLI_IDENTITY;
-
-    fn oauth_config() -> AgentConfig {
-        AgentConfig {
-            prompt: PromptConfig {
-                auth_preamble: Some(CLI_IDENTITY.to_string()),
-                ..Default::default()
-            },
-            ..Default::default()
-        }
-    }
-
-    #[test]
-    fn auth_preamble_prepended_without_custom_prompt() {
-        let config = oauth_config();
-        let tools = Arc::new(ToolRegistry::default());
-        let builder = RequestBuilder::new(&config, tools, StaticContext::new());
-        let request = builder.build(vec![Message::user("hello")], "");
-        let text = request.system.unwrap().flatten();
-
-        assert!(
-            text.starts_with(CLI_IDENTITY),
-            "system prompt must start with CLI_IDENTITY for OAuth"
-        );
-    }
-
-    #[test]
-    fn auth_preamble_prepended_in_replace_mode() {
-        let config = AgentConfig {
-            prompt: PromptConfig {
-                auth_preamble: Some(CLI_IDENTITY.to_string()),
-                system_prompt: Some("Custom agent prompt.".to_string()),
-                system_prompt_mode: SystemPromptMode::Replace,
-                ..Default::default()
-            },
-            ..Default::default()
-        };
-        let tools = Arc::new(ToolRegistry::default());
-        let builder = RequestBuilder::new(&config, tools, StaticContext::new());
-        let request = builder.build(vec![Message::user("hello")], "");
-        let text = request.system.unwrap().flatten();
-
-        assert!(text.starts_with(CLI_IDENTITY));
-        assert!(text.contains("Custom agent prompt."));
-        // base_system_prompt is replaced, so it should NOT appear
-        assert!(!text.contains("interactive CLI runtime"));
-    }
-
-    #[test]
-    fn auth_preamble_prepended_in_append_mode() {
-        let config = AgentConfig {
-            prompt: PromptConfig {
-                auth_preamble: Some(CLI_IDENTITY.to_string()),
-                system_prompt: Some("Extra instructions.".to_string()),
-                system_prompt_mode: SystemPromptMode::Append,
-                ..Default::default()
-            },
-            ..Default::default()
-        };
-        let tools = Arc::new(ToolRegistry::default());
-        let builder = RequestBuilder::new(&config, tools, StaticContext::new());
-        let request = builder.build(vec![Message::user("hello")], "");
-        let text = request.system.unwrap().flatten();
-
-        assert!(text.starts_with(CLI_IDENTITY));
-        // Both base and custom should be present in append mode
-        assert!(text.contains("interactive CLI runtime"));
-        assert!(text.contains("Extra instructions."));
-    }
-
-    #[test]
-    fn no_preamble_without_oauth() {
-        let config = test_config(); // auth_preamble is None
-        let tools = Arc::new(ToolRegistry::default());
-        let builder = RequestBuilder::new(&config, tools, StaticContext::new());
-        let request = builder.build(vec![Message::user("hello")], "");
-        let text = request.system.unwrap().flatten();
-
-        assert!(
-            !text.contains(CLI_IDENTITY),
-            "CLI_IDENTITY must NOT appear without OAuth"
-        );
-    }
-
-    #[test]
-    fn auth_preamble_survives_runtime_override() {
-        let config = oauth_config();
-        let tools = Arc::new(ToolRegistry::default());
-        let mut builder = RequestBuilder::new(&config, tools, StaticContext::new());
-        builder.set_system_prompt_override("Completely new prompt.");
-        let request = builder.build(vec![Message::user("hello")], "");
-        let text = request.system.unwrap().flatten();
-
-        assert!(
-            text.starts_with(CLI_IDENTITY),
-            "auth_preamble must survive set_system_prompt_override"
-        );
-        assert!(text.contains("Completely new prompt."));
     }
 }

@@ -304,7 +304,7 @@ impl ProfileRegistry {
             env,
         };
         let transport = (profile.transport_builder)(&ctx)?;
-        ProviderClient::new(codec, transport)
+        ProviderClient::new(codec, transport, None)
     }
 }
 

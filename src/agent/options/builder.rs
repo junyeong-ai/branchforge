@@ -308,10 +308,12 @@ impl AgentBuilder {
             transport = transport.with_credential_provider(provider);
         }
 
+        let auth_preamble = credential.auth_preamble();
+
         let codec =
             Arc::new(AnthropicMessagesCodec::new()) as Arc<dyn crate::client::codec::ModelCodec>;
         let transport = Arc::new(transport) as Arc<dyn crate::client::transport::ModelTransport>;
-        ProviderClient::new(codec, transport)
+        ProviderClient::new(codec, transport, auth_preamble)
     }
 
     /// Configures authentication for the API.
@@ -402,21 +404,6 @@ impl AgentBuilder {
                 refresh_provider,
             )?);
         }
-
-        // OAuth requires CLI_IDENTITY as the first line of the system
-        // prompt — the Anthropic API rejects OAuth Bearer requests whose
-        // prompt omits this identity statement. Set auth_preamble so
-        // RequestBuilder prepends it unconditionally, outside the
-        // user-controllable Replace/Append logic.
-        //
-        // Unconditional assignment (not if-only-set) so that a second
-        // `auth()` call with a non-OAuth credential correctly clears a
-        // preamble set by a prior OAuth call.
-        self.config.prompt.auth_preamble = if credential.is_oauth() {
-            Some(crate::prompts::identity::CLI_IDENTITY.to_string())
-        } else {
-            None
-        };
 
         self.auth_type = Some(auth);
 

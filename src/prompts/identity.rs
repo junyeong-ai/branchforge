@@ -1,8 +1,7 @@
 //! CLI Identity — required when using Claude CLI OAuth authentication.
 //!
-//! Consumed by `AgentBuilder::auth()` which sets `PromptConfig::auth_preamble`
-//! for OAuth credentials. `RequestBuilder` then prepends this unconditionally,
-//! outside the user-controllable Replace/Append system prompt logic.
+//! Consumed by `ProviderClient` which auto-injects the preamble as the first
+//! system block for OAuth credentials, before codec encoding.
 
 /// The CLI identity statement that MUST be included when using Claude CLI OAuth.
 ///

@@ -22,7 +22,7 @@ use crate::prompts::{
 ///
 /// Assembles the **base system prompt body** from content components.
 /// Auth-layer concerns (e.g. `CLI_IDENTITY` for OAuth) are handled by
-/// `RequestBuilder` via `auth_preamble` — this generator is purely
+/// `ProviderClient` via `auth_preamble` — this generator is purely
 /// about content generation.
 ///
 /// # System Prompt Structure
@@ -162,7 +162,7 @@ impl SystemPromptGenerator {
     /// - **Environment Block**: Always included
     ///
     /// Auth-layer preambles (e.g. `CLI_IDENTITY` for OAuth) are not handled
-    /// here — see `RequestBuilder::composed_system_prompt()`.
+    /// here — see `ProviderClient::with_preamble()`.
     pub fn generate(&self) -> String {
         let mut parts = Vec::new();
 
@@ -258,7 +258,7 @@ mod tests {
 
     #[test]
     fn test_generator_does_not_include_cli_identity() {
-        // CLI_IDENTITY is an auth-layer concern handled by RequestBuilder,
+        // CLI_IDENTITY is an auth-layer concern handled by ProviderClient,
         // not by the generator.
         let prompt = SystemPromptGenerator::new().generate();
         assert!(!prompt.contains("Claude Code"));

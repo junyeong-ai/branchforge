@@ -187,6 +187,19 @@ impl Credential {
         matches!(self, Credential::OAuth(_))
     }
 
+    /// Returns the auth preamble required by this credential type, if any.
+    ///
+    /// OAuth credentials require `CLI_IDENTITY` as the first line of every
+    /// system prompt. Pass the returned value to `ProviderClient::new()` so
+    /// it is auto-injected on every request.
+    pub fn auth_preamble(&self) -> Option<String> {
+        if self.is_oauth() {
+            Some(crate::prompts::CLI_IDENTITY.to_string())
+        } else {
+            None
+        }
+    }
+
     pub fn is_api_key(&self) -> bool {
         matches!(self, Credential::ApiKey(_))
     }
@@ -294,5 +307,19 @@ mod tests {
         assert!(!debug.contains("secret-token"));
         assert!(!debug.contains("secret-refresh"));
         assert!(debug.contains("[redacted]"));
+    }
+
+    #[test]
+    fn auth_preamble_returns_identity_for_oauth() {
+        let cred = Credential::oauth("token");
+        let preamble = cred.auth_preamble();
+        assert!(preamble.is_some());
+        assert!(preamble.unwrap().contains("Claude Code"));
+    }
+
+    #[test]
+    fn auth_preamble_returns_none_for_api_key() {
+        let cred = Credential::api_key("sk-test");
+        assert!(cred.auth_preamble().is_none());
     }
 }
