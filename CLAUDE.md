@@ -51,6 +51,9 @@ Compiler-enforced. Violating them breaks the build.
 - Never hold a registry/engine lock across `.await` on a user-supplied future.
 - Multi-lock order: `session` > `task_registry` > `orchestrator`.
 - Release data locks before `.await` on removed items (MCP pattern).
+- **`McpManager`**: `servers` > `tool_cache` > `degraded`. See the
+  module-level doc comment in `src/mcp/manager.rs` for the audited
+  acquisition order and rationale.
 
 ## Progressive Disclosure
 
@@ -65,5 +68,6 @@ Module-specific rules live in `.claude/rules/` and auto-load when Claude reads f
 | `tools.md` | `Tool` trait, `ExecutionContext`, naming, cancellation | `src/tools/**` |
 | `auth.md` | `CredentialProvider`, OAuth refresh, token storage | `src/auth/**` |
 | `security.md` | `SecureFs`, `BashAnalyzer`, sandbox, resource limits | `src/security/**` |
+| `naming.md` | Type-suffix taxonomy, FSM terminology, "no dual systems" | `src/**` |
 
 When editing across module boundaries, multiple rule files load automatically.

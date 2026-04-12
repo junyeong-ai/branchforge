@@ -66,20 +66,32 @@ let agent = Agent::builder()
 
 When a tool requires review, the agent emits `AgentEvent::ToolReview` with the tool name and input.
 
-## Input Extractors
+## Subject extraction
 
-`ToolPolicy` uses `InputExtractor` traits to determine which field to match for scoped patterns. Built-in extractors cover standard tools; custom tools can register their own:
+Scoped patterns like `Bash(rm:*)` or `WebFetch(domain:github.com)` match
+against **subjects** — strings the tool itself extracts from its own
+input. Subject extraction lives on the `Tool` trait via
+`Tool::permission_subjects(&input)`, which returns a `Vec<String>`.
 
 ```rust
-use branchforge::authorization::{FieldExtractor, InputExtractor};
-use branchforge::ToolPolicy;
-use std::sync::Arc;
-
-let mut policy = ToolPolicy::new();
-policy.register_extractor("MyTool", Arc::new(FieldExtractor("target_path")));
+impl SchemaTool for MyTool {
+    fn permission_subjects_typed(&self, input: &MyInput) -> Vec<String> {
+        vec![input.target_path.clone()]
+    }
+}
 ```
 
-Default extractors: `Bash→command`, `Read/Write/Edit→file_path`, `Glob/Grep→path`, `Skill→skill`.
+Built-in subjects:
+- `Bash` → first command token (`rm`, `git`, …)
+- `Read`/`Write`/`Edit` → `file_path`
+- `Glob`/`Grep` → `path`
+- `Skill` → `skill`
+- `WebFetch` → `url` (matched against domain patterns via URL parsing)
+
+The permission engine is the rule evaluator; the tool is the
+extractor. There is **no parallel extractor registry** — this
+design was collapsed in Phase D Workstream A-1 to follow the
+"no dual systems" rule in `.claude/rules/naming.md`.
 
 ## Decision Flow
 
