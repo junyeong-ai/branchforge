@@ -85,9 +85,15 @@ pub struct PluginResources {
     pub mcp_servers: HashMap<String, McpServerConfig>,
 }
 
-pub struct PluginLoader;
+/// Per-artifact loader: given one discovered `PluginDescriptor`,
+/// walk its directory and produce [`PluginResources`]. This is the
+/// low-level building block used by the top-level [`PluginLoader`]
+/// below. Phase G-5 renamed this from the former public
+/// `PluginLoader` (which shared a name with the multi-plugin
+/// top-level loader) to make the two roles unambiguous.
+pub(super) struct PluginArtifactLoader;
 
-impl PluginLoader {
+impl PluginArtifactLoader {
     pub async fn load(plugin: &PluginDescriptor) -> Result<PluginResources, PluginError> {
         let plugin_name = plugin.name();
         let mut resources = PluginResources::default();
@@ -376,7 +382,7 @@ mod tests {
         .unwrap();
 
         let descriptor = make_descriptor(dir.path().to_path_buf(), "my-plugin");
-        let resources = PluginLoader::load(&descriptor).await.unwrap();
+        let resources = PluginArtifactLoader::load(&descriptor).await.unwrap();
 
         assert_eq!(resources.skills.len(), 1);
         assert_eq!(resources.skills[0].name, "my-plugin:commit");
@@ -395,7 +401,7 @@ mod tests {
         .unwrap();
 
         let descriptor = make_descriptor(dir.path().to_path_buf(), "my-plugin");
-        let resources = PluginLoader::load(&descriptor).await.unwrap();
+        let resources = PluginArtifactLoader::load(&descriptor).await.unwrap();
 
         assert_eq!(resources.subagents.len(), 1);
         assert_eq!(resources.subagents[0].name, "my-plugin:reviewer");
@@ -418,7 +424,7 @@ mod tests {
         .unwrap();
 
         let descriptor = make_descriptor(dir.path().to_path_buf(), "my-plugin");
-        let resources = PluginLoader::load(&descriptor).await.unwrap();
+        let resources = PluginArtifactLoader::load(&descriptor).await.unwrap();
 
         assert_eq!(resources.hooks.len(), 2);
         assert!(
@@ -445,7 +451,7 @@ mod tests {
         .unwrap();
 
         let descriptor = make_descriptor(dir.path().to_path_buf(), "my-plugin");
-        let resources = PluginLoader::load(&descriptor).await.unwrap();
+        let resources = PluginArtifactLoader::load(&descriptor).await.unwrap();
 
         assert_eq!(resources.mcp_servers.len(), 1);
         assert!(resources.mcp_servers.contains_key("my-plugin:context7"));
@@ -455,7 +461,7 @@ mod tests {
     async fn test_load_empty_plugin() {
         let dir = tempdir().unwrap();
         let descriptor = make_descriptor(dir.path().to_path_buf(), "empty");
-        let resources = PluginLoader::load(&descriptor).await.unwrap();
+        let resources = PluginArtifactLoader::load(&descriptor).await.unwrap();
 
         assert!(resources.skills.is_empty());
         assert!(resources.subagents.is_empty());
@@ -484,7 +490,7 @@ mod tests {
         .unwrap();
 
         let descriptor = make_descriptor(dir.path().to_path_buf(), "acme");
-        let resources = PluginLoader::load(&descriptor).await.unwrap();
+        let resources = PluginArtifactLoader::load(&descriptor).await.unwrap();
 
         assert_eq!(resources.skills[0].name, "acme:build");
         assert!(resources.mcp_servers.contains_key("acme:server1"));
@@ -520,7 +526,7 @@ mod tests {
         .unwrap();
 
         let descriptor = make_descriptor(dir.path().to_path_buf(), "my-plugin");
-        let resources = PluginLoader::load(&descriptor).await.unwrap();
+        let resources = PluginArtifactLoader::load(&descriptor).await.unwrap();
 
         assert_eq!(resources.hooks.len(), 2);
 
@@ -569,7 +575,7 @@ mod tests {
         .unwrap();
 
         let descriptor = make_descriptor(dir.path().to_path_buf(), "my-plugin");
-        let resources = PluginLoader::load(&descriptor).await.unwrap();
+        let resources = PluginArtifactLoader::load(&descriptor).await.unwrap();
 
         assert_eq!(resources.skills.len(), 1);
         assert_eq!(resources.skills[0].name, "my-plugin:hello");
@@ -599,7 +605,7 @@ mod tests {
         .unwrap();
 
         let descriptor = make_descriptor(dir.path().to_path_buf(), "my-plugin");
-        let resources = PluginLoader::load(&descriptor).await.unwrap();
+        let resources = PluginArtifactLoader::load(&descriptor).await.unwrap();
 
         // Only one skill should exist — skills/ takes precedence
         assert_eq!(resources.skills.len(), 1);
@@ -633,7 +639,7 @@ mod tests {
         .unwrap();
 
         let descriptor = make_descriptor(dir.path().to_path_buf(), "my-plugin");
-        let resources = PluginLoader::load(&descriptor).await.unwrap();
+        let resources = PluginArtifactLoader::load(&descriptor).await.unwrap();
 
         assert_eq!(resources.hooks.len(), 1);
         let expected_cmd = format!("{}/scripts/check.sh", dir.path().display());
@@ -654,7 +660,7 @@ mod tests {
         .unwrap();
 
         let descriptor = make_descriptor(dir.path().to_path_buf(), "my-plugin");
-        let resources = PluginLoader::load(&descriptor).await.unwrap();
+        let resources = PluginArtifactLoader::load(&descriptor).await.unwrap();
 
         let config = resources.mcp_servers.get("my-plugin:srv").unwrap();
         match config {
@@ -689,7 +695,7 @@ mod tests {
         .unwrap();
 
         let descriptor = make_descriptor(dir.path().to_path_buf(), "my-plugin");
-        let resources = PluginLoader::load(&descriptor).await.unwrap();
+        let resources = PluginArtifactLoader::load(&descriptor).await.unwrap();
 
         assert_eq!(resources.hooks.len(), 1);
         match &resources.hooks[0].config {
@@ -698,5 +704,287 @@ mod tests {
             }
             _ => panic!("Expected Full config"),
         }
+    }
+}
+
+// ============================================================================
+// Phase G-5: top-level PluginLoader
+// ----------------------------------------------------------------------------
+// Multi-plugin loader. Discovers every plugin under the supplied directories
+// via [`PluginDiscovery`], validates naming constraints, runs
+// [`PluginArtifactLoader`] on each, and merges the results into a single
+// [`PluginResources`] bundle that can be handed to the agent's skill /
+// subagent / hook / MCP registries.
+//
+// This type used to live in a sibling file named `manager.rs` which conflicted
+// with the taxonomy rule: "Manager" implies runtime lifecycle ownership
+// (spawn / shutdown / reconnect), but this type is strictly one-shot discovery
+// + load + read-only accessor. It is a `Loader`, and now lives next to its
+// lower-level counterpart `PluginArtifactLoader` so the two roles are
+// unambiguous and co-located.
+// ============================================================================
+
+use super::discovery::PluginDiscovery;
+use crate::common::IndexRegistry;
+
+pub struct PluginLoader {
+    plugins: Vec<PluginDescriptor>,
+    resources: PluginResources,
+}
+
+impl PluginLoader {
+    pub async fn load_from_dirs(dirs: &[PathBuf]) -> Result<Self, PluginError> {
+        let plugins = PluginDiscovery::discover(dirs)?;
+
+        Self::validate_plugins(&plugins)?;
+
+        let mut resources = PluginResources::default();
+
+        for plugin in &plugins {
+            let plugin_resources = PluginArtifactLoader::load(plugin).await?;
+            Self::merge(&mut resources, plugin_resources);
+        }
+
+        Ok(Self { plugins, resources })
+    }
+
+    pub fn register_skills(&self, registry: &mut IndexRegistry<SkillIndex>) {
+        for skill in &self.resources.skills {
+            registry.register(skill.clone());
+        }
+    }
+
+    pub fn register_subagents(&self, registry: &mut IndexRegistry<SubagentIndex>) {
+        for subagent in &self.resources.subagents {
+            registry.register(subagent.clone());
+        }
+    }
+
+    pub fn hooks(&self) -> &[PluginHookEntry] {
+        &self.resources.hooks
+    }
+
+    pub fn mcp_servers(&self) -> &HashMap<String, McpServerConfig> {
+        &self.resources.mcp_servers
+    }
+
+    pub fn plugins(&self) -> &[PluginDescriptor] {
+        &self.plugins
+    }
+
+    pub fn plugin_count(&self) -> usize {
+        self.plugins.len()
+    }
+
+    pub fn has_plugin(&self, name: &str) -> bool {
+        self.plugins.iter().any(|p| p.name() == name)
+    }
+
+    fn validate_plugins(plugins: &[PluginDescriptor]) -> Result<(), PluginError> {
+        let mut seen: HashMap<String, &PathBuf> = HashMap::new();
+        for plugin in plugins {
+            let name = plugin.name();
+
+            if name.contains(super::namespace::NAMESPACE_SEP) {
+                return Err(PluginError::InvalidName {
+                    name: name.to_string(),
+                    reason: format!(
+                        "must not contain namespace separator '{}'",
+                        super::namespace::NAMESPACE_SEP
+                    ),
+                });
+            }
+
+            if let Some(first_path) = seen.get(name) {
+                return Err(PluginError::DuplicateName {
+                    name: name.to_string(),
+                    first: (*first_path).clone(),
+                    second: plugin.root_dir.clone(),
+                });
+            }
+            seen.insert(name.to_string(), &plugin.root_dir);
+        }
+        Ok(())
+    }
+
+    fn merge(target: &mut PluginResources, source: PluginResources) {
+        target.skills.extend(source.skills);
+        target.subagents.extend(source.subagents);
+        target.hooks.extend(source.hooks);
+        target.mcp_servers.extend(source.mcp_servers);
+    }
+}
+
+#[cfg(test)]
+mod plugin_loader_tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    fn create_full_plugin(parent: &std::path::Path, name: &str) {
+        let plugin_dir = parent.join(name);
+        let config_dir = plugin_dir.join(".claude-plugin");
+        std::fs::create_dir_all(&config_dir).unwrap();
+        std::fs::write(
+            config_dir.join("plugin.json"),
+            format!(
+                r#"{{"name":"{}","description":"Test","version":"1.0.0"}}"#,
+                name
+            ),
+        )
+        .unwrap();
+
+        let skills_dir = plugin_dir.join("skills");
+        std::fs::create_dir_all(&skills_dir).unwrap();
+        std::fs::write(
+            skills_dir.join("test.skill.md"),
+            format!(
+                "---\nname: test-skill\ndescription: A test skill for {}\n---\nContent",
+                name
+            ),
+        )
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_load_from_dirs() {
+        let dir = tempdir().unwrap();
+        create_full_plugin(dir.path(), "plugin-a");
+        create_full_plugin(dir.path(), "plugin-b");
+
+        let loader = PluginLoader::load_from_dirs(&[dir.path().to_path_buf()])
+            .await
+            .unwrap();
+
+        assert_eq!(loader.plugin_count(), 2);
+        assert!(loader.has_plugin("plugin-a"));
+        assert!(loader.has_plugin("plugin-b"));
+        assert!(!loader.has_plugin("plugin-c"));
+        let mut registry = IndexRegistry::new();
+        loader.register_skills(&mut registry);
+        assert_eq!(registry.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_duplicate_detection() {
+        let dir1 = tempdir().unwrap();
+        let dir2 = tempdir().unwrap();
+
+        let plugin_dir1 = dir1.path().join("same");
+        let config1 = plugin_dir1.join(".claude-plugin");
+        std::fs::create_dir_all(&config1).unwrap();
+        std::fs::write(
+            config1.join("plugin.json"),
+            r#"{"name":"same","description":"A","version":"1.0.0"}"#,
+        )
+        .unwrap();
+
+        let plugin_dir2 = dir2.path().join("same");
+        let config2 = plugin_dir2.join(".claude-plugin");
+        std::fs::create_dir_all(&config2).unwrap();
+        std::fs::write(
+            config2.join("plugin.json"),
+            r#"{"name":"same","description":"B","version":"1.0.0"}"#,
+        )
+        .unwrap();
+
+        let result =
+            PluginLoader::load_from_dirs(&[dir1.path().to_path_buf(), dir2.path().to_path_buf()])
+                .await;
+
+        assert!(
+            matches!(result, Err(PluginError::DuplicateName { ref name, .. }) if name == "same")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_register_skills() {
+        let dir = tempdir().unwrap();
+        create_full_plugin(dir.path(), "my-plugin");
+
+        let loader = PluginLoader::load_from_dirs(&[dir.path().to_path_buf()])
+            .await
+            .unwrap();
+
+        let mut registry = IndexRegistry::new();
+        loader.register_skills(&mut registry);
+
+        assert_eq!(registry.len(), 1);
+        assert!(registry.get("my-plugin:test-skill").is_some());
+    }
+
+    #[tokio::test]
+    async fn test_register_subagents() {
+        let dir = tempdir().unwrap();
+        let plugin_dir = dir.path().join("agent-plugin");
+        let config_dir = plugin_dir.join(".claude-plugin");
+        std::fs::create_dir_all(&config_dir).unwrap();
+        std::fs::write(
+            config_dir.join("plugin.json"),
+            r#"{"name":"agent-plugin","description":"Has agents","version":"1.0.0"}"#,
+        )
+        .unwrap();
+
+        let agents_dir = plugin_dir.join("agents");
+        std::fs::create_dir_all(&agents_dir).unwrap();
+        std::fs::write(
+            agents_dir.join("reviewer.md"),
+            "---\nname: reviewer\ndescription: Code reviewer\n---\nReview prompt",
+        )
+        .unwrap();
+
+        let loader = PluginLoader::load_from_dirs(&[dir.path().to_path_buf()])
+            .await
+            .unwrap();
+
+        let mut registry = IndexRegistry::new();
+        loader.register_subagents(&mut registry);
+
+        assert_eq!(registry.len(), 1);
+        assert!(registry.get("agent-plugin:reviewer").is_some());
+    }
+
+    #[tokio::test]
+    async fn test_mcp_servers_aggregation() {
+        let dir = tempdir().unwrap();
+        let plugin_dir = dir.path().join("mcp-plugin");
+        let config_dir = plugin_dir.join(".claude-plugin");
+        std::fs::create_dir_all(&config_dir).unwrap();
+        std::fs::write(
+            config_dir.join("plugin.json"),
+            r#"{"name":"mcp-plugin","description":"Has MCP","version":"1.0.0"}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            plugin_dir.join(".mcp.json"),
+            r#"{"mcpServers":{"ctx":{"type":"stdio","command":"npx","args":["@ctx/mcp"]}}}"#,
+        )
+        .unwrap();
+
+        let loader = PluginLoader::load_from_dirs(&[dir.path().to_path_buf()])
+            .await
+            .unwrap();
+
+        let servers = loader.mcp_servers();
+        assert_eq!(servers.len(), 1);
+        assert!(servers.contains_key("mcp-plugin:ctx"));
+    }
+
+    #[tokio::test]
+    async fn test_empty_dirs() {
+        let loader = PluginLoader::load_from_dirs(&[]).await.unwrap();
+        assert_eq!(loader.plugin_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_plugins_accessor() {
+        let dir = tempdir().unwrap();
+        create_full_plugin(dir.path(), "accessible");
+
+        let loader = PluginLoader::load_from_dirs(&[dir.path().to_path_buf()])
+            .await
+            .unwrap();
+
+        assert_eq!(loader.plugins().len(), 1);
+        assert_eq!(loader.plugins()[0].name(), "accessible");
     }
 }

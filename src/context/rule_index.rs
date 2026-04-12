@@ -189,9 +189,17 @@ impl RuleIndex {
         self
     }
 
-    /// Load rule from a file path.
-    pub fn from_file(path: &Path) -> Option<Self> {
-        let content = std::fs::read_to_string(path).ok()?;
+    /// Phase I-2: Load rule from a file path using asynchronous
+    /// file I/O. Previously used `std::fs::read_to_string`, which
+    /// blocked the tokio executor when called from the
+    /// [`crate::context::memory_loader::MemoryLoader`] scan loop
+    /// (itself built on `tokio::fs::read_dir`). The sync/async
+    /// mismatch caused a real concurrency bug — any project with
+    /// many rule files could stall the runtime. Converting to
+    /// `tokio::fs::read_to_string` fixes this without changing
+    /// the public return type (still `Option<Self>`).
+    pub async fn from_file(path: &Path) -> Option<Self> {
+        let content = tokio::fs::read_to_string(path).await.ok()?;
         Self::parse_with_frontmatter(&content, path)
     }
 
@@ -393,7 +401,7 @@ priority: 5
         .await
         .unwrap();
 
-        let index = RuleIndex::from_file(&rule_path).unwrap();
+        let index = RuleIndex::from_file(&rule_path).await.unwrap();
         assert_eq!(index.name, "test");
         assert_eq!(index.description, "Test rule");
         assert_eq!(index.priority, 5);

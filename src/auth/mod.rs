@@ -49,6 +49,7 @@ use crate::Result;
 /// - `Bedrock`: AWS Bedrock (requires `aws` feature)
 /// - `Vertex`: GCP Vertex AI (requires `gcp` feature)
 /// - `Foundry`: Azure Foundry (requires `azure` feature)
+#[non_exhaustive]
 #[derive(Clone, Default)]
 pub enum Auth {
     ApiKey(SecretString),

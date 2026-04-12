@@ -12,10 +12,74 @@ use tokio::sync::Mutex;
 use crate::auth::refresh;
 use crate::auth::storage::{CliCredentials, load_cli_credentials, save_cli_credentials};
 use crate::auth::{Credential, CredentialProvider, OAuthCredential};
+use crate::common::env::{EnvLookup, SystemEnv};
 use crate::{Error, Result};
 
-/// Timeout for token refresh HTTP requests.
-const REFRESH_TIMEOUT: Duration = Duration::from_secs(30);
+/// Default timeout for token refresh HTTP requests.
+const DEFAULT_REFRESH_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Phase I-1: Configuration for [`ClaudeCliProvider`].
+///
+/// All fields that were previously read from `std::env::var` — the
+/// token endpoint URL and the OAuth client id — live here so they
+/// can be resolved through an injected [`EnvLookup`] or constructed
+/// explicitly in tests.
+///
+/// Production callers typically use [`ClaudeCliProvider::new()`],
+/// which calls [`Self::from_env`] and then [`Self::from_env_with`]
+/// with [`SystemEnv`]; tests use [`ClaudeCliProvider::with_config`]
+/// directly with a hand-rolled config. The free helper
+/// `auth::refresh::token_url()` that used to expose the token URL
+/// as a process-wide function was removed in Phase I-1 — its
+/// responsibility now lives on this struct.
+#[derive(Debug, Clone)]
+pub struct ClaudeCliConfig {
+    /// OAuth2 token endpoint URL. Defaults to the Anthropic
+    /// console endpoint; override via `BRANCHFORGE_TOKEN_URL`.
+    pub token_url: String,
+    /// Optional OAuth client id sent with the refresh_token grant.
+    /// Defaults to `None`; override via `BRANCHFORGE_OAUTH_CLIENT_ID`.
+    pub client_id: Option<String>,
+    /// HTTP timeout applied to refresh requests.
+    pub refresh_timeout: Duration,
+}
+
+/// Phase I-1: canonical default Claude OAuth token endpoint. Used
+/// when neither the process environment nor the caller supplies an
+/// override. This is the only `const` URL in the module — the
+/// former `DEFAULT_TOKEN_URL` in `auth::refresh` was deleted.
+const DEFAULT_TOKEN_URL: &str = "https://console.anthropic.com/v1/oauth/token";
+
+impl Default for ClaudeCliConfig {
+    fn default() -> Self {
+        Self {
+            token_url: DEFAULT_TOKEN_URL.to_string(),
+            client_id: None,
+            refresh_timeout: DEFAULT_REFRESH_TIMEOUT,
+        }
+    }
+}
+
+impl ClaudeCliConfig {
+    /// Resolve against the process environment. Convenience wrapper
+    /// around [`Self::from_env_with`] with [`SystemEnv`].
+    pub fn from_env() -> Self {
+        Self::from_env_with(&SystemEnv)
+    }
+
+    /// Resolve against an injected [`EnvLookup`]. Reads
+    /// `BRANCHFORGE_TOKEN_URL` and `BRANCHFORGE_OAUTH_CLIENT_ID`
+    /// through the seam; refresh timeout stays at the default
+    /// (callers that need a custom timeout build the struct by
+    /// hand).
+    pub fn from_env_with(env: &dyn EnvLookup) -> Self {
+        Self {
+            token_url: env.get_or("BRANCHFORGE_TOKEN_URL", DEFAULT_TOKEN_URL),
+            client_id: env.get("BRANCHFORGE_OAUTH_CLIENT_ID"),
+            refresh_timeout: DEFAULT_REFRESH_TIMEOUT,
+        }
+    }
+}
 
 /// Provider that reads credentials from Claude Code CLI storage
 /// and refreshes OAuth tokens directly via the token endpoint.
@@ -24,22 +88,30 @@ pub struct ClaudeCliProvider {
     /// Serializes refresh attempts to prevent concurrent refresh_token usage,
     /// which can cause failures when the server rotates refresh tokens.
     refresh_guard: Mutex<()>,
+    config: ClaudeCliConfig,
 }
 
 impl ClaudeCliProvider {
-    /// Create a new CLI provider.
+    /// Create a provider with configuration read from the process
+    /// environment. Equivalent to
+    /// `Self::with_config(ClaudeCliConfig::from_env())`.
     pub fn new() -> Self {
-        Self {
-            http: reqwest::Client::builder()
-                .timeout(REFRESH_TIMEOUT)
-                .build()
-                .unwrap_or_else(|_| reqwest::Client::new()),
-            refresh_guard: Mutex::new(()),
-        }
+        Self::with_config(ClaudeCliConfig::from_env())
     }
 
-    fn client_id() -> Option<String> {
-        std::env::var("BRANCHFORGE_OAUTH_CLIENT_ID").ok()
+    /// Phase I-1: Create a provider with an explicit config. Tests
+    /// use this to inject a mock token endpoint and client id
+    /// without touching the process environment.
+    pub fn with_config(config: ClaudeCliConfig) -> Self {
+        let http = reqwest::Client::builder()
+            .timeout(config.refresh_timeout)
+            .build()
+            .unwrap_or_else(|_| reqwest::Client::new());
+        Self {
+            http,
+            refresh_guard: Mutex::new(()),
+            config,
+        }
     }
 
     /// Merge server response with original metadata the server doesn't return.
@@ -111,13 +183,11 @@ impl CredentialProvider for ClaudeCliProvider {
             Error::auth("No refresh token available. Run 'claude login' to re-authenticate.")
         })?;
 
-        let client_id = Self::client_id();
-        let token_url = refresh::token_url();
         let mut refreshed = refresh::refresh_access_token(
             &self.http,
-            &token_url,
+            &self.config.token_url,
             refresh_token,
-            client_id.as_deref(),
+            self.config.client_id.as_deref(),
         )
         .await?;
 
@@ -201,5 +271,61 @@ mod tests {
     fn test_name() {
         let provider = ClaudeCliProvider::new();
         assert_eq!(provider.name(), "claude_cli");
+    }
+
+    // ── Phase I-1: ClaudeCliConfig injection tests ─────────────────
+
+    /// In-memory [`EnvLookup`] fake used by the I-1 test suite.
+    /// Local copy to avoid cross-module test dependencies.
+    #[derive(Debug, Default)]
+    struct FakeEnv(std::collections::HashMap<String, String>);
+
+    impl FakeEnv {
+        fn with(mut self, key: &str, val: &str) -> Self {
+            self.0.insert(key.into(), val.into());
+            self
+        }
+    }
+
+    impl EnvLookup for FakeEnv {
+        fn get(&self, name: &str) -> Option<String> {
+            self.0.get(name).cloned()
+        }
+    }
+
+    #[test]
+    fn phase_i1_config_from_env_with_reads_token_url_override() {
+        let env = FakeEnv::default().with("BRANCHFORGE_TOKEN_URL", "https://mock.invalid/token");
+        let config = ClaudeCliConfig::from_env_with(&env);
+        assert_eq!(config.token_url, "https://mock.invalid/token");
+        assert!(config.client_id.is_none());
+    }
+
+    #[test]
+    fn phase_i1_config_from_env_with_reads_client_id_override() {
+        let env = FakeEnv::default().with("BRANCHFORGE_OAUTH_CLIENT_ID", "my-app-id");
+        let config = ClaudeCliConfig::from_env_with(&env);
+        assert_eq!(config.client_id.as_deref(), Some("my-app-id"));
+    }
+
+    #[test]
+    fn phase_i1_config_from_env_with_falls_back_to_default_token_url() {
+        let env = FakeEnv::default();
+        let config = ClaudeCliConfig::from_env_with(&env);
+        assert_eq!(config.token_url, DEFAULT_TOKEN_URL);
+        assert!(config.client_id.is_none());
+    }
+
+    #[test]
+    fn phase_i1_with_config_constructs_provider_with_custom_config() {
+        let config = ClaudeCliConfig {
+            token_url: "https://custom.invalid/oauth".into(),
+            client_id: Some("explicit-id".into()),
+            refresh_timeout: Duration::from_secs(5),
+        };
+        let provider = ClaudeCliProvider::with_config(config.clone());
+        assert_eq!(provider.config.token_url, "https://custom.invalid/oauth");
+        assert_eq!(provider.config.client_id.as_deref(), Some("explicit-id"));
+        assert_eq!(provider.config.refresh_timeout, Duration::from_secs(5));
     }
 }

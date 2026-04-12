@@ -336,7 +336,7 @@ impl MemoryLoader {
                 if path.is_dir() {
                     self.scan_rules_recursive(&path, indices).await?;
                 } else if path.extension().is_some_and(|e| e == "md")
-                    && let Some(index) = RuleIndex::from_file(&path)
+                    && let Some(index) = RuleIndex::from_file(&path).await
                 {
                     indices.push(index);
                 }

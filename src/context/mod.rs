@@ -37,6 +37,7 @@ pub use crate::skills::SkillIndex;
 
 use thiserror::Error;
 
+#[non_exhaustive]
 #[derive(Error, Debug)]
 pub enum ContextError {
     #[error("Source error: {message}")]

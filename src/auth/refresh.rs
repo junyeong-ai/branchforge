@@ -1,4 +1,11 @@
 //! OAuth2 token refresh via refresh_token grant (RFC 6749 Section 6).
+//!
+//! Phase I-1 removed the `DEFAULT_TOKEN_URL` constant and the
+//! `token_url()` free function from this module. The token
+//! endpoint URL now lives on [`super::providers::ClaudeCliConfig`]
+//! and is resolved once per provider construction via
+//! `ClaudeCliConfig::from_env` / `from_env_with`, so the refresh
+//! path no longer depends on any process-wide state.
 
 use chrono::Utc;
 use secrecy::{ExposeSecret, SecretString};
@@ -7,23 +14,17 @@ use serde::Deserialize;
 use super::OAuthCredential;
 use crate::{Error, Result};
 
-const DEFAULT_TOKEN_URL: &str = "https://console.anthropic.com/v1/oauth/token";
-
-/// Resolve the token endpoint URL from environment or default.
-pub fn token_url() -> String {
-    std::env::var("BRANCHFORGE_TOKEN_URL").unwrap_or_else(|_| DEFAULT_TOKEN_URL.to_string())
-}
-
-/// OAuth2 token endpoint response.
+/// OAuth2 token endpoint response. `token_type` and `scope` are part
+/// of the RFC 6749 payload but this client does not act on them
+/// (we always use bearer tokens and the scope is fixed at
+/// registration), so they are omitted from the struct. Serde
+/// ignores unknown fields by default, so the response still
+/// deserialises when the server includes them.
 #[derive(Deserialize)]
 struct TokenResponse {
     access_token: String,
     refresh_token: Option<String>,
     expires_in: Option<i64>,
-    #[allow(dead_code)]
-    token_type: Option<String>,
-    #[allow(dead_code)]
-    scope: Option<String>,
 }
 
 /// Perform an OAuth2 refresh_token grant and return updated credentials.
@@ -182,13 +183,5 @@ mod tests {
             refresh_access_token(&http, &server.uri(), &refresh_token, Some("my-app")).await;
 
         assert!(result.is_ok());
-    }
-
-    #[test]
-    fn test_token_url_default() {
-        // When env var is not set, returns default
-        let url = token_url();
-        // Either env var value or default
-        assert!(!url.is_empty());
     }
 }

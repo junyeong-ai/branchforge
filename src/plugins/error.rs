@@ -1,5 +1,6 @@
 use std::path::PathBuf;
 
+#[non_exhaustive]
 #[derive(Debug, thiserror::Error)]
 pub enum PluginError {
     #[error("Plugin manifest not found: {path}")]

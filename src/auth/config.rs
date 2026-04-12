@@ -49,13 +49,26 @@ impl Default for OAuthConfig {
 }
 
 impl OAuthConfig {
+    /// Build a config from the process environment. Convenience
+    /// wrapper around [`Self::from_env_with`] that passes
+    /// [`crate::common::env::SystemEnv`]. Production callers use
+    /// this; tests use `from_env_with` with an injected fake.
     pub fn from_env() -> Self {
+        Self::from_env_with(&crate::common::env::SystemEnv)
+    }
+
+    /// Phase I-1: build a config against an injected
+    /// [`crate::common::env::EnvLookup`]. Reads
+    /// `BRANCHFORGE_USER_AGENT` and `BRANCHFORGE_APP_IDENTIFIER`
+    /// through the seam so tests stay hermetic — no process env
+    /// mutation, no parallel-test races.
+    pub fn from_env_with(env: &dyn crate::common::env::EnvLookup) -> Self {
         let mut config = Self::default();
 
-        if let Ok(ua) = std::env::var("BRANCHFORGE_USER_AGENT") {
+        if let Some(ua) = env.get("BRANCHFORGE_USER_AGENT") {
             config.user_agent = ua;
         }
-        if let Ok(app) = std::env::var("BRANCHFORGE_APP_IDENTIFIER") {
+        if let Some(app) = env.get("BRANCHFORGE_APP_IDENTIFIER") {
             config.app_identifier = app;
         }
 

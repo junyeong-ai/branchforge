@@ -19,6 +19,7 @@ pub struct ConfigValidator {
     custom_rules: HashMap<String, ValidationFn>,
 }
 
+#[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ValueType {
     String,

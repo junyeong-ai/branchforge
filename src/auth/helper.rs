@@ -75,10 +75,25 @@ impl ApiKeyHelper {
         self
     }
 
+    /// Read helper configuration from the process environment.
+    /// Returns `None` when `ANTHROPIC_API_KEY_HELPER` is unset —
+    /// callers treat absent as "no helper configured" and fall
+    /// back to other credential sources.
+    ///
+    /// Delegates to [`Self::from_env_with`] with
+    /// [`crate::common::env::SystemEnv`].
     pub fn from_env() -> Option<Self> {
-        let command = std::env::var("ANTHROPIC_API_KEY_HELPER").ok()?;
-        let ttl_ms = std::env::var("CLAUDE_CODE_API_KEY_HELPER_TTL_MS")
-            .ok()
+        Self::from_env_with(&crate::common::env::SystemEnv)
+    }
+
+    /// Phase I-1: Read helper configuration from an injected
+    /// [`crate::common::env::EnvLookup`]. Keeps tests hermetic by
+    /// avoiding any direct `std::env::var` call — the entire
+    /// "helper configured?" decision flows through the seam.
+    pub fn from_env_with(env: &dyn crate::common::env::EnvLookup) -> Option<Self> {
+        let command = env.get("ANTHROPIC_API_KEY_HELPER")?;
+        let ttl_ms = env
+            .get("CLAUDE_CODE_API_KEY_HELPER_TTL_MS")
             .and_then(|v| v.parse().ok())
             .unwrap_or(3_600_000);
 

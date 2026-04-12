@@ -10,6 +10,7 @@ use crate::skills::{
 };
 
 /// Strategy for routing user input to skills
+#[non_exhaustive]
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum RoutingStrategy {

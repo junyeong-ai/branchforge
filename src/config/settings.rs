@@ -13,6 +13,7 @@ use serde::{Deserialize, Serialize};
 
 use super::ConfigResult;
 
+#[non_exhaustive]
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum SettingsSource {
@@ -98,6 +99,7 @@ pub struct HooksConfig {
     pub session_end: Vec<HookConfig>,
 }
 
+#[non_exhaustive]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum HookConfig {
@@ -122,20 +124,30 @@ pub struct AuthorizationConfig {
 }
 
 impl AuthorizationConfig {
-    pub fn to_policy(&self) -> crate::authorization::ToolPolicy {
-        use crate::authorization::ToolPolicy;
+    /// Lower the settings representation into a runtime
+    /// [`crate::authorization::ToolPolicy`]. Phase D E-3: parsing
+    /// is fallible — a typo like `"Bash("` in a `settings.local.json`
+    /// surfaces as a typed [`crate::authorization::PermissionDslError`]
+    /// instead of panicking inside the agent builder. The caller
+    /// (`AgentBuilder::apply_settings_mut`) routes this into a
+    /// deferred [`crate::Error::Config`] that fails `build()` loudly.
+    pub fn try_into_policy(
+        &self,
+    ) -> Result<crate::authorization::ToolPolicy, crate::authorization::PermissionDslError> {
+        use crate::authorization::{ToolPolicy, ToolRule, ToolRuleDecision};
 
-        let mut builder = ToolPolicy::builder();
-
+        let mut policy = ToolPolicy::default();
         for pattern in &self.deny {
-            builder = builder.deny(pattern);
+            policy
+                .rules
+                .push(ToolRule::from_dsl(pattern, ToolRuleDecision::Deny)?);
         }
-
         for pattern in &self.allow {
-            builder = builder.allow(pattern);
+            policy
+                .rules
+                .push(ToolRule::from_dsl(pattern, ToolRuleDecision::Allow)?);
         }
-
-        builder.build()
+        Ok(policy)
     }
 
     pub fn is_empty(&self) -> bool {
@@ -555,7 +567,9 @@ mod tests {
             default_mode: Some("auto".to_string()),
         };
 
-        let policy = settings.to_policy();
+        let policy = settings
+            .try_into_policy()
+            .expect("well-formed DSL should parse");
         assert_eq!(policy.rules.len(), 2);
     }
 

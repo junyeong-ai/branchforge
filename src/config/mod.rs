@@ -36,6 +36,7 @@ pub use validator::{ConfigValidator, ValueType};
 
 use thiserror::Error;
 
+#[non_exhaustive]
 #[derive(Error, Debug)]
 pub enum ConfigError {
     #[error("Key not found: {key}")]

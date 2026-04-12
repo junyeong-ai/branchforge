@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::env;
 
+#[non_exhaustive]
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ProviderKind {

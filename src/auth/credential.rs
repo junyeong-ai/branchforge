@@ -116,6 +116,7 @@ impl OAuthCredential {
     }
 }
 
+#[non_exhaustive]
 #[derive(Clone)]
 pub enum Credential {
     ApiKey(SecretString),

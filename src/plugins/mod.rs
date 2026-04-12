@@ -32,12 +32,10 @@
 mod discovery;
 mod error;
 mod loader;
-mod manager;
 mod manifest;
 pub mod namespace;
 
 pub use discovery::PluginDiscovery;
 pub use error::PluginError;
-pub use loader::PluginHookEntry;
-pub use manager::PluginLoader;
+pub use loader::{PluginHookEntry, PluginLoader};
 pub use manifest::{PluginAuthor, PluginDescriptor, PluginManifest};
