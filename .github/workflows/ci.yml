@@ -75,6 +75,41 @@ jobs:
         env:
           RUSTDOCFLAGS: -D warnings
 
+  pure-core:
+    name: Pure Core Build (no default features)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      # Phase 0-6 gate: the pure-core build must keep working so the
+      # SDK stays usable as a minimal LLM client without filesystem,
+      # sandbox, or cloud dependencies. Layer invariants in
+      # .claude/rules/architecture.md#10 and memory/verified_structure.md.
+      - name: Build (no-default-features)
+        run: cargo build --lib --no-default-features
+
+      - name: Test (no-default-features, lib only)
+        run: cargo test --lib --no-default-features --no-fail-fast
+
+      # Assert that the pure-core dependency closure does NOT pull in
+      # heavy feature-gated crates. Any drift fails CI so a missing
+      # #[cfg(feature = "...")] gate is caught before merge.
+      - name: Dependency closure must not leak feature-gated crates
+        run: |
+          set -euo pipefail
+          tree=$(cargo tree --no-default-features --edges=normal --prefix=none | sort -u)
+          forbidden=(rustix tree-sitter tree-sitter-bash aws-config aws-sdk-bedrockruntime gcp_auth azure_identity sqlx redis deadpool-postgres)
+          fail=0
+          for crate in "${forbidden[@]}"; do
+            if echo "$tree" | grep -q "^${crate} "; then
+              echo "::error::pure-core build leaked feature-gated crate: $crate"
+              fail=1
+            fi
+          done
+          exit $fail
+
   security:
     name: Security Audit
     runs-on: ubuntu-latest

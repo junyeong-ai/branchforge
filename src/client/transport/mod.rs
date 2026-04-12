@@ -300,7 +300,7 @@ mod tests {
 // each transport's `pub(crate) fn fake_transport(...)` helper without
 // exposing a production-facing test-utility surface.
 
-#[cfg(test)]
+#[cfg(all(test, feature = "aws", feature = "azure", feature = "gcp"))]
 mod classification_matrix {
     use super::*;
     use crate::error::ProviderErrorKind;
