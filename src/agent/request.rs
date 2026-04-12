@@ -24,6 +24,7 @@ pub struct RequestBuilder {
     cache_config: CacheConfig,
     prepared_mcp_tools: Option<PreparedTools>,
     metadata: Option<RequestMetadata>,
+    output_schema: Option<serde_json::Value>,
 }
 
 impl RequestBuilder {
@@ -50,6 +51,7 @@ impl RequestBuilder {
             cache_config: config.cache.clone(),
             prepared_mcp_tools: None,
             metadata: None,
+            output_schema: config.prompt.output_schema.clone(),
         }
     }
 
@@ -146,13 +148,18 @@ impl RequestBuilder {
             ..Default::default()
         };
 
+        let response_format = self
+            .output_schema
+            .as_ref()
+            .map(|schema| ir::ResponseFormat::JsonSchema(ir::JsonSchemaSpec::new(schema.clone())));
+
         ModelRequest {
             model: self.model.clone(),
             messages,
             system: Some(system_prompt),
             tools: ir_tools,
             tool_choice: None,
-            response_format: None,
+            response_format,
             settings: ModelSettings {
                 max_output_tokens: Some(self.max_tokens),
                 ..Default::default()

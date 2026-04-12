@@ -54,6 +54,7 @@ use crate::session::SessionId;
 ///     .model("claude-sonnet-4-5")
 ///     .max_budget_usd(rust_decimal_macros::dec!(10))
 ///     .resume_from(checkpoint)
+///     .await?
 ///     .build()
 ///     .await?;
 /// # Ok(())
