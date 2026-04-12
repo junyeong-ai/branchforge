@@ -40,6 +40,10 @@ Findings already rejected with evidence or merged via PR. Design reviews must ch
   - Only real violation: `ProviderErrorKind` at `src/lib.rs:388` (1 item, fixed in Phase 0-2)
 - **Lesson**: Before proposing "missing attribute X on enum Y", grep the enum definition directly. Don't trust cross-session memory of enum attribute state.
 
+## F-rej-020 · "Foundry error_description.contains(AADSTS) violates invariant #6"
+- **Origin**: Post-implementation validation review
+- **Refutation**: The `contains("AADSTS70043")` at `foundry.rs:223` operates on `parsed["error_description"]` — a specific JSON field, not the raw body. This is field-scoped substring matching, which is the only way to detect AADSTS error codes (Azure Entra embeds codes in free-text `error_description`, not in a structured code field). Invariant #6 prohibits raw `body.contains()` because tool outputs could contain exception names — but `error_description` is an Entra-specific response field, never a tool output.
+
 ## F-rej-019 · "BashAnalyzer regex+AST is a dual system — merge into AST only"
 - **Origin**: Round-3 analysis (Phase 7.5-2 task D5)
 - **Refutation**: Regex and AST serve DIFFERENT analysis concerns. Regex catches multi-command dangerous patterns (curl|sh, rm -rf /, find / -exec rm) spanning pipeline boundaries — hard to express as tree-sitter queries. AST catches structural concerns (command substitution, variable expansion, path extraction) — unreliable with regex due to nested quoting/heredocs. This is defense-in-depth, not a dual system. `security.md` explicitly documents this design. The regex patterns run on the model's bash command input (not on tool outputs), and word boundaries (`\b`) prevent the false-positive scenarios cited in the heuristics audit (`\bsrm\b` doesn't match `premium_srm_tool`, `\bmkfs(\.[a-z0-9]+)?\s` doesn't match paths containing mkfs).
