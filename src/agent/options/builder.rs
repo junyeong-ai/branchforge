@@ -94,7 +94,8 @@ pub struct AgentBuilder {
     pub(super) execution_mode: ExecutionMode,
     pub(super) human: Option<Arc<dyn crate::authorization::HumanInteractionHandler>>,
     pub(super) iteration_gate: Option<Arc<dyn crate::agent::policy::IterationGate>>,
-    pub(super) tool_selection_strategy: Option<Arc<dyn crate::agent::policy::ToolSelectionStrategy>>,
+    pub(super) tool_selection_strategy:
+        Option<Arc<dyn crate::agent::policy::ToolSelectionStrategy>>,
     pub(super) custom_tools: Vec<Arc<dyn Tool>>,
     pub(super) sandbox_settings: Option<crate::config::SandboxConfig>,
     pub(super) authorization_policy_explicit: bool,

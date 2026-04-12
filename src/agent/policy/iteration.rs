@@ -3,6 +3,7 @@
 use crate::ir::Usage;
 
 /// Decision returned by [`IterationGate::should_continue`].
+#[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum GateDecision {
     /// Proceed to the next iteration.
@@ -51,10 +52,7 @@ impl IterationGate for DefaultIterationGate {
         }
         if ctx.iteration > ctx.max_iterations {
             return GateDecision::Stop {
-                reason: format!(
-                    "max iterations reached ({})",
-                    ctx.max_iterations
-                ),
+                reason: format!("max iterations reached ({})", ctx.max_iterations),
             };
         }
         GateDecision::Continue

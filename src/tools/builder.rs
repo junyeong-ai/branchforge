@@ -196,7 +196,6 @@ impl ToolRegistryBuilder {
             let _ = tool_policy;
             ctx
         } else {
-
             #[cfg(feature = "local-fs")]
             let ctx = {
                 let sandbox_config = self.sandbox_config.unwrap_or_else(|| {
@@ -208,8 +207,7 @@ impl ToolRegistryBuilder {
                     .sandbox(sandbox_config)
                     .build()
                     .map(|mut security| {
-                        security.policy =
-                            crate::security::SecurityPolicy::new(tool_policy.clone());
+                        security.policy = crate::security::SecurityPolicy::new(tool_policy.clone());
                         security
                     })
                     .or_else(|_| crate::security::SecurityContext::try_permissive())
@@ -287,7 +285,10 @@ impl ToolRegistryBuilder {
         let mut all_tools: Vec<Arc<dyn Tool>> = vec![
             task_tool,
             Arc::new(TaskOutputTool::new(task_tracker.clone())),
-            Arc::new(super::TodoWriteTool::new(session_handle.clone(), session_id)),
+            Arc::new(super::TodoWriteTool::new(
+                session_handle.clone(),
+                session_id,
+            )),
             Arc::new(super::PlanTool::new(session_handle.clone())),
             Arc::new(super::AskUserQuestionTool),
             skill_tool,

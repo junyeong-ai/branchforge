@@ -16,7 +16,7 @@ use crate::context_scope::SharedContextScope;
 use crate::events::EventBus;
 use crate::hooks::HookRegistry;
 use crate::ir::Message;
-use crate::session::{SessionAccessScope, SessionManager, SessionHandle};
+use crate::session::{SessionAccessScope, SessionHandle, SessionManager};
 use crate::tools::{ToolRegistry, ToolSearchManager};
 
 pub struct Agent {

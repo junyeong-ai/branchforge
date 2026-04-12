@@ -203,13 +203,17 @@ impl ModelTransport for FoundryTransport {
                     "invalid_grant" => {
                         return (
                             ProviderErrorKind::Auth,
-                            Some("Azure Entra token expired — run `az login` to refresh credentials"),
+                            Some(
+                                "Azure Entra token expired — run `az login` to refresh credentials",
+                            ),
                         );
                     }
                     "DeploymentNotFound" | "ModelNotFound" => {
                         return (
                             ProviderErrorKind::BadRequest,
-                            Some("Azure AI Foundry model not deployed — check AZURE_AI_RESOURCE and model name"),
+                            Some(
+                                "Azure AI Foundry model not deployed — check AZURE_AI_RESOURCE and model name",
+                            ),
                         );
                     }
                     _ => {}
@@ -242,7 +246,9 @@ impl ModelTransport for FoundryTransport {
                     ),
                     "DeploymentNotFound" | "ModelNotFound" => (
                         ProviderErrorKind::BadRequest,
-                        Some("Azure AI Foundry model not deployed — check AZURE_AI_RESOURCE and model name"),
+                        Some(
+                            "Azure AI Foundry model not deployed — check AZURE_AI_RESOURCE and model name",
+                        ),
                     ),
                     _ => super::default_classify_status(status),
                 };

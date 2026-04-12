@@ -111,7 +111,6 @@ impl std::fmt::Debug for CredentialHint {
 }
 
 impl CredentialHint {
-
     /// Resolve the hint against an injected [`EnvLookup`] and return
     /// a configuration error explaining what the user must set.
     ///

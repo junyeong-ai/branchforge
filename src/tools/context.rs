@@ -11,7 +11,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::common::Extensions;
 use crate::hooks::{HookContext, HookEvent, HookInput, HookRegistry};
-use crate::session::{SessionAccessScope, SessionManager, SessionHandle};
+use crate::session::{SessionAccessScope, SessionHandle, SessionManager};
 
 #[cfg(feature = "local-fs")]
 use std::collections::HashMap;

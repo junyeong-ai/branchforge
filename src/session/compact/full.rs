@@ -10,7 +10,7 @@ use async_trait::async_trait;
 
 use super::CompactResult;
 use super::service::{CompactConfig, Compactor};
-use super::strategy::{CompactionSnapshot, CompactionPlan, CompactionStrategy};
+use super::strategy::{CompactionPlan, CompactionSnapshot, CompactionStrategy};
 use crate::session::SessionResult;
 use crate::session::state::Session;
 

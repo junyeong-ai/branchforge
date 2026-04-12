@@ -568,7 +568,10 @@ impl Agent {
                 total_usage: &total_usage,
                 model: &ir_request.model,
             };
-            let plan = self.runtime.tool_selection_strategy.plan(raw_calls, &selection_ctx);
+            let plan = self
+                .runtime
+                .tool_selection_strategy
+                .plan(raw_calls, &selection_ctx);
 
             let hook_ctx = self.hook_context();
 

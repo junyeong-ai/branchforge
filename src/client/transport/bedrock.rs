@@ -224,7 +224,9 @@ impl ModelTransport for BedrockTransport {
                     ),
                     "ModelNotReadyException" => (
                         ProviderErrorKind::Server,
-                        Some("Bedrock model not ready — the model may be warming up, retry shortly"),
+                        Some(
+                            "Bedrock model not ready — the model may be warming up, retry shortly",
+                        ),
                     ),
                     "ValidationException" => (ProviderErrorKind::BadRequest, None),
                     _ => super::default_classify_status(status),

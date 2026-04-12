@@ -93,7 +93,10 @@ mod tests {
                     calls.into_iter().partition(|c| c.name != "Bash");
                 ToolPlan {
                     execute,
-                    skip: skip.into_iter().map(|c| (c, "Bash blocked".into())).collect(),
+                    skip: skip
+                        .into_iter()
+                        .map(|c| (c, "Bash blocked".into()))
+                        .collect(),
                 }
             }
         }

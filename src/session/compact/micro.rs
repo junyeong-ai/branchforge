@@ -13,7 +13,7 @@ use async_trait::async_trait;
 
 use super::CompactResult;
 use super::strategy::{
-    CompactionSnapshot, CompactionPlan, CompactionStrategy, ContentOverrideEntry,
+    CompactionPlan, CompactionSnapshot, CompactionStrategy, ContentOverrideEntry,
 };
 use crate::ir::{ContentPart, ToolResultContent};
 use crate::session::SessionResult;

@@ -205,5 +205,4 @@ mod tests {
         assert!(router.handler.is_some());
         assert_eq!(router.handler.as_ref().unwrap().name(), "test_h");
     }
-
 }

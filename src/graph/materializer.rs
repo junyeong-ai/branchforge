@@ -238,7 +238,6 @@ impl GraphMaterializer {
 
         graph
     }
-
 }
 
 #[cfg(test)]

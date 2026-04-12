@@ -13,7 +13,7 @@ use std::sync::Arc;
 use tracing::{debug, info, warn};
 
 use super::CompactResult;
-use super::strategy::{CompactionSnapshot, CompactionPlan, CompactionStrategy};
+use super::strategy::{CompactionPlan, CompactionSnapshot, CompactionStrategy};
 use crate::common::circuit::{CircuitBreaker, CircuitConfig};
 use crate::session::memory::{MemoryEntry, MemoryStore};
 use crate::session::state::Session;

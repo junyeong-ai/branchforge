@@ -18,8 +18,8 @@ pub mod persistence_redis;
 pub mod queue;
 mod replay;
 pub mod schema_version;
-pub mod state;
 pub mod session_handle;
+pub mod state;
 pub mod types;
 
 pub use archive::{
@@ -27,7 +27,7 @@ pub use archive::{
     SessionArchiver,
 };
 pub use compact::{
-    CompactConfig, CompactionChain, CompactionChainBuilder, CompactionSnapshot, CompactionPlan,
+    CompactConfig, CompactionChain, CompactionChainBuilder, CompactionPlan, CompactionSnapshot,
     CompactionStrategy, Compactor, ContentOverrideEntry, DEFAULT_COMPACT_THRESHOLD, FullCompaction,
     MicroCompaction, TimeBasedCompaction,
 };
@@ -59,12 +59,12 @@ pub use schema_version::{
     MigrationLadder, SchemaMigration, SchemaMigrationError, SchemaVersionMismatchDirection,
     SessionSchemaVersion,
 };
+pub use session_handle::{ExecutionGuard, ExecutionState, SessionHandle, SessionSnapshot};
 pub use state::{
     ContentOverrides, ExecutionMetadata, MessageId, MessageMetadata, Session, SessionAuthorization,
     SessionConfig, SessionId, SessionMessage, SessionState, SessionToolLimits,
     SessionTransitionError, SessionType, ThinkingMetadata, ToolResultMeta,
 };
-pub use session_handle::{ExecutionGuard, ExecutionState, SessionSnapshot, SessionHandle};
 pub use types::{
     CompactRecord, CompactTrigger, EnvironmentSnapshot, Plan, PlanState, PlanTransitionError,
     QueueItem, QueueItemState, QueueItemTransitionError, QueueOperation, SessionAccessScope,

@@ -69,7 +69,6 @@ impl ToolRegistry {
         ToolRegistryBuilder::new()
     }
 
-
     pub fn default_tools(
         access: ToolSurface,
         working_dir: Option<PathBuf>,

@@ -27,7 +27,7 @@ use crate::hooks::{HookContext, HookEvent, HookInput};
 use crate::ir::ContentPart;
 use crate::ir::ModelStreamChunk;
 use crate::session::ToolExecution;
-use crate::session::{MessageMetadata, SessionAccessScope, SessionManager, SessionHandle};
+use crate::session::{MessageMetadata, SessionAccessScope, SessionHandle, SessionManager};
 use crate::types::context_window;
 
 impl Agent {
@@ -602,7 +602,10 @@ impl StreamState {
             // Propagate EventBus to Session/Graph for SessionChanged,
             // BranchForked, and CheckpointCreated events.
             if let Some(ref bus) = self.cfg.runtime.event_bus {
-                self.cfg.session_handle.with_event_bus(Arc::clone(bus)).await;
+                self.cfg
+                    .session_handle
+                    .with_event_bus(Arc::clone(bus))
+                    .await;
             }
 
             let session_start_input = HookInput::session_start(&*self.cfg.session_id);

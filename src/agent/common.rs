@@ -14,7 +14,7 @@ use crate::budget::{BudgetTracker, TenantBudget};
 use crate::context::PromptOrchestrator;
 use crate::hooks::{HookContext, HookEvent, HookInput, HookRegistry};
 use crate::session::compact::CompactResult;
-use crate::session::{ToolExecution, SessionHandle};
+use crate::session::{SessionHandle, ToolExecution};
 use crate::types::ToolResult;
 
 use super::config::BudgetConfig;

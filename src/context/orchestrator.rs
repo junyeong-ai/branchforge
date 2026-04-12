@@ -291,8 +291,8 @@ mod tests {
             .register(RuleIndex::new("global").source(ContentSource::in_memory("Be helpful")));
 
         let static_context = StaticContext::new();
-        let orchestrator = PromptOrchestrator::new(static_context, "sonnet")
-            .rule_registry(rule_registry);
+        let orchestrator =
+            PromptOrchestrator::new(static_context, "sonnet").rule_registry(rule_registry);
 
         let rules = orchestrator
             .get_rules_for_path(Path::new("src/lib.rs"))
@@ -315,8 +315,8 @@ mod tests {
         );
 
         let static_context = StaticContext::new();
-        let orchestrator = PromptOrchestrator::new(static_context, "sonnet")
-            .rule_registry(rule_registry);
+        let orchestrator =
+            PromptOrchestrator::new(static_context, "sonnet").rule_registry(rule_registry);
 
         let rules = orchestrator
             .find_matching_rules(Path::new("src/lib.rs"))
@@ -345,8 +345,8 @@ mod tests {
                 .source(ContentSource::in_memory("Test content")),
         );
 
-        let orchestrator = PromptOrchestrator::new(static_context, "sonnet")
-            .with_skill_registry(skill_registry);
+        let orchestrator =
+            PromptOrchestrator::new(static_context, "sonnet").with_skill_registry(skill_registry);
 
         assert!(orchestrator.skill_registry().contains("test"));
     }
@@ -358,8 +358,8 @@ mod tests {
         skill_registry.register(SkillIndex::new("commit", "Create git commits"));
         skill_registry.register(SkillIndex::new("review", "Review code"));
 
-        let orchestrator = PromptOrchestrator::new(static_context, "sonnet")
-            .with_skill_registry(skill_registry);
+        let orchestrator =
+            PromptOrchestrator::new(static_context, "sonnet").with_skill_registry(skill_registry);
 
         let summary = orchestrator.build_skill_summary();
         assert!(summary.contains("commit"));
@@ -374,8 +374,8 @@ mod tests {
         skill.disable_model_invocation = true;
         skill_registry.register(skill);
 
-        let orchestrator = PromptOrchestrator::new(static_context, "sonnet")
-            .with_skill_registry(skill_registry);
+        let orchestrator =
+            PromptOrchestrator::new(static_context, "sonnet").with_skill_registry(skill_registry);
 
         let skill = orchestrator.find_skill_by_command("/internal");
         assert!(skill.is_some());
@@ -393,8 +393,8 @@ mod tests {
         );
 
         let static_context = StaticContext::new();
-        let orchestrator = PromptOrchestrator::new(static_context, "sonnet")
-            .rule_registry(rule_registry);
+        let orchestrator =
+            PromptOrchestrator::new(static_context, "sonnet").rule_registry(rule_registry);
 
         let summary = orchestrator.build_rules_summary().await;
         assert!(summary.contains("security"));
@@ -441,8 +441,8 @@ mod tests {
         );
 
         let static_context = StaticContext::new();
-        let orchestrator = PromptOrchestrator::new(static_context, "sonnet")
-            .rule_registry(rule_registry);
+        let orchestrator =
+            PromptOrchestrator::new(static_context, "sonnet").rule_registry(rule_registry);
 
         assert_eq!(orchestrator.list_rules().await.len(), 2);
 

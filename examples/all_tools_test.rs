@@ -14,7 +14,7 @@ use branchforge::agent::{AgentMetrics, AgentState, TaskOutputTool, TaskTracker};
 use branchforge::common::{ContentSource, IndexRegistry};
 use branchforge::ir::{FinishReason, Usage};
 use branchforge::security::SecurityContext;
-use branchforge::session::{MemoryPersistence, SessionId, SessionState, SessionHandle};
+use branchforge::session::{MemoryPersistence, SessionHandle, SessionId, SessionState};
 use branchforge::skills::{SkillIndex, SkillRuntime};
 use branchforge::tools::{
     BashTool, EditTool, ExecutionContext, GlobTool, GrepTool, KillShellTool, PlanTool,

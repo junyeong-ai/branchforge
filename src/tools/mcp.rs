@@ -84,7 +84,10 @@ impl Tool for McpToolWrapper {
     }
 
     fn is_destructive(&self, _input: &Value) -> bool {
-        self.definition.annotations.destructive_hint.unwrap_or(false)
+        self.definition
+            .annotations
+            .destructive_hint
+            .unwrap_or(false)
     }
 
     fn is_concurrency_safe(&self, _input: &Value) -> bool {

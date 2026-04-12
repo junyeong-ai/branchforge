@@ -124,7 +124,9 @@ impl crate::decision::DecisionReason for CacheBreakCause {
                 format!("model changed: {previous} → {current}")
             }
             Self::SystemPromptChanged => "system prompt hash changed".into(),
-            Self::ToolSchemaChanged { tools } => format!("tool schema changed: {}", tools.join(", ")),
+            Self::ToolSchemaChanged { tools } => {
+                format!("tool schema changed: {}", tools.join(", "))
+            }
             Self::ReasoningEffortChanged => "reasoning effort changed".into(),
             Self::TtlOrUpstream => "TTL expired or upstream cache flushed".into(),
         }
@@ -258,7 +260,9 @@ pub fn classify(
         }
     }
     if !changed_tools.is_empty() {
-        return Some(CacheBreakCause::ToolSchemaChanged { tools: changed_tools });
+        return Some(CacheBreakCause::ToolSchemaChanged {
+            tools: changed_tools,
+        });
     }
 
     // Everything structural is the same; the prior turn had a
@@ -400,7 +404,10 @@ mod tests {
 
         let resp = resp_with_cache(0);
         match classify(Some(&prev), &curr, &resp, true).unwrap() {
-            CacheBreakCause::ToolSchemaChanged { tools } => assert!(tools.contains(&"search".to_string()), "expected {tools:?} to contain search"),
+            CacheBreakCause::ToolSchemaChanged { tools } => assert!(
+                tools.contains(&"search".to_string()),
+                "expected {tools:?} to contain search"
+            ),
             other => panic!("expected ToolSchemaChanged, got {other:?}"),
         }
     }
@@ -419,7 +426,10 @@ mod tests {
 
         let resp = resp_with_cache(0);
         match classify(Some(&prev), &curr, &resp, true).unwrap() {
-            CacheBreakCause::ToolSchemaChanged { tools } => assert!(tools.contains(&"brand_new".to_string()), "expected {tools:?} to contain brand_new"),
+            CacheBreakCause::ToolSchemaChanged { tools } => assert!(
+                tools.contains(&"brand_new".to_string()),
+                "expected {tools:?} to contain brand_new"
+            ),
             other => panic!("expected ToolSchemaChanged (new tool), got {other:?}"),
         }
     }
@@ -438,7 +448,10 @@ mod tests {
 
         let resp = resp_with_cache(0);
         match classify(Some(&prev), &curr, &resp, true).unwrap() {
-            CacheBreakCause::ToolSchemaChanged { tools } => assert!(tools.contains(&"old_tool".to_string()), "expected {tools:?} to contain old_tool"),
+            CacheBreakCause::ToolSchemaChanged { tools } => assert!(
+                tools.contains(&"old_tool".to_string()),
+                "expected {tools:?} to contain old_tool"
+            ),
             other => panic!("expected ToolSchemaChanged (removed tool), got {other:?}"),
         }
     }
