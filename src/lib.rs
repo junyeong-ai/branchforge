@@ -144,6 +144,7 @@ pub use client::codec::{
     GeminiGenerateCodec, InvocationMode, ModelCodec, OpenAiChatCodec, OpenAiResponsesCodec,
 };
 pub use client::llm_call::{CircuitBrokenClient, FallingBackClient, LlmCall, RetryingClient};
+pub use client::llm_client::{LlmClient, LlmClientBuilder};
 // Re-export CancellationToken since it appears in the LlmCall::send_stream() public API.
 // Downstream crates should not need a direct tokio-util dependency just to call send_stream.
 pub use client::mock::{MockLlmCall, MockResponse};

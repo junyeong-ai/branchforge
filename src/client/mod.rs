@@ -22,6 +22,7 @@ pub mod cache;
 pub mod codec;
 pub mod fallback;
 pub mod llm_call;
+pub mod llm_client;
 pub mod mock;
 pub mod preset;
 pub mod provider_client;

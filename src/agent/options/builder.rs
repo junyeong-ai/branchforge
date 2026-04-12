@@ -252,68 +252,14 @@ impl AgentBuilder {
         }
     }
 
-    /// Build a `ProviderClient` for the direct Anthropic Messages API
-    /// from a resolved credential. The transport is wired to the optional
-    /// refresh provider so 401s after token expiry can recover without
-    /// rebuilding the agent.
-    ///
-    /// When the credential is an `OAuth` variant (Claude Code CLI), the
-    /// transport additionally injects the OAuth-specific headers
-    /// (`user-agent`, `x-app`, `anthropic-dangerous-direct-browser-access`,
-    /// `anthropic-beta: oauth-2025-04-20,claude-code-20250219`) and the
-    /// `?beta=true` URL parameter that the Anthropic API requires to
-    /// accept Bearer tokens. Without this, the API rejects OAuth requests
-    /// with `"OAuth authentication is currently not supported."`.
+    /// Build a `ProviderClient` for the direct Anthropic Messages API.
+    /// Delegates to [`crate::client::llm_client::build_direct_anthropic`]
+    /// — the canonical implementation shared with [`LlmClientBuilder`].
     fn build_anthropic_direct_client(
         credential: &Credential,
         refresh_provider: Option<Arc<dyn crate::auth::CredentialProvider>>,
     ) -> crate::Result<crate::client::provider_client::ProviderClient> {
-        use crate::auth::{CLAUDE_CODE_BETA, OAuthConfig};
-        use crate::client::codec::AnthropicMessagesCodec;
-        use crate::client::provider_client::ProviderClient;
-        use crate::client::transport::{DirectAuth, DirectTransport};
-
-        let is_oauth = matches!(credential, Credential::OAuth(_));
-        let direct_auth = match credential {
-            // Anthropic Direct accepts API keys via the `x-api-key` header.
-            Credential::ApiKey(secret) => DirectAuth::XApiKey(secret.clone()),
-            // OAuth tokens (Claude CLI) ride on `Authorization: Bearer ...`.
-            Credential::OAuth(oauth) => DirectAuth::Bearer(oauth.access_token.clone()),
-        };
-
-        let base = std::env::var("ANTHROPIC_BASE_URL")
-            .unwrap_or_else(|_| "https://api.anthropic.com".into());
-        let mut transport =
-            DirectTransport::new(base, direct_auth).with_allowed_codecs(&["anthropic-messages"]);
-
-        if is_oauth {
-            // The Anthropic API only accepts Bearer tokens when these
-            // headers + URL flag are present together. The `BetaFeature::OAuth`
-            // header value is the same `oauth-2025-04-20` constant used by
-            // `OAuthConfig::build_beta_header`.
-            let cfg = OAuthConfig::default();
-            let oauth_beta = crate::agent::BetaFeature::OAuth.header_value();
-            let beta_header = format!("{},{}", oauth_beta, CLAUDE_CODE_BETA);
-            let mut extra_headers: std::collections::HashMap<String, String> =
-                cfg.extra_headers.clone();
-            extra_headers.insert("user-agent".to_string(), cfg.user_agent.clone());
-            extra_headers.insert("x-app".to_string(), cfg.app_identifier.clone());
-            extra_headers.insert("anthropic-beta".to_string(), beta_header);
-            transport = transport
-                .with_extra_headers(extra_headers)
-                .with_extra_url_params(cfg.url_params.clone());
-        }
-
-        if let Some(provider) = refresh_provider {
-            transport = transport.with_credential_provider(provider);
-        }
-
-        let auth_preamble = credential.auth_preamble();
-
-        let codec =
-            Arc::new(AnthropicMessagesCodec::new()) as Arc<dyn crate::client::codec::ModelCodec>;
-        let transport = Arc::new(transport) as Arc<dyn crate::client::transport::ModelTransport>;
-        ProviderClient::new(codec, transport, auth_preamble)
+        crate::client::llm_client::build_direct_anthropic(credential, refresh_provider, None)
     }
 
     /// Configures authentication for the API.

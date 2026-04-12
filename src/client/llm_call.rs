@@ -41,6 +41,21 @@ pub trait LlmCall: Send + Sync + std::fmt::Debug {
         request: &ModelRequest,
         cancel_token: CancellationToken,
     ) -> Result<ChunkStream>;
+
+    /// Provider capabilities (structured output, streaming, vision, etc.).
+    ///
+    /// Consumers can query capabilities at runtime to make adaptive
+    /// decisions (e.g. schema enforcement vs JSON-only mode).
+    /// Default returns `None` for decorator wrappers that don't have
+    /// direct codec access.
+    fn capabilities(&self) -> Option<&'static crate::ir::ProviderCapabilities> {
+        None
+    }
+
+    /// Codec identifier (e.g. `"anthropic-messages"`, `"openai-chat"`).
+    fn codec_id(&self) -> &str {
+        "unknown"
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -59,6 +74,14 @@ impl LlmCall for super::provider_client::ProviderClient {
         cancel_token: CancellationToken,
     ) -> Result<ChunkStream> {
         self.send_stream(request, cancel_token).await
+    }
+
+    fn capabilities(&self) -> Option<&'static crate::ir::ProviderCapabilities> {
+        Some(self.codec().capabilities())
+    }
+
+    fn codec_id(&self) -> &str {
+        self.codec_id()
     }
 }
 
@@ -133,6 +156,14 @@ impl LlmCall for RetryingClient {
             }
         }
         Err(last_err.expect("retry loop exhausted; last_err must be Some when max_retries reached"))
+    }
+
+    fn capabilities(&self) -> Option<&'static crate::ir::ProviderCapabilities> {
+        self.inner.capabilities()
+    }
+
+    fn codec_id(&self) -> &str {
+        self.inner.codec_id()
     }
 }
 
@@ -213,6 +244,14 @@ impl LlmCall for FallingBackClient {
             Err(e) => Err(e),
         }
     }
+
+    fn capabilities(&self) -> Option<&'static crate::ir::ProviderCapabilities> {
+        self.primary.capabilities()
+    }
+
+    fn codec_id(&self) -> &str {
+        self.primary.codec_id()
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -282,6 +321,14 @@ impl LlmCall for CircuitBrokenClient {
                 Err(e)
             }
         }
+    }
+
+    fn capabilities(&self) -> Option<&'static crate::ir::ProviderCapabilities> {
+        self.inner.capabilities()
+    }
+
+    fn codec_id(&self) -> &str {
+        self.inner.codec_id()
     }
 }
 

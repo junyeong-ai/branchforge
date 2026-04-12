@@ -178,6 +178,54 @@ impl ModelRequest {
         self.settings.max_output_tokens = Some(n);
         self
     }
+
+    /// Builder-style: set system prompt.
+    pub fn with_system(mut self, system: SystemPrompt) -> Self {
+        self.system = Some(system);
+        self
+    }
+
+    /// Builder-style: set temperature (0.0–1.0).
+    pub fn with_temperature(mut self, t: f32) -> Self {
+        self.settings.temperature = Some(t);
+        self
+    }
+
+    /// Builder-style: set top_p nucleus sampling.
+    pub fn with_top_p(mut self, p: f32) -> Self {
+        self.settings.top_p = Some(p);
+        self
+    }
+
+    /// Builder-style: set top_k sampling.
+    pub fn with_top_k(mut self, k: u32) -> Self {
+        self.settings.top_k = Some(k);
+        self
+    }
+
+    /// Builder-style: set tool definitions.
+    pub fn with_tools(mut self, tools: Vec<ToolDefinition>) -> Self {
+        self.tools = tools;
+        self
+    }
+
+    /// Builder-style: set tool choice constraint.
+    pub fn with_tool_choice(mut self, choice: ToolChoice) -> Self {
+        self.tool_choice = Some(choice);
+        self
+    }
+
+    /// Builder-style: set stop sequences.
+    pub fn with_stop_sequences(mut self, seqs: Vec<String>) -> Self {
+        self.settings.stop_sequences = seqs;
+        self
+    }
+
+    /// Builder-style: replace all settings at once.
+    pub fn with_settings(mut self, settings: ModelSettings) -> Self {
+        self.settings = settings;
+        self
+    }
 }
 
 /// A complete (non-streaming) model response.
