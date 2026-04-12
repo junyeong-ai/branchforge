@@ -187,7 +187,7 @@ impl ContentPart {
             ToolOutput::Empty => ContentPart::ToolResult {
                 tool_call_id: call_id,
                 tool_name: None,
-                content: ToolResultContent::Text(String::new()),
+                content: ToolResultContent::Text("(no output)".into()),
                 is_error: false,
             },
         }
