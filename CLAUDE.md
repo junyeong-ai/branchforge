@@ -2,6 +2,18 @@
 
 Rust-native agent runtime. Graph-first sessions, provider-neutral IR, native structured outputs across all codecs.
 
+## Review Convergence Protocol
+
+Design reviews run via the `/design-review <axis>` skill (`.claude/skills/design-review/`). All review ground truth is git-committed under `.claude/` so collaborators share the same state — per-user auto-memory is deliberately not used.
+
+Before proposing any finding:
+
+1. Check `.claude/review/findings_resolved.md` — if the same finding was already rejected with evidence, do not re-propose.
+2. Check `.claude/rules/architecture.md` — 10 invariants, auto-loaded on `src/**` edits. A proposal contradicting an invariant is invalid by construction.
+3. Check `.claude/review/verified_structure.md` — empirical file:line facts override intuition about "X doesn't exist".
+
+Axes are frozen: `architecture` · `provider-graph` · `tools-naming` · `agent-loop` · `info-hygiene-heuristics`. New axis = skill PR, not silent expansion. Lifecycle: `open → {resolved, rejected, invariant-added}` only.
+
 ## Commands
 
 ```bash

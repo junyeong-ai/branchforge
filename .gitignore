@@ -52,5 +52,7 @@ doc/
 # Claude Code / AI tools
 .claude/*
 !.claude/rules/
+!.claude/skills/
+!.claude/review/
 !.claude/CLAUDE.md
 .specify/
