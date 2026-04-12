@@ -9,16 +9,16 @@
 #![cfg(feature = "cli-auth")]
 
 use std::any::Any;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 
 use branchforge::agent::policy::{GateDecision, IterationContext, IterationGate};
-use branchforge::events::{EventBus, EventKind, TokensConsumedPayload};
+use branchforge::events::{EventBus, TokensConsumedPayload};
 use branchforge::session::SessionManager;
 use branchforge::tools::{ExecutionContext, Tool};
 use branchforge::types::ToolResult;
-use branchforge::{Agent, AgentEvent, Auth, RunConfig, ToolSurface};
+use branchforge::{Agent, AgentEvent, Auth, ToolSurface};
 use futures::StreamExt;
 use serde_json::{Value, json};
 use std::pin::pin;
@@ -521,7 +521,7 @@ async fn live_system_prompt_injection() {
         .await
         .expect("Execute failed");
 
-    let words: Vec<&str> = result.text().trim().split_whitespace().collect();
+    let words: Vec<&str> = result.text().split_whitespace().collect();
     println!(
         "[SYSTEM_PROMPT] text='{}', word_count={}",
         result.text().trim(),
