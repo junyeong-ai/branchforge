@@ -501,6 +501,18 @@ pub struct McpToolAnnotations {
     pub open_world_hint: Option<bool>,
 }
 
+#[cfg(feature = "mcp")]
+impl From<rmcp::model::ToolAnnotations> for McpToolAnnotations {
+    fn from(a: rmcp::model::ToolAnnotations) -> Self {
+        Self {
+            read_only_hint: a.read_only_hint,
+            destructive_hint: a.destructive_hint,
+            idempotent_hint: a.idempotent_hint,
+            open_world_hint: a.open_world_hint,
+        }
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct McpResourceDefinition {

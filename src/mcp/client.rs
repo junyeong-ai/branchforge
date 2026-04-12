@@ -17,7 +17,7 @@ use tokio::sync::RwLock;
 use super::McpContent;
 use super::{
     McpClientState, McpError, McpResourceDefinition, McpResult, McpServerConfig, McpServerInfo,
-    McpServerSnapshot, McpTimeouts, McpToolDefinition, McpToolResult,
+    McpServerSnapshot, McpTimeouts, McpToolAnnotations, McpToolDefinition, McpToolResult,
 };
 
 #[cfg(feature = "mcp")]
@@ -240,7 +240,10 @@ impl McpClient {
                 name: t.name.to_string(),
                 description: t.description.map(|d| d.to_string()).unwrap_or_default(),
                 input_schema: serde_json::Value::Object((*t.input_schema).clone()),
-                annotations: Default::default(),
+                annotations: t
+                    .annotations
+                    .map(McpToolAnnotations::from)
+                    .unwrap_or_default(),
             })
             .collect();
 
@@ -348,7 +351,10 @@ impl McpClient {
                 name: t.name.to_string(),
                 description: t.description.map(|d| d.to_string()).unwrap_or_default(),
                 input_schema: serde_json::Value::Object((*t.input_schema).clone()),
-                annotations: Default::default(),
+                annotations: t
+                    .annotations
+                    .map(McpToolAnnotations::from)
+                    .unwrap_or_default(),
             })
             .collect();
 

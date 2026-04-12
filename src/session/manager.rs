@@ -279,83 +279,87 @@ impl SessionManager {
         self.persistence.list(Some(tenant_id)).await
     }
 
+    /// Lightweight fork: replay current-branch messages into a new session
+    /// under an advisory lock to prevent stale-snapshot races.
     pub async fn fork(&self, id: &SessionId) -> SessionResult<Session> {
-        let original = self.get(id).await?;
-
-        let mut forked = Session::new(original.config.clone());
-        forked.parent_id = Some(original.id);
-        forked.tenant_id = original.tenant_id.clone();
-        forked.principal_id = original.principal_id.clone();
-
-        // Copy messages up to current leaf
-        for msg in original.current_branch_messages() {
-            let mut cloned = msg;
-            cloned.is_sidechain = true;
-            forked.add_message(cloned)?;
-        }
-        forked.refresh_summary_cache();
-
+        let result_slot = Arc::new(std::sync::Mutex::new(None::<Session>));
+        let slot = result_slot.clone();
+        self.persistence
+            .with_session_lock(
+                id,
+                Box::new(move |original| {
+                    let mut forked = Session::new(original.config.clone());
+                    forked.parent_id = Some(original.id);
+                    forked.tenant_id = original.tenant_id.clone();
+                    forked.principal_id = original.principal_id.clone();
+                    for msg in original.current_branch_messages() {
+                        let mut cloned = msg;
+                        cloned.is_sidechain = true;
+                        forked.add_message(cloned)?;
+                    }
+                    forked.refresh_summary_cache();
+                    *slot.lock().unwrap() = Some(forked);
+                    Ok(())
+                }),
+            )
+            .await?;
+        let forked = result_slot.lock().unwrap().take().unwrap();
         self.persistence.save(&forked).await?;
         Ok(forked)
     }
 
+    /// Lightweight fork from a specific node: replay messages up to `from_node`
+    /// into a new session under an advisory lock.
     pub async fn fork_from_node(
         &self,
         id: &SessionId,
         from_node: crate::graph::NodeId,
     ) -> SessionResult<Session> {
-        let original = self.get(id).await?;
-        let replay = original.replay_input(Some(from_node))?;
-
-        let mut forked = Session::new(original.config.clone());
-        forked.parent_id = Some(original.id);
-        forked.tenant_id = original.tenant_id.clone();
-        forked.principal_id = original.principal_id.clone();
-
-        for message in replay.messages {
-            let mut session_message = match message.role {
-                crate::ir::Role::User | crate::ir::Role::Tool => {
-                    SessionMessage::user(message.content)
-                }
-                crate::ir::Role::Assistant => SessionMessage::assistant(message.content),
-            };
-            session_message.is_sidechain = true;
-            forked.add_message(session_message)?;
-        }
-        forked.refresh_summary_cache();
-
+        let result_slot = Arc::new(std::sync::Mutex::new(None::<Session>));
+        let slot = result_slot.clone();
+        self.persistence
+            .with_session_lock(
+                id,
+                Box::new(move |original| {
+                    let replay = original.replay_input(Some(from_node))?;
+                    let mut forked = Session::new(original.config.clone());
+                    forked.parent_id = Some(original.id);
+                    forked.tenant_id = original.tenant_id.clone();
+                    forked.principal_id = original.principal_id.clone();
+                    for message in replay.messages {
+                        let mut session_message = match message.role {
+                            crate::ir::Role::User | crate::ir::Role::Tool => {
+                                SessionMessage::user(message.content)
+                            }
+                            crate::ir::Role::Assistant => {
+                                SessionMessage::assistant(message.content)
+                            }
+                        };
+                        session_message.is_sidechain = true;
+                        forked.add_message(session_message)?;
+                    }
+                    forked.refresh_summary_cache();
+                    *slot.lock().unwrap() = Some(forked);
+                    Ok(())
+                }),
+            )
+            .await?;
+        let forked = result_slot.lock().unwrap().take().unwrap();
         self.persistence.save(&forked).await?;
         Ok(forked)
     }
 
+    /// Scoped lightweight fork from a specific node with access verification.
     pub async fn fork_from_node_scoped(
         &self,
         id: &SessionId,
         scope: &SessionAccessScope,
         from_node: crate::graph::NodeId,
     ) -> SessionResult<Session> {
-        let original = self.get_scoped(id, scope).await?;
-        let replay = original.replay_input(Some(from_node))?;
-
-        let mut forked = Session::new(original.config.clone());
-        forked.parent_id = Some(original.id);
-        forked.tenant_id = original.tenant_id.clone();
-        forked.principal_id = original.principal_id.clone();
-
-        for message in replay.messages {
-            let mut session_message = match message.role {
-                crate::ir::Role::User | crate::ir::Role::Tool => {
-                    SessionMessage::user(message.content)
-                }
-                crate::ir::Role::Assistant => SessionMessage::assistant(message.content),
-            };
-            session_message.is_sidechain = true;
-            forked.add_message(session_message)?;
-        }
-        forked.refresh_summary_cache();
-
-        self.persistence.save(&forked).await?;
-        Ok(forked)
+        // Verify scope first (outside the lock to avoid holding it during
+        // the scope check, which is a separate persistence read).
+        let _ = self.get_scoped(id, scope).await?;
+        self.fork_from_node(id, from_node).await
     }
 
     #[cfg(test)]
