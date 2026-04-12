@@ -16,7 +16,7 @@ use crate::ir::{self, ContentPart, FinishReason, TokenCount};
 use crate::session::types::TodoItem;
 use crate::session::{Session, SessionAccessScope, SessionConfig, SessionId, SessionManager};
 use crate::skills::{SkillIndex, SkillRuntime};
-use crate::tools::{ExecutionContext, ToolOutput, ToolRegistry, ToolResult, ToolSurface};
+use crate::tools::{ToolOutput, ToolRegistry, ToolResult, ToolSurface};
 
 use async_trait::async_trait;
 use std::sync::Arc;
@@ -813,7 +813,7 @@ async fn test_hook_input_modification() {
 fn test_tool_registry_with_dummy() {
     use helpers::DummyTool;
 
-    let registry = ToolRegistry::new();
+    let registry = ToolRegistry::default();
     let tool = Arc::new(DummyTool {
         name: "TestTool".to_string(),
         output: ToolOutput::Success("success".to_string()),
@@ -828,7 +828,11 @@ fn test_tool_registry_with_dummy() {
 async fn test_tool_registry_execute() {
     use helpers::DummyTool;
 
-    let registry = ToolRegistry::from_context(ExecutionContext::empty());
+    use crate::tools::ExecutionContext;
+
+    let registry = ToolRegistry::builder()
+        .context(ExecutionContext::empty())
+        .build();
     let tool = Arc::new(DummyTool {
         name: "TestTool".to_string(),
         output: ToolOutput::Success("test output".to_string()),
@@ -843,7 +847,7 @@ async fn test_tool_registry_execute() {
 
 #[tokio::test]
 async fn test_tool_registry_execute_unknown() {
-    let registry = ToolRegistry::new();
+    let registry = ToolRegistry::default();
     let result = registry.execute("UnknownTool", serde_json::json!({})).await;
 
     assert!(result.is_error());
@@ -940,7 +944,7 @@ fn build_supervised_agent_with_human(
         make_text_response("All done."),
     ]);
 
-    let tools = ToolRegistry::from_context(ExecutionContext::empty());
+    let tools = ToolRegistry::default();
     tools.register(Arc::new(DummyTool {
         name: "TestTool".into(),
         output: ToolOutput::Success("test output".into()),
@@ -1068,7 +1072,7 @@ async fn test_approval_no_handler_defaults_to_deny() {
         make_text_response("All done."),
     ]);
 
-    let tools = ToolRegistry::from_context(ExecutionContext::empty());
+    let tools = ToolRegistry::default();
     tools.register(Arc::new(DummyTool {
         name: "TestTool".into(),
         output: ToolOutput::Success("test output".into()),

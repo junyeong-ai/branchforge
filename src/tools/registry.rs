@@ -44,15 +44,6 @@ pub struct ToolRegistry {
 }
 
 impl ToolRegistry {
-    pub fn new() -> Self {
-        Self {
-            tools: DashMap::new(),
-            task_tracker: TaskTracker::new(Arc::new(MemoryPersistence::new())),
-            env: ToolExecutionEnv::default(),
-            overflow_store: None,
-        }
-    }
-
     pub(crate) fn from_env(task_tracker: TaskTracker, env: ToolExecutionEnv) -> Self {
         Self {
             tools: DashMap::new(),
@@ -62,9 +53,6 @@ impl ToolRegistry {
         }
     }
 
-    /// Phase C-7: attach a spill backend for oversized tool results.
-    /// Used by [`super::builder::ToolRegistryBuilder`] after the
-    /// registry is constructed.
     pub(crate) fn set_overflow_store(&mut self, store: Arc<dyn super::OverflowStore>) {
         self.overflow_store = Some(store);
     }
@@ -76,18 +64,11 @@ impl ToolRegistry {
         self.overflow_store.as_ref()
     }
 
+    /// Start building a [`ToolRegistry`] with custom configuration.
     pub fn builder() -> ToolRegistryBuilder {
         ToolRegistryBuilder::new()
     }
 
-    pub fn from_context(context: ExecutionContext) -> Self {
-        Self {
-            tools: DashMap::new(),
-            task_tracker: TaskTracker::new(Arc::new(MemoryPersistence::new())),
-            env: ToolExecutionEnv::new(context),
-            overflow_store: None,
-        }
-    }
 
     pub fn default_tools(
         access: ToolSurface,
@@ -445,8 +426,16 @@ impl ToolRegistry {
 }
 
 impl Default for ToolRegistry {
+    /// Empty registry with no tools and a minimal execution environment.
+    /// Use [`Self::builder`] to construct a production-ready registry with
+    /// default tools and security context.
     fn default() -> Self {
-        Self::new()
+        Self {
+            tools: DashMap::new(),
+            task_tracker: TaskTracker::new(Arc::new(MemoryPersistence::new())),
+            env: ToolExecutionEnv::new(ExecutionContext::empty()),
+            overflow_store: None,
+        }
     }
 }
 
@@ -641,7 +630,7 @@ mod tests {
     #[cfg(feature = "coding-tools")]
     #[test]
     fn test_register_dynamic() {
-        let registry = ToolRegistry::new();
+        let registry = ToolRegistry::default();
         let tool: Arc<dyn Tool> = Arc::new(crate::tools::ReadTool);
 
         assert!(registry.register_dynamic(tool.clone()).is_ok());
@@ -654,7 +643,7 @@ mod tests {
     #[cfg(feature = "coding-tools")]
     #[test]
     fn test_register_or_replace() {
-        let registry = ToolRegistry::new();
+        let registry = ToolRegistry::default();
         let tool1: Arc<dyn Tool> = Arc::new(crate::tools::ReadTool);
         let tool2: Arc<dyn Tool> = Arc::new(crate::tools::ReadTool);
 
@@ -693,7 +682,7 @@ mod tests {
     #[cfg(feature = "coding-tools")]
     #[test]
     fn test_unregister() {
-        let registry = ToolRegistry::new();
+        let registry = ToolRegistry::default();
         let tool: Arc<dyn Tool> = Arc::new(crate::tools::ReadTool);
 
         registry.register(tool);

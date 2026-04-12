@@ -66,7 +66,7 @@ fn registry_with_slow_tool(duration_ms: u64) -> ToolRegistry {
     // everything we need — this test only cares about cancellation
     // propagation, not about filesystem security or tool policy.
     let ctx = ExecutionContext::empty();
-    let registry = ToolRegistry::from_context(ctx);
+    let registry = ToolRegistry::builder().context(ctx).build();
     registry.register(Arc::new(SlowTool { duration_ms }));
     registry
 }

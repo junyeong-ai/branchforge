@@ -372,7 +372,7 @@ mod tests {
     #[test]
     fn static_context_is_wired_into_system_blocks() {
         let config = test_config();
-        let tools = Arc::new(ToolRegistry::new());
+        let tools = Arc::new(ToolRegistry::default());
         let static_context = StaticContext::new()
             .claude_md("# Project Memory")
             .skill_summary("# Available Skills\n- test")
@@ -456,7 +456,7 @@ mod tests {
     #[test]
     fn request_metadata_uses_session_identity() {
         let config = test_config();
-        let tools = Arc::new(ToolRegistry::new());
+        let tools = Arc::new(ToolRegistry::default());
         let metadata =
             RequestMetadata::from_identity(Some("tenant-a"), Some("user-1"), Some("session-1"));
 
@@ -480,7 +480,7 @@ mod tests {
     #[test]
     fn request_metadata_is_absent_without_principal() {
         let config = test_config();
-        let tools = Arc::new(ToolRegistry::new());
+        let tools = Arc::new(ToolRegistry::default());
         let builder = RequestBuilder::new(&config, tools, StaticContext::new()).metadata(
             RequestMetadata::from_identity(Some("tenant-a"), None, Some("session-1")),
         );

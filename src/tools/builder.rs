@@ -38,6 +38,7 @@ pub struct ToolRegistryBuilder {
     custom_tools: Vec<Arc<dyn Tool>>,
     overflow_store: Option<Arc<dyn super::OverflowStore>>,
     human_handler: Option<Arc<dyn crate::authorization::HumanInteractionHandler>>,
+    explicit_context: Option<ExecutionContext>,
 }
 
 impl ToolRegistryBuilder {
@@ -66,7 +67,16 @@ impl ToolRegistryBuilder {
             custom_tools: Vec::new(),
             overflow_store: None,
             human_handler: None,
+            explicit_context: None,
         }
+    }
+
+    /// Supply a pre-built [`ExecutionContext`] instead of letting the
+    /// builder construct one from working_dir / sandbox / security.
+    /// Useful in tests or when the caller owns the context lifecycle.
+    pub fn context(mut self, context: ExecutionContext) -> Self {
+        self.explicit_context = Some(context);
+        self
     }
 
     /// Phase D C-2: attach a unified
@@ -176,42 +186,44 @@ impl ToolRegistryBuilder {
     pub fn build(self) -> ToolRegistry {
         let access = &self.access;
         let tool_policy = self.effective_tool_policy();
+
         let wd = self
             .working_dir
             .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
 
-        // Layer 2a: when the `local-fs` feature is active we construct a
-        // `SecurityContext` rooted at `wd` and use it to seed the execution
-        // context. In pure Layer 1 builds no security context exists and we
-        // fall back to `ExecutionContext::empty()` — the built ToolRegistry
-        // then only carries Layer 1 tools (Plan/TodoWrite/GraphHistory/Skill),
-        // which is the intended behaviour.
-        #[cfg(feature = "local-fs")]
-        let mut context = {
-            let sandbox_config = self.sandbox_config.unwrap_or_else(|| {
-                crate::security::SandboxConfig::disabled().working_dir(wd.clone())
-            });
+        let mut context = if let Some(ctx) = self.explicit_context {
+            #[cfg(not(feature = "local-fs"))]
+            let _ = tool_policy;
+            ctx
+        } else {
 
-            let security = crate::security::SecurityContext::builder()
-                .root(&wd)
-                .sandbox(sandbox_config)
-                .build()
-                .map(|mut security| {
-                    security.policy = crate::security::SecurityPolicy::new(tool_policy.clone());
-                    security
-                })
-                .or_else(|_| crate::security::SecurityContext::try_permissive())
-                .expect("failed to create security context");
+            #[cfg(feature = "local-fs")]
+            let ctx = {
+                let sandbox_config = self.sandbox_config.unwrap_or_else(|| {
+                    crate::security::SandboxConfig::disabled().working_dir(wd.clone())
+                });
 
-            ExecutionContext::new(security)
+                let security = crate::security::SecurityContext::builder()
+                    .root(&wd)
+                    .sandbox(sandbox_config)
+                    .build()
+                    .map(|mut security| {
+                        security.policy =
+                            crate::security::SecurityPolicy::new(tool_policy.clone());
+                        security
+                    })
+                    .or_else(|_| crate::security::SecurityContext::try_permissive())
+                    .expect("failed to create security context");
+
+                ExecutionContext::new(security)
+            };
+            #[cfg(not(feature = "local-fs"))]
+            let ctx = {
+                let _ = tool_policy;
+                ExecutionContext::empty()
+            };
+            ctx
         };
-        #[cfg(not(feature = "local-fs"))]
-        let mut context = ExecutionContext::empty();
-        // `tool_policy` is consumed by the security context in local-fs builds;
-        // in pure Layer 1 we currently have nowhere to put it until the tool
-        // policy landing site becomes an extension too (Phase 2).
-        #[cfg(not(feature = "local-fs"))]
-        let _ = tool_policy;
 
         // Always attach the workspace as an extension regardless of feature —
         // Layer 1 tools that consult it (e.g. for generating hook cwd) work

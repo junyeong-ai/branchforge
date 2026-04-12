@@ -188,7 +188,7 @@ async fn live_runtime_tool_registration() {
     assert!(result.tool_calls > 0, "Model should have called Ping tool");
 
     // Verify runtime registration via DashMap (&self methods)
-    let registry = ToolRegistry::new();
+    let registry = ToolRegistry::default();
     let tool: Arc<dyn Tool> = Arc::new(PingTool);
 
     registry.register(tool.clone());
