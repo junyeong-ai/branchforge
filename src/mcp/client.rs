@@ -240,6 +240,7 @@ impl McpClient {
                 name: t.name.to_string(),
                 description: t.description.map(|d| d.to_string()).unwrap_or_default(),
                 input_schema: serde_json::Value::Object((*t.input_schema).clone()),
+                annotations: Default::default(),
             })
             .collect();
 
@@ -347,6 +348,7 @@ impl McpClient {
                 name: t.name.to_string(),
                 description: t.description.map(|d| d.to_string()).unwrap_or_default(),
                 input_schema: serde_json::Value::Object((*t.input_schema).clone()),
+                annotations: Default::default(),
             })
             .collect();
 

@@ -79,6 +79,22 @@ impl Tool for McpToolWrapper {
         )
     }
 
+    fn is_read_only(&self, _input: &Value) -> bool {
+        self.definition.annotations.read_only_hint.unwrap_or(false)
+    }
+
+    fn is_destructive(&self, _input: &Value) -> bool {
+        self.definition.annotations.destructive_hint.unwrap_or(false)
+    }
+
+    fn is_concurrency_safe(&self, _input: &Value) -> bool {
+        self.definition
+            .annotations
+            .read_only_hint
+            .or(self.definition.annotations.idempotent_hint)
+            .unwrap_or(false)
+    }
+
     async fn execute(&self, input: Value, _context: &ExecutionContext) -> ToolResult {
         match self.manager.call_tool(&self.qualified_name, input).await {
             Ok(result) => {

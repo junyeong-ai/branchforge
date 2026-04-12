@@ -170,6 +170,7 @@ mod tests {
                 name: name.to_string(),
                 description: desc.to_string(),
                 input_schema: serde_json::json!({"type": "object"}),
+                annotations: Default::default(),
             };
             index.add(super::super::index::ToolIndexEntry::from_mcp_tool(
                 server, &tool,

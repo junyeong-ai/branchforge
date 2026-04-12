@@ -477,6 +477,28 @@ pub struct McpToolDefinition {
     pub description: String,
     #[serde(default)]
     pub input_schema: serde_json::Value,
+    #[serde(default)]
+    pub annotations: McpToolAnnotations,
+}
+
+/// MCP `tools/list` annotations per the 2024-11 spec.
+///
+/// All fields default to `None`, meaning "unknown / no assertion by
+/// the server". When a field IS set, `McpToolWrapper` maps it into
+/// the corresponding `Tool` trait method so the scheduling and
+/// permission layers can make informed decisions instead of
+/// defaulting to the worst-case.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct McpToolAnnotations {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub read_only_hint: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub destructive_hint: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub idempotent_hint: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub open_world_hint: Option<bool>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

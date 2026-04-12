@@ -40,6 +40,14 @@ Findings already rejected with evidence or merged via PR. Design reviews must ch
   - Only real violation: `ProviderErrorKind` at `src/lib.rs:388` (1 item, fixed in Phase 0-2)
 - **Lesson**: Before proposing "missing attribute X on enum Y", grep the enum definition directly. Don't trust cross-session memory of enum attribute state.
 
+## F-rej-013 · "HookEvent manifest subscription + O(1) dispatch cache needed"
+- **Origin**: Round-3 analysis (task 4-5)
+- **Refutation**: `Hook::events(&self) -> &[HookEvent]` is the manifest. `HookRegistry::rebuild_cache()` at `src/hooks/manager.rs:40-52` builds a `HashMap<HookEvent, Vec<usize>>` dispatch cache on every register/unregister. `hooks_for_event(event)` at line 86 does O(1) lookup. `HookEvent` is `#[non_exhaustive]`.
+
+## F-rej-012 · "SubagentTemplate trait needed to make subagents pluggable"
+- **Origin**: Round-3 analysis (task 4-4)
+- **Refutation**: `SubagentIndex` is already the template — `::new(name, desc).source(prompt).tools([...]).model_type(...)` creates an arbitrary subagent definition. `AgentBuilder::subagent(index)` registers custom subagents. `builtin_subagents()` is just a convenience for the 4 built-in definitions. No enum dispatch, no sealed type. Users can define and register new subagent types today.
+
 ## F-rej-011 · "AgentBuilder needs ConfigFragment trait and 76→15 method reduction"
 - **Origin**: Round-3/Round-4 analysis (task 3-1..3-5)
 - **Refutation**: `AgentConfig` already HAS sub-config fluent setters (`.model()`, `.execution()`, `.security()`, `.budget()`, `.prompt()`, `.cache()`, `.identity()`, `.stream()`) at `src/agent/config.rs:563-599`. `AgentBuilder::agent_config(config: AgentConfig)` at `builder.rs:206` already accepts a full config. Individual builder setters (`.model()`, `.tools()`, `.working_dir()`, etc.) are OPTIONAL convenience wrappers that don't need to exist for the pattern to work — adding a new field to a sub-config struct does NOT require adding a builder method.

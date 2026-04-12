@@ -119,6 +119,7 @@ mod tests {
                     "arg1": { "type": "string", "description": "First argument" }
                 }
             }),
+            annotations: Default::default(),
         }
     }
 

@@ -927,6 +927,7 @@ mod tests {
                 name: "test_tool".to_string(),
                 description: "A test tool".to_string(),
                 input_schema: serde_json::json!({}),
+                annotations: Default::default(),
             }],
             cached_at: Instant::now(),
             ttl: Duration::from_secs(300),
