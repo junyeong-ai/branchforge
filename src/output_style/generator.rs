@@ -16,33 +16,31 @@ use crate::prompts::environment::is_git_repository;
 use crate::prompts::{
     base::{BASE_SYSTEM_PROMPT, TOOL_USAGE_POLICY},
     environment::{current_platform, environment_block, os_version},
-    identity::CLI_IDENTITY,
 };
 
 /// System prompt generator with output style support.
 ///
+/// Assembles the **base system prompt body** from content components.
+/// Auth-layer concerns (e.g. `CLI_IDENTITY` for OAuth) are handled by
+/// `RequestBuilder` via `auth_preamble` — this generator is purely
+/// about content generation.
+///
 /// # System Prompt Structure
 ///
-/// The generated system prompt follows this structure:
-///
-/// 1. **CLI Identity** (required for CLI OAuth authentication)
-///    - "You are Claude Code, Anthropic's official CLI for Claude."
-///    - This MUST be included when using CLI OAuth and cannot be replaced
-///
-/// 2. **Base System Prompt** (always included after identity)
+/// 1. **Base System Prompt** (always included)
 ///    - Tone and style, professional objectivity, task management
 ///
-/// 3. **Tool Usage Policy** (always included)
+/// 2. **Tool Usage Policy** (always included)
 ///    - Tool-specific guidelines
 ///
-/// 4. **Domain Instructions** (if `domain_instructions` is set)
+/// 3. **Domain Instructions** (if `domain_instructions` is set)
 ///    - Software engineering instructions
 ///    - Git commit/PR protocols
 ///
-/// 5. **Custom Prompt** (if output style has custom content)
+/// 4. **Custom Prompt** (if output style has custom content)
 ///    - Style-specific instructions
 ///
-/// 6. **Environment Block** (always included)
+/// 5. **Environment Block** (always included)
 ///    - Working directory, platform, model info
 #[derive(Debug, Clone)]
 pub struct SystemPromptGenerator {
@@ -50,7 +48,6 @@ pub struct SystemPromptGenerator {
     working_dir: Option<PathBuf>,
     model_name: String,
     model_id: String,
-    require_cli_identity: bool,
 }
 
 impl Default for SystemPromptGenerator {
@@ -61,34 +58,13 @@ impl Default for SystemPromptGenerator {
 
 impl SystemPromptGenerator {
     /// Create a new generator with default style.
-    /// CLI identity is NOT required by default.
     pub fn new() -> Self {
         Self {
             style: default_style(),
             working_dir: None,
             model_name: "Claude".to_string(),
             model_id: DEFAULT_MODEL.to_string(),
-            require_cli_identity: false,
         }
-    }
-
-    /// Create a generator that requires CLI identity.
-    /// Use this when using Claude CLI OAuth authentication.
-    pub fn cli_identity() -> Self {
-        Self {
-            style: default_style(),
-            working_dir: None,
-            model_name: "Claude".to_string(),
-            model_id: DEFAULT_MODEL.to_string(),
-            require_cli_identity: true,
-        }
-    }
-
-    /// Set whether CLI identity is required.
-    /// CLI identity MUST be included when using Claude CLI OAuth.
-    pub fn require_cli_identity(mut self, required: bool) -> Self {
-        self.require_cli_identity = required;
-        self
     }
 
     /// Set the output style directly.
@@ -175,41 +151,38 @@ impl SystemPromptGenerator {
         }
     }
 
-    /// Generate the system prompt.
+    /// Generate the system prompt body.
     ///
     /// # Prompt Assembly Logic
     ///
-    /// - **CLI Identity**: Only if `require_cli_identity: true` (CLI OAuth)
     /// - **Base System Prompt**: Always included
     /// - **Tool Usage Policy**: Always included
     /// - **Domain Instructions**: Only if `domain_instructions` is set
     /// - **Custom Prompt**: Only if style has non-empty prompt
     /// - **Environment Block**: Always included
+    ///
+    /// Auth-layer preambles (e.g. `CLI_IDENTITY` for OAuth) are not handled
+    /// here — see `RequestBuilder::composed_system_prompt()`.
     pub fn generate(&self) -> String {
         let mut parts = Vec::new();
 
-        // 1. CLI Identity (required for CLI OAuth, cannot be replaced)
-        if self.require_cli_identity {
-            parts.push(CLI_IDENTITY.to_string());
-        }
-
-        // 2. Base System Prompt (always)
+        // 1. Base System Prompt (always)
         parts.push(BASE_SYSTEM_PROMPT.to_string());
 
-        // 3. Tool Usage Policy (always)
+        // 2. Tool Usage Policy (always)
         parts.push(TOOL_USAGE_POLICY.to_string());
 
-        // 4. Domain Instructions (conditional — injected by application)
+        // 3. Domain Instructions (conditional — injected by application)
         if let Some(ref instructions) = self.style.domain_instructions {
             parts.push(instructions.clone());
         }
 
-        // 5. Custom Prompt (if present)
+        // 4. Custom Prompt (if present)
         if !self.style.prompt.is_empty() {
             parts.push(self.style.prompt.clone());
         }
 
-        // 6. Environment Block (always)
+        // 5. Environment Block (always)
         //
         // Git repository detection is a Layer 2b concern — only surfaced
         // when the `coding-tools` feature is active. Layer 1 / `local-fs`
@@ -275,27 +248,20 @@ mod tests {
     use crate::output_style::SourceType;
 
     #[test]
-    fn test_generator_default_no_cli_identity() {
+    fn test_generator_default_starts_with_base_prompt() {
         let prompt = SystemPromptGenerator::new().generate();
 
-        // CLI Identity should NOT be included by default
-        assert!(!prompt.starts_with(CLI_IDENTITY));
-        // Coding instructions are only injected under `coding-tools`.
-        #[cfg(feature = "coding-tools")]
-        assert!(prompt.contains("Doing tasks"));
+        assert!(prompt.starts_with(BASE_SYSTEM_PROMPT));
+        assert!(prompt.contains(TOOL_USAGE_POLICY));
         assert!(prompt.contains("<env>")); // environment block
     }
 
     #[test]
-    fn test_generator_cli_identity() {
-        let prompt = SystemPromptGenerator::cli_identity().generate();
-
-        // CLI Identity MUST be the first line
-        assert!(prompt.starts_with(CLI_IDENTITY));
-        // Coding instructions are only injected under `coding-tools`.
-        #[cfg(feature = "coding-tools")]
-        assert!(prompt.contains("Doing tasks"));
-        assert!(prompt.contains("<env>")); // environment block
+    fn test_generator_does_not_include_cli_identity() {
+        // CLI_IDENTITY is an auth-layer concern handled by RequestBuilder,
+        // not by the generator.
+        let prompt = SystemPromptGenerator::new().generate();
+        assert!(!prompt.contains("Claude Code"));
     }
 
     #[test]
@@ -304,29 +270,25 @@ mod tests {
             .source_type(SourceType::User)
             .domain_instructions("Domain-specific guidelines");
 
-        let prompt = SystemPromptGenerator::cli_identity()
-            .output_style(style)
-            .generate();
+        let prompt = SystemPromptGenerator::new().output_style(style).generate();
 
-        assert!(prompt.starts_with(CLI_IDENTITY));
-        assert!(prompt.contains("Domain-specific guidelines")); // domain instructions
-        assert!(prompt.contains("Custom instructions here")); // custom prompt
-        assert!(prompt.contains("<env>")); // environment block
+        assert!(prompt.starts_with(BASE_SYSTEM_PROMPT));
+        assert!(prompt.contains("Domain-specific guidelines"));
+        assert!(prompt.contains("Custom instructions here"));
+        assert!(prompt.contains("<env>"));
     }
 
     #[test]
-    fn test_generator_with_custom_style_no_coding() {
+    fn test_generator_with_custom_style_no_domain() {
         let style = OutputStyle::new("concise", "Be concise", "Keep responses short.")
             .source_type(SourceType::User);
 
-        let prompt = SystemPromptGenerator::cli_identity()
-            .output_style(style)
-            .generate();
+        let prompt = SystemPromptGenerator::new().output_style(style).generate();
 
-        assert!(prompt.starts_with(CLI_IDENTITY)); // CLI Identity preserved
-        assert!(!prompt.contains("Domain-specific")); // no domain instructions
-        assert!(prompt.contains("Keep responses short.")); // custom prompt
-        assert!(prompt.contains("<env>")); // environment block
+        assert!(prompt.starts_with(BASE_SYSTEM_PROMPT));
+        assert!(!prompt.contains("Domain-specific"));
+        assert!(prompt.contains("Keep responses short."));
+        assert!(prompt.contains("<env>"));
     }
 
     #[test]
@@ -380,25 +342,5 @@ mod tests {
         let style_without = OutputStyle::new("without", "", "");
         let gen_without = SystemPromptGenerator::new().output_style(style_without);
         assert!(!gen_without.has_domain_instructions());
-    }
-
-    #[test]
-    fn test_cli_identity_cannot_be_replaced_by_custom_prompt() {
-        // Even with a custom prompt that tries to replace identity,
-        // CLI Identity should still be first when required
-        let style = OutputStyle::new(
-            "custom",
-            "Custom identity",
-            "I am a different assistant.", // Trying to replace identity
-        );
-        // No domain_instructions set — only base prompt + custom prompt
-
-        let prompt = SystemPromptGenerator::cli_identity()
-            .output_style(style)
-            .generate();
-
-        // CLI Identity MUST be first, custom prompt comes after
-        assert!(prompt.starts_with(CLI_IDENTITY));
-        assert!(prompt.contains("I am a different assistant."));
     }
 }
