@@ -9,8 +9,8 @@
 #![cfg(feature = "cli-auth")]
 
 use std::any::Any;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use branchforge::agent::policy::{GateDecision, IterationContext, IterationGate};

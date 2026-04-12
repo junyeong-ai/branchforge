@@ -17,15 +17,17 @@ Every change must satisfy ALL of the following. These are non-negotiable.
 ## Commands
 
 ```bash
-cargo build --release
+cargo build --all-features
 cargo test --all-features
-cargo nextest run --all-features                # CI only
 cargo clippy --all-features -- -D warnings
 cargo fmt --all -- --check
 RUSTDOCFLAGS="-D warnings" cargo doc --all-features --no-deps
+cargo build --lib --no-default-features          # pure-core gate
+python3 scripts/audit_fsm_bypass.py              # FSM transition audit
+python3 scripts/audit_non_exhaustive.py          # enum evolution audit
 ```
 
-All six gates must be green before shipping.
+All eight gates must be green before shipping.
 
 ## Feature Flags
 

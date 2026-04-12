@@ -217,10 +217,13 @@ See [Tools](docs/tools.md) for details.
 
 ## Quality Gates
 
-This repository is maintained against the following quality gates.
-
 ```bash
-cargo nextest run --all-features
-cargo clippy --all-features -- -D warnings
-cargo fmt --all -- --check
+cargo build --all-features                       # compilation
+cargo test --all-features                        # 1967+ tests
+cargo clippy --all-features -- -D warnings       # lint
+cargo fmt --all -- --check                       # format
+RUSTDOCFLAGS="-D warnings" cargo doc --all-features --no-deps  # docs
+cargo build --lib --no-default-features          # pure-core gate
+python3 scripts/audit_fsm_bypass.py              # FSM transition audit
+python3 scripts/audit_non_exhaustive.py          # enum evolution audit
 ```
