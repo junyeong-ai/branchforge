@@ -9,7 +9,6 @@
 //! Feature-gated behind `azure` because of `azure_identity`.
 
 #![allow(missing_docs)]
-
 #![cfg(feature = "azure")]
 
 use std::sync::Arc;

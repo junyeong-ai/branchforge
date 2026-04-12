@@ -364,11 +364,7 @@ mod classification_matrix {
         },
     ];
 
-    fn assert_cell(
-        transport_name: &str,
-        transport: &dyn ModelTransport,
-        cell: &Cell,
-    ) {
+    fn assert_cell(transport_name: &str, transport: &dyn ModelTransport, cell: &Cell) {
         let (kind, hint) = transport.classify_error(cell.status, cell.body);
         assert_eq!(
             std::mem::discriminant(&kind),

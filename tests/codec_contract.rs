@@ -2029,10 +2029,10 @@ mod composition_matrix {
     use super::*;
     use async_trait::async_trait;
     use branchforge::Result as BfResult;
+    use branchforge::client::codec::InvocationMode as IrInvocationMode;
     use branchforge::client::transport::{Endpoint, ModelTransport};
     use branchforge::client::validate_composition;
     use branchforge::error::ProviderErrorKind;
-    use branchforge::client::codec::InvocationMode as IrInvocationMode;
 
     /// Stub transport used only for the composition matrix. `resolve_endpoint`
     /// and `authorize` are unreachable — the matrix only exercises `id()`,
@@ -2248,7 +2248,8 @@ mod composition_matrix {
             let result = validate_composition(&*codec, &transport);
             let actually_legal = result.is_ok();
             assert_eq!(
-                actually_legal, *expected_legal,
+                actually_legal,
+                *expected_legal,
                 "composition ({codec_id} × {transport_id}) drifted: expected legal={expected_legal}, got legal={actually_legal}; err={:?}",
                 result.err()
             );
@@ -2282,7 +2283,9 @@ mod composition_matrix {
         let transport_ids: std::collections::BTreeSet<&str> =
             EXPECTED_MATRIX.iter().map(|(_, t, _)| *t).collect();
         let expected_transports: std::collections::BTreeSet<&str> =
-            ["direct", "vertex", "bedrock", "foundry"].into_iter().collect();
+            ["direct", "vertex", "bedrock", "foundry"]
+                .into_iter()
+                .collect();
         assert_eq!(
             transport_ids, expected_transports,
             "EXPECTED_MATRIX transport set drifted from the 4 real transports"
