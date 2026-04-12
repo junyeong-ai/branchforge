@@ -10,7 +10,7 @@ mod typed;
 pub use bus::{Event, EventBus, EventKind, SubscriberFn, SubscriptionHandle, SubscriptionId};
 pub use typed::{
     BranchForkedPayload, BudgetAlertPayload, CacheBreakObservedPayload, CheckpointCreatedPayload,
-    EventPayload, RateLimitApproachingPayload, RateLimitObservedPayload, SessionCompactedPayload,
-    StreamChunkKind, StreamChunkPayload, TokensConsumedPayload, ToolExecutedPayload,
-    ToolProgressPayload,
+    EventPayload, RateLimitApproachingPayload, RateLimitObservedPayload, SessionChangedPayload,
+    SessionCompactedPayload, StreamChunkKind, StreamChunkPayload, TokensConsumedPayload,
+    ToolExecutedPayload, ToolProgressPayload,
 };

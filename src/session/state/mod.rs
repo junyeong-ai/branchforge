@@ -261,13 +261,10 @@ impl Session {
         self.updated_at = Utc::now();
 
         if let Some(ref bus) = self.event_bus {
-            bus.emit_simple(
-                crate::events::EventKind::SessionChanged,
-                serde_json::json!({
-                    "session_id": self.id.to_string(),
-                    "message_count": self.current_branch_messages().len(),
-                }),
-            );
+            bus.emit_typed(crate::events::SessionChangedPayload {
+                session_id: self.id.to_string(),
+                message_count: self.current_branch_messages().len(),
+            });
         }
 
         Ok(())

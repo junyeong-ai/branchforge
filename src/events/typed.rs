@@ -251,6 +251,20 @@ impl EventPayload for CacheBreakObservedPayload {
     const KIND: EventKind = EventKind::CacheBreakObserved;
 }
 
+/// `EventKind::SessionChanged` payload: a session's message list changed.
+///
+/// Emitted after every `add_message` / `add_assistant_message_with_metadata`
+/// mutation on a session.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct SessionChangedPayload {
+    pub session_id: String,
+    pub message_count: usize,
+}
+
+impl EventPayload for SessionChangedPayload {
+    const KIND: EventKind = EventKind::SessionChanged;
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -325,6 +339,19 @@ mod tests {
         assert_eq!(CheckpointCreatedPayload::KIND, EventKind::CheckpointCreated);
         assert_eq!(StreamChunkPayload::KIND, EventKind::StreamChunk);
         assert_eq!(SessionCompactedPayload::KIND, EventKind::SessionCompacted);
+        assert_eq!(SessionChangedPayload::KIND, EventKind::SessionChanged);
+    }
+
+    #[test]
+    fn session_changed_serde_round_trip() {
+        let original = SessionChangedPayload {
+            session_id: "sess-123".into(),
+            message_count: 42,
+        };
+        let json = serde_json::to_value(&original).unwrap();
+        let back: SessionChangedPayload = serde_json::from_value(json).unwrap();
+        assert_eq!(back.session_id, "sess-123");
+        assert_eq!(back.message_count, 42);
     }
 
     #[test]
