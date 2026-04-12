@@ -48,8 +48,7 @@ FSM state types use the `State` suffix, not `Phase`, `Status`, or
 `Kind`:
 
 - `SessionState` — canonical session lifecycle FSM.
-- `McpClientState` — MCP client handshake FSM (renamed from
-  `LifecyclePhase` in W-17).
+- `McpClientState` — MCP client handshake FSM.
 - `ExecutionState`, `AgentState` — execution-loop state types.
 - `PlanState` — 6-variant plan FSM with `transition_to`
   validation (Draft → Approved → Executing → terminal).

@@ -48,8 +48,7 @@ instead of re-implementing tool-call state tracking.
 
 - `tool_order` uses an `ensure_tool(id, name)` helper that probes
   the `tool_map` before insertion. O(1) per event. **Never use
-  `Vec::contains` inside `apply`** — it was O(n²) in the first
-  cut and was caught in the Phase B audit.
+  `Vec::contains` inside `apply`** — it creates O(n²) per-event cost.
 - `drain(stream)` returns `(Self, Option<Error>)` — partial state
   is preserved when the stream errors mid-flight. Do not change
   this signature to throw away the aggregator on error.
@@ -64,5 +63,4 @@ instead of re-implementing tool-call state tracking.
 - `utilization: f64` is a `[0.0, 1.0]` ratio, not a percentage
   string. Clients that want `"75%"` format on the string side.
 
-This replaced an earlier all-string payload with a `percentage`
-display field. ADR-008 covers the rationale.
+Decimal fields are string-serialized for precision; `utilization` is a ratio, not a percentage.
