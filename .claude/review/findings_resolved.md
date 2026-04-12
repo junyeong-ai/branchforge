@@ -23,9 +23,9 @@ Findings already rejected with evidence or merged via PR. Design reviews must ch
 - **Correct fix**: reduce `persist_session_state` call frequency (P6-1), not cache.
 - **Lesson**: `graph-session.md` is mandatory reading for any Session performance proposal.
 
-## F-rej-005 · "Rename SessionHandle → SessionHandleTracker"
-- **Refutation**: `.claude/rules/naming.md` — *"Tracker = runtime state **map** keyed by dynamic ids."* `SessionHandle` is a single-session concurrent handle (`Arc<SessionHandleInner>` wrapping `{session, executions, input_queue, execution_lock, executing, queue_notify}`), not a map.
-- **Correct rename**: `SessionHandle`. See P2-1.
+## F-rej-005 · "Rename ToolState → ToolStateTracker"
+- **Refutation**: `.claude/rules/naming.md` — *"Tracker = runtime state **map** keyed by dynamic ids."* ToolState (now `SessionHandle`) is a single-session concurrent handle, not a map.
+- **Correct rename**: `SessionHandle` (done in Phase 2-1).
 
 ## F-rej-006 · "Introduce ConfigFragment trait to decompose AgentConfig"
 - **Refutation**: `src/agent/config.rs:17-80+` shows sub-configs (`AgentModelConfig`, `ExecutionConfig`, `SecurityConfig`, ...) are already decomposed. The defect is the builder's 76-method surface, not config structure.

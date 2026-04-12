@@ -2,17 +2,17 @@
 
 Rust-native agent runtime. Graph-first sessions, provider-neutral IR, native structured outputs across all codecs.
 
-## Review Convergence Protocol
+## Development Principles
 
-Design reviews run via the `/design-review <axis>` skill (`.claude/skills/design-review/`). All review ground truth is git-committed under `.claude/` so collaborators share the same state — per-user auto-memory is deliberately not used.
+Every change must satisfy ALL of the following. These are non-negotiable.
 
-Before proposing any finding:
-
-1. Check `.claude/review/findings_resolved.md` — if the same finding was already rejected with evidence, do not re-propose.
-2. Check `.claude/rules/architecture.md` — 10 invariants, auto-loaded on `src/**` edits. A proposal contradicting an invariant is invalid by construction.
-3. Check `.claude/review/verified_structure.md` — empirical file:line facts override intuition about "X doesn't exist".
-
-Axes are frozen: `architecture` · `provider-graph` · `tools-naming` · `agent-loop` · `info-hygiene-heuristics`. New axis = skill PR, not silent expansion. Lifecycle: `open → {resolved, rejected, invariant-added}` only.
+1. **Evidence-based decisions only** — Every finding, proposal, or rename must cite `file:line` with byte-exact code. "Feels wrong" is not evidence. `Read` the file before claiming anything about it.
+2. **Long-term, not patchwork** — Analyze root causes. Never apply a band-aid that defers the real fix. If a pattern is broken, fix the pattern — not the symptom.
+3. **No backwards compatibility** — Design as if the codebase was always this way. Delete legacy immediately in the same PR. No `// deprecated`, no shims, no re-exports of removed items.
+4. **Flexible, extensible, maintainable** — Prefer trait objects over enum dispatch for extension points. Prefer `*Config` structs over magic constants. Prefer `Default + builder()` over multiple constructors.
+5. **Naming consistency** — Follow `.claude/rules/naming.md` taxonomy (Manager/Registry/Tracker/Catalog/Store/Set/Engine/Aggregator/Snapshot/Payload). Check the open/closed enum list before proposing any rename.
+6. **Minimize AI context waste** — Do not send the model information it already knows (Rust syntax, what SSoT means). Do not duplicate data across files. Every token in a system prompt or tool description must earn its place.
+7. **Architecture invariants are law** — The 10 invariants in `.claude/rules/architecture.md` auto-load on `src/**` edits. A proposal contradicting any invariant is invalid by construction.
 
 ## Commands
 
@@ -25,7 +25,7 @@ cargo fmt --all -- --check
 RUSTDOCFLAGS="-D warnings" cargo doc --all-features --no-deps
 ```
 
-All six gates must be green before shipping. `cargo test` covers doctests and the example in `examples/structured_output.rs`.
+All six gates must be green before shipping.
 
 ## Feature Flags
 
@@ -38,48 +38,36 @@ cargo build --all-features                      # full + multimedia
 
 Groups: `coding-tools`, `cli-auth`, `mcp`, `scheduling`, `multimedia`, `cloud-all` (aws/gcp/azure/openai/gemini), `persistence-all` (jsonl/postgres/redis), `plugins`, `otel`.
 
-## Design Invariants
-
-Compiler-enforced. Violating them breaks the build.
-
-- **SSoT**: `SessionGraph` is the single source of truth. `Session::current_branch_messages()` rebuilds from the graph on every call; there is no cached `messages` field. `Session.graph` is `pub(crate)` so external mutation is impossible.
-- **Type safety**: Consumed token counts use the `TokenCount(u64)` newtype. IDs use the `uuid_id!`/`string_id!` macros — `NodeId` and `BranchId` cannot be mixed at compile time.
-- **Provider 3-axis**: `ModelCodec` × `ModelTransport` × `EndpointShape`. Never collapse the axes — orthogonality is what lets Vertex-Gemini, Vertex-Anthropic, Bedrock-Anthropic, and Foundry-Anthropic fall out for free. Rules in `.claude/rules/client.md`.
-- **Capability honesty**: Each codec returns `&'static ProviderCapabilities` with `Unsupported` defaults. If a codec advertises `json_schema: Native` it must emit a wire-level schema; the `capability_honesty_response_format` matrix in `tests/codec_contract.rs` enforces this.
-- **OCP on errors**: `ModelTransport::classify_error()` is the single extension point for vendor-specific HTTP error patterns. Adding a new transport never requires editing `provider_client::classify_response_error`.
-- **IR is provider-neutral**: `src/ir/` types are the canonical representation. Codecs translate between IR and wire format, emitting `ModelWarning::LossyEncode` for anything dropped. Rules in `.claude/rules/ir.md`.
-- **Structured outputs are native on every codec**: All five codecs use the shared `SchemaPolicy` / `prepare_schema` pipeline in `src/client/schema/`. Each codec holds a `const SCHEMA_POLICY: SchemaPolicy = SchemaPolicy::X()` next to its other constants. Rules in `.claude/rules/schema.md`.
-- **RAII shutdown**: `AgentRuntime._shutdown_guard: DropGuard` auto-cancels on last `Arc` drop.
-
 ## Error Conventions
 
-- Use typed enums (`SessionError`, `McpError`, `GraphError`) for module-internal errors.
+- Typed enums (`SessionError`, `McpError`, `GraphError`) for module-internal errors.
 - `Error::Provider { kind, hint }` carries an actionable hint for well-known vendor failures.
-- `Error::InvalidRequest(String)` is the right variant for encode-time preflight rejections (e.g. Anthropic prefilling + structured outputs).
-- `Error::Config(String)` is intentional for developer-facing configuration mistakes.
+- `Error::InvalidRequest(String)` for encode-time preflight rejections.
+- `Error::Config(String)` for developer-facing configuration mistakes.
 
 ## Lock Ordering
 
-- Never hold a registry/engine lock across `.await` on a user-supplied future.
+- Never hold a lock across `.await` on a user-supplied future.
 - Multi-lock order: `session` > `task_registry` > `orchestrator`.
-- Release data locks before `.await` on removed items (MCP pattern).
-- **`McpManager`**: `servers` > `tool_cache` > `degraded`. See the
-  module-level doc comment in `src/mcp/manager.rs` for the audited
-  acquisition order and rationale.
+- `McpManager`: `servers` > `tool_cache` > `degraded`.
 
 ## Progressive Disclosure
 
-Module-specific rules live in `.claude/rules/` and auto-load when Claude reads files matching their `paths` frontmatter:
+Module-specific rules in `.claude/rules/` auto-load when editing files matching their `paths` frontmatter:
 
-| File | Scope | Load when editing |
-| :--- | :--- | :--- |
-| `client.md` | Provider stack, codecs, transports, presets | `src/client/**` |
-| `schema.md` | `SchemaPolicy` pipeline, walker, cycle detection | `src/client/schema/**` |
-| `ir.md` | Provider-neutral IR types, `JsonSchemaSpec`, warnings | `src/ir/**` |
-| `graph-session.md` | `SessionGraph` SSoT, event replay, fork semantics | `src/graph/**`, `src/session/**` |
-| `tools.md` | `Tool` trait, `ExecutionContext`, naming, cancellation | `src/tools/**` |
-| `auth.md` | `CredentialProvider`, OAuth refresh, token storage | `src/auth/**` |
-| `security.md` | `SecureFs`, `BashAnalyzer`, sandbox, resource limits | `src/security/**` |
-| `naming.md` | Type-suffix taxonomy, FSM terminology, "no dual systems" | `src/**` |
+| File | Scope |
+| :--- | :--- |
+| `architecture.md` | 10 invariants — loads on all `src/**` edits |
+| `client.md` | Provider stack, codecs, transports, presets |
+| `schema.md` | `SchemaPolicy` pipeline, walker, cycle detection |
+| `ir.md` | Provider-neutral IR types, `JsonSchemaSpec`, warnings |
+| `graph-session.md` | `SessionGraph` SSoT, event replay, fork semantics |
+| `tools.md` | `Tool` trait, `ExecutionContext`, naming, cancellation |
+| `auth.md` | `CredentialProvider`, OAuth refresh, token storage |
+| `security.md` | `SecureFs`, `BashAnalyzer`, sandbox, resource limits |
+| `naming.md` | Type-suffix taxonomy, FSM terminology, "no dual systems" |
+| `events.md` | EventBus fire-and-forget contract, StreamAggregator |
 
-When editing across module boundaries, multiple rule files load automatically.
+## Review Protocol
+
+Design reviews use `/design-review <axis>`. Ground truth lives in `.claude/review/` (git-committed, not per-user memory). See `.claude/skills/design-review/SKILL.md` for the full procedure.
