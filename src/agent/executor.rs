@@ -80,10 +80,12 @@ impl Agent {
             None => BudgetTracker::unlimited(),
         };
 
-        let state = tools
-            .session_handle()
-            .cloned()
-            .unwrap_or_else(|| SessionHandle::new(crate::session::SessionId::new()));
+        let state = tools.session_handle().cloned().unwrap_or_else(|| {
+            SessionHandle::with_execution_log_size(
+                crate::session::SessionId::new(),
+                config.execution.max_execution_log_size,
+            )
+        });
         let session_id: Arc<str> = state.session_id().to_string().into();
 
         let shutdown = CancellationToken::new();

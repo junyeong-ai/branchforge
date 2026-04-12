@@ -473,7 +473,11 @@ impl AgentBuilder {
         let (session_handle, session_id) = match self.resumed_session.take() {
             Some(session) => {
                 let id = session.id;
-                (crate::session::SessionHandle::from_session(session), id)
+                let log_size = self.config.execution.max_execution_log_size;
+                (
+                    crate::session::SessionHandle::from_session_with_log_size(session, log_size),
+                    id,
+                )
             }
             None => {
                 let id = self
@@ -481,7 +485,11 @@ impl AgentBuilder {
                     .as_deref()
                     .and_then(crate::session::SessionId::parse)
                     .unwrap_or_default();
-                (crate::session::SessionHandle::new(id), id)
+                let log_size = self.config.execution.max_execution_log_size;
+                (
+                    crate::session::SessionHandle::with_execution_log_size(id, log_size),
+                    id,
+                )
             }
         };
 

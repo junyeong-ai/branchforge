@@ -14,29 +14,29 @@ use super::state::{Session, SessionConfig, SessionId};
 use super::types::{CompactRecord, Plan, PlanState, TodoItem, ToolExecution};
 use crate::graph::{NodeId, NodeKind};
 
-const MAX_EXECUTION_LOG_SIZE: usize = 1000;
-
 #[derive(Debug)]
 struct ToolExecutionLog {
+    max_size: usize,
     entries: RwLock<VecDeque<ToolExecution>>,
 }
 
 impl Default for ToolExecutionLog {
     fn default() -> Self {
-        Self::new()
+        Self::new(1000)
     }
 }
 
 impl ToolExecutionLog {
-    fn new() -> Self {
+    fn new(max_size: usize) -> Self {
         Self {
+            max_size,
             entries: RwLock::new(VecDeque::with_capacity(64)),
         }
     }
 
     async fn append(&self, exec: ToolExecution) {
         let mut entries = self.entries.write().await;
-        if entries.len() >= MAX_EXECUTION_LOG_SIZE {
+        if entries.len() >= self.max_size {
             entries.pop_front();
         }
         entries.push_back(exec);
@@ -81,10 +81,18 @@ impl std::fmt::Debug for SessionHandleInner {
 
 impl SessionHandleInner {
     fn new(session_id: SessionId) -> Self {
+        Self::with_log_size(session_id, 1000)
+    }
+
+    fn from_session(session: Session) -> Self {
+        Self::from_session_with_log_size(session, 1000)
+    }
+
+    fn with_log_size(session_id: SessionId, max_log_size: usize) -> Self {
         Self {
             id: session_id,
             session: RwLock::new(Session::from_id(session_id, SessionConfig::default())),
-            executions: ToolExecutionLog::new(),
+            executions: ToolExecutionLog::new(max_log_size),
             input_queue: SharedInputQueue::new(),
             execution_lock: Semaphore::new(1),
             executing: AtomicBool::new(false),
@@ -92,12 +100,12 @@ impl SessionHandleInner {
         }
     }
 
-    fn from_session(session: Session) -> Self {
+    fn from_session_with_log_size(session: Session, max_log_size: usize) -> Self {
         let id = session.id;
         Self {
             id,
             session: RwLock::new(session),
-            executions: ToolExecutionLog::new(),
+            executions: ToolExecutionLog::new(max_log_size),
             input_queue: SharedInputQueue::new(),
             execution_lock: Semaphore::new(1),
             executing: AtomicBool::new(false),
@@ -133,6 +141,20 @@ impl SessionHandle {
 
     pub fn from_session(session: Session) -> Self {
         Self(Arc::new(SessionHandleInner::from_session(session)))
+    }
+
+    /// Create a handle with a custom tool execution log size.
+    pub fn with_execution_log_size(session_id: SessionId, max_size: usize) -> Self {
+        Self(Arc::new(SessionHandleInner::with_log_size(
+            session_id, max_size,
+        )))
+    }
+
+    /// Create a handle from an existing session with a custom log size.
+    pub fn from_session_with_log_size(session: Session, max_size: usize) -> Self {
+        Self(Arc::new(SessionHandleInner::from_session_with_log_size(
+            session, max_size,
+        )))
     }
 
     #[inline]
@@ -522,15 +544,16 @@ mod tests {
     #[tokio::test]
     async fn test_execution_log_limit() {
         let session_id = SessionId::new();
-        let state = SessionHandle::new(session_id);
+        let max_log = 1000;
+        let state = SessionHandle::with_execution_log_size(session_id, max_log);
 
-        for i in 0..MAX_EXECUTION_LOG_SIZE + 100 {
+        for i in 0..max_log + 100 {
             let exec = ToolExecution::new(session_id, format!("Tool{}", i), serde_json::json!({}));
             state.record_tool_execution(exec).await.unwrap();
         }
 
         let count = state.with_tool_executions(|e| e.len()).await;
-        assert_eq!(count, MAX_EXECUTION_LOG_SIZE);
+        assert_eq!(count, max_log);
 
         let first_name = state
             .with_tool_executions(|e| e.front().map(|x| x.tool_name.clone()))

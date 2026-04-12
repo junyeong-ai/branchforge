@@ -71,23 +71,32 @@ pub struct ExecutionConfig {
     /// Maximum agentic loop iterations
     pub max_iterations: usize,
     /// Overall execution timeout
-    pub timeout: Option<Duration>,
+    pub timeout: Duration,
     /// Timeout between streaming chunks (detects stalled connections)
     pub chunk_timeout: Duration,
     /// Enable automatic context compaction
     pub auto_compact: bool,
     /// Context usage threshold for compaction (0.0-1.0)
     pub compact_threshold: f32,
+    /// Maximum entries in the per-session tool execution log ring buffer.
+    pub max_execution_log_size: usize,
+    /// Maximum retries for structured output validation failures per turn.
+    /// 3 is deliberate: one baseline + two retries covers stream-truncation /
+    /// unlucky decoding; a fourth attempt would not be meaningfully more
+    /// likely to succeed.
+    pub max_structured_output_retries: u32,
 }
 
 impl Default for ExecutionConfig {
     fn default() -> Self {
         Self {
             max_iterations: 100,
-            timeout: Some(Duration::from_secs(300)),
+            timeout: Duration::from_secs(300),
             chunk_timeout: Duration::from_secs(60),
             auto_compact: true,
             compact_threshold: crate::session::compact::DEFAULT_COMPACT_THRESHOLD,
+            max_execution_log_size: 1000,
+            max_structured_output_retries: 3,
         }
     }
 }
@@ -99,12 +108,7 @@ impl ExecutionConfig {
     }
 
     pub fn timeout(mut self, timeout: Duration) -> Self {
-        self.timeout = Some(timeout);
-        self
-    }
-
-    pub fn without_timeout(mut self) -> Self {
-        self.timeout = None;
+        self.timeout = timeout;
         self
     }
 
@@ -115,6 +119,16 @@ impl ExecutionConfig {
 
     pub fn auto_compact(mut self, enabled: bool) -> Self {
         self.auto_compact = enabled;
+        self
+    }
+
+    pub fn max_execution_log_size(mut self, n: usize) -> Self {
+        self.max_execution_log_size = n;
+        self
+    }
+
+    pub fn max_structured_output_retries(mut self, n: u32) -> Self {
+        self.max_structured_output_retries = n;
         self
     }
 
@@ -674,7 +688,7 @@ mod tests {
             .auto_compact(false);
 
         assert_eq!(config.max_iterations, 50);
-        assert_eq!(config.timeout, Some(Duration::from_secs(600)));
+        assert_eq!(config.timeout, Duration::from_secs(600));
         assert!(!config.auto_compact);
     }
 

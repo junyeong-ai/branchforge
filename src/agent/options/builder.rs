@@ -553,7 +553,7 @@ impl AgentBuilder {
     ///
     /// Default: `300 seconds`
     pub fn timeout(mut self, timeout: Duration) -> Self {
-        self.config.execution.timeout = Some(timeout);
+        self.config.execution.timeout = timeout;
         self
     }
 
@@ -901,26 +901,33 @@ impl AgentBuilder {
 
     /// Resume from a previously captured [`crate::AgentCheckpoint`].
     ///
-    /// Restores the three pieces of state that survive process
-    /// boundaries:
-    ///
-    /// 1. `session_id` — the persistence backend reloads the graph,
-    ///    todos, plan, usage, and cached context from this id.
-    /// 2. `execution_mode` — the resumed agent runs in the same
-    ///    auto / supervised / plan mode as before.
-    /// 3. `budget_spent_usd` — the built agent's `BudgetTracker` is
-    ///    seeded with the previously-consumed cost so over-budget
-    ///    detection fires at the correct accumulated total, not
-    ///    zero.
-    ///
-    /// The `session_usage` field on the checkpoint is not applied
-    /// here — the session's own usage accumulator is reloaded by
-    /// the persistence backend when the graph is materialized.
-    pub fn resume_from(mut self, checkpoint: crate::agent::AgentCheckpoint) -> Self {
+    /// Loads the full session (graph, messages, todos, plan) from the
+    /// persistence backend and restores execution mode + budget state.
+    /// Requires a `SessionManager` to have been set via
+    /// `.session_manager()` — without one, the session cannot be loaded.
+    pub async fn resume_from(
+        mut self,
+        checkpoint: crate::agent::AgentCheckpoint,
+    ) -> crate::Result<Self> {
+        let manager = self.session_manager.take().unwrap_or_default();
+        let session = manager.get(&checkpoint.session_id).await?;
+
+        let messages: Vec<crate::ir::Message> = session
+            .current_branch_messages()
+            .into_iter()
+            .map(|m| crate::ir::Message {
+                role: m.role,
+                content: m.content,
+            })
+            .collect();
+
+        self.initial_messages = Some(messages);
         self.resume_session_id = Some(checkpoint.session_id.to_string());
+        self.resumed_session = Some(session);
         self.execution_mode = checkpoint.execution_mode;
         self.resume_budget_spent = Some(checkpoint.budget_spent_usd);
-        self
+        self.session_manager = Some(manager);
+        Ok(self)
     }
 
     /// Sets initial messages for the conversation.

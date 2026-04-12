@@ -472,13 +472,13 @@ fn mock_llm_with_message(text: &str) -> Arc<dyn LlmCall> {
 /// Phase C-4: when the provider keeps returning
 /// [`crate::Error::StructuredOutputInvalid`], the agent must bail
 /// out with [`crate::Error::StructuredOutputExhausted`] once the
-/// `MAX_STRUCTURED_OUTPUT_RETRIES` budget is consumed instead of
+/// `max_structured_output_retries` budget is consumed instead of
 /// entering an unbounded retry loop.
 #[tokio::test]
 async fn test_structured_output_retry_budget_is_bounded() {
     use crate::client::mock::MockLlmCall as PublicMock;
 
-    // Enqueue exactly [MAX_STRUCTURED_OUTPUT_RETRIES] failures;
+    // Enqueue exactly `max_structured_output_retries` (3) failures;
     // the 3rd call should trip the cap and abort the turn.
     let mock = PublicMock::new()
         .then_error(crate::Error::StructuredOutputInvalid {
@@ -512,8 +512,10 @@ async fn test_structured_output_retry_budget_is_bounded() {
         } => {
             assert_eq!(
                 attempts,
-                super::execution::MAX_STRUCTURED_OUTPUT_RETRIES,
-                "cap matches module constant"
+                AgentConfig::default()
+                    .execution
+                    .max_structured_output_retries,
+                "cap matches config default"
             );
             assert_eq!(last_reason, "last miss");
         }
@@ -705,7 +707,7 @@ fn test_agent_config_default_values() {
     let config = AgentConfig::default();
     assert_eq!(config.execution.max_iterations, 100);
     assert!(config.execution.auto_compact);
-    assert!(config.execution.timeout.is_some());
+    assert!(config.execution.timeout > std::time::Duration::ZERO);
 }
 
 #[test]

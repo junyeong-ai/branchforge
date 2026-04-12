@@ -74,12 +74,7 @@ impl Agent {
         prompt: String,
         run_config: Option<RunConfig>,
     ) -> crate::Result<impl Stream<Item = crate::Result<AgentEvent>> + Send> {
-        let default_timeout = self
-            .runtime
-            .config
-            .execution
-            .timeout
-            .unwrap_or(std::time::Duration::from_secs(600));
+        let default_timeout = self.runtime.config.execution.timeout;
         let timeout = run_config
             .as_ref()
             .and_then(|rc| rc.timeout_override())
@@ -252,7 +247,7 @@ struct StreamState {
     recovery_attempts: u32,
     /// Phase C-4: bounded retry budget for structured-output
     /// schema validation failures within a single stream run.
-    /// Caps at [`super::execution::MAX_STRUCTURED_OUTPUT_RETRIES`]
+    /// Caps at the `max_structured_output_retries` config field
     /// before the state machine aborts with
     /// [`crate::Error::StructuredOutputExhausted`].
     structured_output_attempts: u32,
@@ -353,7 +348,14 @@ impl StreamState {
     fn check_structured_output_budget(&mut self, e: &crate::Error) -> Option<crate::Error> {
         if let crate::Error::StructuredOutputInvalid { reason, .. } = e {
             self.structured_output_attempts += 1;
-            if self.structured_output_attempts >= super::execution::MAX_STRUCTURED_OUTPUT_RETRIES {
+            if self.structured_output_attempts
+                >= self
+                    .cfg
+                    .runtime
+                    .config
+                    .execution
+                    .max_structured_output_retries
+            {
                 return Some(crate::Error::StructuredOutputExhausted {
                     attempts: self.structured_output_attempts,
                     last_reason: reason.clone(),
