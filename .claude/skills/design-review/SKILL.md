@@ -1,8 +1,8 @@
 ---
 name: design-review
 description: Axis-parameterized design review of Branchforge. Invoke for "프로젝트 심층 분석/리뷰/설계 검토/architecture review" requests. Runs ONE frozen axis against verified invariants and rejects findings contradicting .claude/review/findings_resolved.md or .claude/rules/architecture.md. Argument = axis name.
-allowed-tools: Read, Grep, Glob
-user-invocable: true
+allowed-tools: Read Grep Glob
+disable-model-invocation: true
 ---
 
 # Design Review (axis-parameterized)
