@@ -96,7 +96,19 @@ pub mod types;
 pub mod workspace;
 
 // =========================================================================
-// Core API re-exports (user-facing types)
+// Public API Surface
+// =========================================================================
+//
+// Tier 1 — Stable: always available, no feature gates. Breaking changes
+//          are SemVer majors.
+// Tier 2 — Feature-gated: behind `cfg(feature = "...")`. Present only
+//          when the feature is active. Still SemVer-stable within the
+//          feature.
+// Tier 3 — Internal: `pub(crate)` items not re-exported here. Accessible
+//          within the crate but invisible to downstream consumers.
+//          `GraphMaterializer` was demoted to Tier 3 in the Phase 1 audit.
+//
+// Adding a new re-export requires deciding which tier it belongs to.
 // =========================================================================
 
 pub use agent::{
