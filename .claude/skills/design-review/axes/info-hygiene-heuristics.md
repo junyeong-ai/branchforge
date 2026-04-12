@@ -22,8 +22,7 @@ Combined because both axes concern signal-to-noise — one in the outbound paylo
 - `regex` + `tree-sitter` dual-system in `bash/parser.rs` (invariant #5)
 - `first-match-wins` on multi-change events (cache-break schema changed → only first tool reported)
 - Identity fallback `contains("opus"|"sonnet"|"haiku")` in `ModelRegistry::resolve` (invariant #7)
-- Magic numeric threshold without Config field — `const DEFAULT_COMPACT_THRESHOLD: f32 = 0.8`, jitter `0.15 * (2*random - 1)`, `MAX_STRUCTURED_OUTPUT_RETRIES: u32 = 3`, `MAX_WATERMARK_WALKBACK: usize = 256`, `MAX_EXECUTION_LOG_SIZE: usize = 1000` (invariant #8)
-- Retry jitter factor without named config field or distribution doc
+- Magic numeric threshold without Config field — only flag constants that callers would reasonably tune. **Exempt**: `DEFAULT_COMPACT_THRESHOLD` (already a Config default), `MAX_WATERMARK_WALKBACK` (safety bound, not tunable), `DEFAULT_COMPACT_KEEP_MESSAGES` (already a Config default). **Fixed in 2026-04-12 PR**: `MAX_STRUCTURED_OUTPUT_RETRIES` (moved to ExecutionConfig), `MAX_EXECUTION_LOG_SIZE` (moved to ExecutionConfig).
 - String-based system/user boundary markers that user input could spoof
 - Marker-path project-root detection (`MARKERS.iter().filter(...).count() > 1`) instead of canonical root (`git rev-parse --show-toplevel` or `.claude/` discovery)
 

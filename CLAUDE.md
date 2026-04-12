@@ -30,8 +30,8 @@ All six gates must be green before shipping.
 ## Feature Flags
 
 ```bash
-cargo build                                     # default: coding-tools
-cargo build --no-default-features               # pure SDK core (zero cloud/DB deps)
+cargo build                                     # default: anthropic-direct (pure Layer 1)
+cargo build --features "coding-tools"           # local-fs + bash + tree-sitter
 cargo build --features "full"                   # all features except multimedia
 cargo build --all-features                      # full + multimedia
 ```
@@ -65,7 +65,7 @@ Module-specific rules in `.claude/rules/` auto-load when editing files matching 
 | `tools.md` | `Tool` trait, `ExecutionContext`, naming, cancellation |
 | `auth.md` | `CredentialProvider`, OAuth refresh, token storage |
 | `security.md` | `SecureFs`, `BashAnalyzer`, sandbox, resource limits |
-| `naming.md` | Type-suffix taxonomy, FSM terminology, "no dual systems" |
+| `naming.md` | Type-suffix taxonomy, FSM terminology, enum evolution contract |
 | `events.md` | EventBus fire-and-forget contract, StreamAggregator |
 
 ## Review Protocol

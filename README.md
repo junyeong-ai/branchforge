@@ -32,7 +32,7 @@ The project is designed around:
 | **2b — Coding tools** | `coding-tools` | Bash with tree-sitter AST validation, process scheduler, container detection, CLAUDE.md discovery, git context, `bash` subagent. Depends on Layer 2a. | Claude Code-class coding agents. |
 | **3 — Cloud providers** | `aws` / `gcp` / `azure` / `cloud-all` | Bedrock, Vertex (Gemini + Anthropic), Azure AI Foundry transport adapters. Depends on Layer 1. | Multi-cloud or enterprise deployments. |
 
-Default features: `coding-tools` (which transitively enables `local-fs`). Pure API users can opt out with `default-features = false` and pull in just `anthropic-direct`. See [`docs/architecture/layering.md`](docs/architecture/layering.md) for the full dependency contract.
+Default features: `anthropic-direct` (pure Layer 1 — zero filesystem/shell deps). For coding agents add `features = ["coding-tools"]` (transitively enables `local-fs`). See [`docs/architecture/layering.md`](docs/architecture/layering.md) for the full dependency contract.
 
 ## Documentation
 

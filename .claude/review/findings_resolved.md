@@ -2,6 +2,20 @@
 
 Findings already rejected with evidence or merged via PR. Design reviews must check this file before proposing a finding. Re-submission requires new refuting evidence.
 
+## Semantic Clusters
+
+Before proposing a finding, check whether it falls into an already-rejected **semantic cluster**. If the root concern matches a cluster below, discard unless new refuting evidence is attached.
+
+| Cluster ID | Root concern | Rejected IDs |
+|:---|:---|:---|
+| `code-exists` | Claiming code/type/trait does not exist without `Read` verification | F-rej-001, F-rej-008, F-rej-009 |
+| `naming-already-correct` | Proposing a rename that contradicts naming.md closed/open list | F-rej-002, F-rej-005 |
+| `invariant-contradiction` | Proposing a default/cache/blocking change that violates rules/*.md | F-rej-003, F-rej-004, F-rej-007 |
+| `already-decomposed` | Claiming config/builder/subagent needs decomposition when it already is | F-rej-006, F-rej-011, F-rej-012 |
+| `not-dual-system` | Claiming pipeline stages or defense-in-depth layers are dual systems | F-rej-010, F-rej-019 |
+| `scope-is-correct` | Claiming per-agent/per-session scope is global or needs consolidation | F-rej-014, F-rej-016, F-rej-017 |
+| `shutdown-already-wired` | Claiming spawned tasks escape shutdown when they use child tokens | F-rej-015, F-rej-018 |
+
 # Rejected Findings
 
 ## F-rej-001 · "LlmCall/Retry/FallingBack/CircuitBroken decorators are declared but not implemented"

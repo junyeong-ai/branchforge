@@ -1,6 +1,6 @@
 ---
-description: Long-term architecture invariants. Proposals contradicting this list auto-reject.
-paths: "src/**"
+paths:
+  - "src/**"
 ---
 
 # Architecture Invariants
@@ -13,7 +13,7 @@ paths: "src/**"
 
 4. **Capability honesty** — A codec declaring `json_schema: Native` must emit a wire-level schema on the send path. Enforced by `tests/codec_contract.rs::capability_honesty_*`.
 
-5. **No dual systems** — Introducing a new abstraction requires deleting the legacy in the **same PR**. No `// deprecated`, no feature-flagged shim, no parallel implementations. See `naming.md`.
+5. **No dual systems** — Introducing a new abstraction requires deleting the legacy in the **same PR**. No `// deprecated`, no feature-flagged shim, no parallel implementations.
 
 6. **Structured error classification** — HTTP status + parsed JSON body. `body.contains("ExceptionName")` on the raw body is forbidden: tool outputs containing the substring produce misclassification. Field-scoped substring matching (e.g. `parsed["__type"]`) is permitted when no structured code field exists.
 

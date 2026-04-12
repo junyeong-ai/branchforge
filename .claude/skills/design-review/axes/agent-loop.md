@@ -3,14 +3,12 @@
 ## Defect patterns
 
 ### Loop control
-- `execute_inner` body exceeding ~250 LOC (monolith re-growth)
-- Iteration limit via magic `const MAX_* = N` instead of `IterationGate` / `*Config`
-- Structured-output retry budget hardcoded (not configurable via gate)
+- `execute_inner` body exceeding 300 LOC with >5 distinct responsibility boundaries (monolith re-growth). Under 300 LOC or with clean phase separation is not a finding.
+- Execution-path thresholds as bare `const` rather than `*Config` fields — only flag constants that callers would reasonably want to tune. Safety bounds (e.g., `MAX_WATERMARK_WALKBACK`) and domain constants are exempt.
 - Tool call planning inlined instead of delegated to `ToolSelectionStrategy`
 
 ### Cost / observability
-- Cost accumulated in more than one place without a single `CostLedger` owner
-- Cache-hit discount calculated outside the ledger
+- Cost accumulated through genuinely independent computation paths (not just multiple scoped accumulators fed by the same source — see F-rej-014)
 - OTEL span missing stable attributes (`provider`, `model`, `tool_name`, `duration_ms`)
 - Metric defined but never `inc()`/`record()`'d
 - `emit_simple` used for a built-in `EventKind` (should be `emit_typed`)
