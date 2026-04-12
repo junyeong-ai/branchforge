@@ -147,24 +147,6 @@ mod tests {
     use super::*;
     use crate::authorization::{ElicitationResponse, HumanInteractionResult};
     use async_trait::async_trait;
-    use rmcp::model::ElicitationSchema;
-
-    fn form_request(prompt: &str) -> CreateElicitationRequestParams {
-        CreateElicitationRequestParams::FormElicitationParams {
-            meta: None,
-            message: prompt.to_string(),
-            requested_schema: ElicitationSchema::builder().build().unwrap(),
-        }
-    }
-
-    fn url_request(prompt: &str, url: &str) -> CreateElicitationRequestParams {
-        CreateElicitationRequestParams::UrlElicitationParams {
-            meta: None,
-            message: prompt.to_string(),
-            url: url.to_string(),
-            elicitation_id: "ely-1".into(),
-        }
-    }
 
     // `RequestContext` is opaque to outside crates (it's constructed
     // by the rmcp runtime during live message handling). We do not

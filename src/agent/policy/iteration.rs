@@ -27,7 +27,7 @@ pub struct IterationContext<'a> {
 
 /// Extension point for custom iteration-continue logic.
 ///
-/// The agent loop calls [`should_continue`] at the top of every
+/// The agent loop calls `should_continue` at the top of every
 /// iteration, before the budget preflight or any hook. Returning
 /// [`GateDecision::Stop`] exits the loop cleanly.
 ///

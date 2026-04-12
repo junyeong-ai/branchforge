@@ -408,15 +408,6 @@ impl Session {
         self.graph.append_node(branch_id, kind, payload)
     }
 
-    /// Fork a new branch from the given node on the same graph.
-    pub(crate) fn fork_graph_branch(
-        &mut self,
-        fork_from: Option<crate::graph::NodeId>,
-        name: &str,
-    ) -> Result<crate::graph::BranchId, crate::graph::GraphError> {
-        self.graph.fork_branch(fork_from, name)
-    }
-
     /// Soft-archive graph nodes before `watermark`. See
     /// [`SessionGraph::archive_before`] for the watermark semantics and
     /// tool-call pair walkback guarantee.

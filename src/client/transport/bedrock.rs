@@ -207,31 +207,29 @@ impl ModelTransport for BedrockTransport {
         // Parse the `__type` field and match exact strings — never substring-match
         // on the raw body (invariant #6: tool outputs containing an exception
         // name would produce misclassification).
-        if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(body) {
-            if let Some(err_type) = parsed.get("__type").and_then(|v| v.as_str()) {
-                return match err_type {
-                    "ThrottlingException" | "TooManyRequestsException" => (
-                        ProviderErrorKind::RateLimit,
-                        Some("Bedrock throttled the request — back off and retry"),
-                    ),
-                    "ServiceUnavailableException" | "ModelStreamErrorException" => (
-                        ProviderErrorKind::Server,
-                        Some("Bedrock service temporarily unavailable — retry with backoff"),
-                    ),
-                    "AccessDeniedException" => (
-                        ProviderErrorKind::Auth,
-                        Some("Bedrock access denied — check IAM policy for bedrock:InvokeModel*"),
-                    ),
-                    "ModelNotReadyException" => (
-                        ProviderErrorKind::Server,
-                        Some(
-                            "Bedrock model not ready — the model may be warming up, retry shortly",
-                        ),
-                    ),
-                    "ValidationException" => (ProviderErrorKind::BadRequest, None),
-                    _ => super::default_classify_status(status),
-                };
-            }
+        if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(body)
+            && let Some(err_type) = parsed.get("__type").and_then(|v| v.as_str())
+        {
+            return match err_type {
+                "ThrottlingException" | "TooManyRequestsException" => (
+                    ProviderErrorKind::RateLimit,
+                    Some("Bedrock throttled the request — back off and retry"),
+                ),
+                "ServiceUnavailableException" | "ModelStreamErrorException" => (
+                    ProviderErrorKind::Server,
+                    Some("Bedrock service temporarily unavailable — retry with backoff"),
+                ),
+                "AccessDeniedException" => (
+                    ProviderErrorKind::Auth,
+                    Some("Bedrock access denied — check IAM policy for bedrock:InvokeModel*"),
+                ),
+                "ModelNotReadyException" => (
+                    ProviderErrorKind::Server,
+                    Some("Bedrock model not ready — the model may be warming up, retry shortly"),
+                ),
+                "ValidationException" => (ProviderErrorKind::BadRequest, None),
+                _ => super::default_classify_status(status),
+            };
         }
         super::default_classify_status(status)
     }

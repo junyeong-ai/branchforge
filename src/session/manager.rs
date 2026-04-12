@@ -1570,7 +1570,8 @@ mod tests {
                 .graph
                 .current_branch_nodes(session.graph.primary_branch)[0]
                 .id;
-            let branch = session.fork_graph_branch(Some(root), "right").unwrap();
+            // fsm-rebuild: test directly forks on the graph for branch-coverage
+            let branch = session.graph.fork_branch(Some(root), "right").unwrap();
             session
                 .append_graph_node(
                     branch,
