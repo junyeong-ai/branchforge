@@ -40,6 +40,12 @@ Findings already rejected with evidence or merged via PR. Design reviews must ch
   - Only real violation: `ProviderErrorKind` at `src/lib.rs:388` (1 item, fixed in Phase 0-2)
 - **Lesson**: Before proposing "missing attribute X on enum Y", grep the enum definition directly. Don't trust cross-session memory of enum attribute state.
 
+## F-rej-011 · "AgentBuilder needs ConfigFragment trait and 76→15 method reduction"
+- **Origin**: Round-3/Round-4 analysis (task 3-1..3-5)
+- **Refutation**: `AgentConfig` already HAS sub-config fluent setters (`.model()`, `.execution()`, `.security()`, `.budget()`, `.prompt()`, `.cache()`, `.identity()`, `.stream()`) at `src/agent/config.rs:563-599`. `AgentBuilder::agent_config(config: AgentConfig)` at `builder.rs:206` already accepts a full config. Individual builder setters (`.model()`, `.tools()`, `.working_dir()`, etc.) are OPTIONAL convenience wrappers that don't need to exist for the pattern to work — adding a new field to a sub-config struct does NOT require adding a builder method.
+- **What IS true**: the builder has 78 methods, which is large. But the growth problem ("new config field = new builder method") is already solved by the sub-config pattern. The convenience methods are ergonomically valuable for common 2-3 field use cases. Deleting them would harm discoverability.
+- **Remaining action**: remove truly unused individual setters (0 external callers) and document the sub-config path as the preferred approach for complex configuration.
+
 ## F-rej-010 · "authorization/rules.rs + dsl.rs is a dual rule source — merge"
 - **Origin**: Round-3 analysis (task 2-2)
 - **Refutation**: `rules.rs` (738 LOC) is the policy **evaluator** (`ToolPolicy → PermissionDecision`). `dsl.rs` (646 LOC) is the DSL **parser** (`string → PermissionRuleSyntax`). They are a pipeline (`dsl parses → rules evaluates`), not a dual system. Merging them would violate single-responsibility.

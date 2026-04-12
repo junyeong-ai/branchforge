@@ -16,7 +16,7 @@ Empirical code facts captured from direct reads. Design-review findings that con
 | id | file:line | defect | phase |
 |---|---|---|---|
 | D1 | `lib.rs:144-148` | `GraphMaterializer`/`NodeKind`/`ReplayInput` leaked as public | P1-1 |
-| D2 | `src/agent/options/builder.rs` (1488 LOC, 76 pub fn) | Builder surface bloat | P3 |
+| D2 | `src/agent/options/builder.rs` (1488 LOC, 78 pub fn) | Builder has many methods but `AgentConfig` sub-config pattern already prevents growth. F-rej-011. | ~~P3~~ resolved |
 | D3 | `src/agent/execution.rs:136` (`execute_inner`, 884 LOC) | Loop monolith, extract `IterationGate`/`ToolSelectionStrategy` | P4-1..4-3 |
 | D4 | `src/models/registry.rs:72-77` | `contains("opus"\|"sonnet"\|"haiku")` substring fallback | P7.5-1 |
 | D5 | `src/security/bash/parser.rs:41-76` | regex + tree-sitter dual system | P7.5-2 |
